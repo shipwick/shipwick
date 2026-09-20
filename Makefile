@@ -3,6 +3,11 @@ LDFLAGS := -s -w -X github.com/shipwick/shipwick/pkg/version.Version=$(VERSION)
 
 .PHONY: dev build test test-race test-race-docker test-integration test-dashboard lint clean help
 
+# A bare `make` builds. It must never be `dev`, which starts the stack and does
+# not return: tools that build a repository by running `make` — CodeQL's Go
+# autobuilder is one — would wait for it until their time limit.
+.DEFAULT_GOAL := build
+
 ## dev: run the full development stack (dashboard :3000, agent :9000, proxy :8080/:8443)
 dev:
 	docker compose up --build
