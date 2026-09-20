@@ -38,7 +38,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	rt := dockertest.New()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := deploy.New(st, rt, deploy.Options{StabilizeWindow: 20 * time.Millisecond, Logger: quiet})
+	engine := deploy.New(st, rt, deploy.Options{StabilizeWindow: 20 * time.Millisecond, NameSettle: time.Millisecond, Logger: quiet})
 
 	logs := &bytes.Buffer{}
 	apiServer := New(engine, sha256.Sum256([]byte(testToken)), slog.New(slog.NewTextHandler(logs, nil)))

@@ -36,8 +36,10 @@ type Fake struct {
 	PullDelay time.Duration
 	// StopDelay simulates a process that takes its time to exit on SIGTERM.
 	StopDelay time.Duration
-	// NamesErr makes SetServiceNames fail.
-	NamesErr error
+	// NamesErr makes SetServiceNames fail. NamesDelay is how long it takes,
+	// which is how long a second caller for the same container has to collide.
+	NamesErr   error
+	NamesDelay time.Duration
 
 	mu         sync.Mutex
 	nextID     int
@@ -51,6 +53,8 @@ type Fake struct {
 
 	statsCalls, blockingStatsCalls int
 	nameChanges                    int
+	renaming                       map[string]bool
+	namedAt, stoppedAt             map[string]time.Time // by container name
 }
 
 func New() *Fake {
@@ -62,6 +66,9 @@ func New() *Fake {
 		local:       map[string]bool{},
 		starts:      map[string]int{},
 		ips:         map[string]string{},
+		renaming:    map[string]bool{},
+		namedAt:     map[string]time.Time{},
+		stoppedAt:   map[string]time.Time{},
 	}
 }
 
@@ -202,15 +209,9 @@ func (f *Fake) StopContainer(_ context.Context, id string, _ time.Duration) erro
 	defer f.mu.Unlock()
 	if c, ok := f.containers[id]; ok && c.Running {
 		c.Running, c.State, c.ExitCode, c.IP = false, "exited", 0, ""
+		f.stoppedAt[c.Name] = time.Now()
 	}
 	return nil
-}
-
-func (f *Fake) RestartContainer(ctx context.Context, id string, timeout time.Duration) error {
-	if err := f.StopContainer(ctx, id, timeout); err != nil {
-		return err
-	}
-	return f.StartContainer(ctx, id)
 }
 
 // Starts reports how many times StartContainer succeeded for a container,
@@ -348,17 +349,36 @@ func (f *Fake) StatsCalls() (total, blocking int) {
 // network, like the real runtime: any container, running or not.
 func (f *Fake) SetServiceNames(_ context.Context, id string, names []string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.NamesErr != nil {
+		f.mu.Unlock()
 		return f.NamesErr
 	}
-	c, ok := f.containers[id]
-	if !ok {
+	if _, ok := f.containers[id]; !ok {
+		f.mu.Unlock()
 		return docker.ErrNotFound
 	}
-	c.OnServicesNetwork = true
-	c.ServiceNames = append([]string(nil), names...)
-	f.nameChanges++
+	// Leaving the network and joining it again are two calls to the daemon.
+	// A second caller in between finds the endpoint already there.
+	if f.renaming[id] {
+		f.mu.Unlock()
+		return fmt.Errorf("endpoint with name %s already exists in network services", id)
+	}
+	f.renaming[id] = true
+	f.mu.Unlock()
+
+	time.Sleep(f.NamesDelay)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.renaming, id)
+	if c, ok := f.containers[id]; ok {
+		c.OnServicesNetwork = true
+		c.ServiceNames = append([]string(nil), names...)
+		f.nameChanges++
+		if len(names) > 0 {
+			f.namedAt[c.Name] = time.Now()
+		}
+	}
 	return nil
 }
 
@@ -400,4 +420,18 @@ func (f *Fake) LeaveServicesNetwork(id string) {
 		c.OnServicesNetwork = false
 		c.ServiceNames = nil
 	}
+}
+
+// NamedAt and StoppedAt report when a container, by name, was last given names
+// and when it was stopped; the zero time if it never was.
+func (f *Fake) NamedAt(name string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.namedAt[name]
+}
+
+func (f *Fake) StoppedAt(name string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stoppedAt[name]
 }

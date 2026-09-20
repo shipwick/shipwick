@@ -322,14 +322,6 @@ func (r *Runtime) StopContainer(ctx context.Context, id string, timeout time.Dur
 	return nil
 }
 
-func (r *Runtime) RestartContainer(ctx context.Context, id string, timeout time.Duration) error {
-	seconds := int(timeout.Seconds())
-	if _, err := r.cli.ContainerRestart(ctx, id, client.ContainerRestartOptions{Timeout: &seconds}); err != nil {
-		return fmt.Errorf("restart container: %w", wrapNotFound(err))
-	}
-	return nil
-}
-
 // RemoveContainer force-removes a container. Removing a missing container is
 // not an error, which keeps cleanup paths idempotent.
 func (r *Runtime) RemoveContainer(ctx context.Context, id string) error {
@@ -368,7 +360,14 @@ func (r *Runtime) InspectContainer(ctx context.Context, id string) (Container, e
 		}
 		if ep := in.NetworkSettings.Networks[r.services]; ep != nil {
 			c.OnServicesNetwork = true
-			c.ServiceNames = append([]string(nil), ep.Aliases...)
+			for _, alias := range ep.Aliases {
+				// Older daemons list the container's own short ID among the
+				// aliases; it is not a name anybody gave it.
+				if !strings.HasPrefix(in.ID, alias) {
+					c.ServiceNames = append(c.ServiceNames, alias)
+				}
+			}
+			sort.Strings(c.ServiceNames)
 		}
 	}
 	return c, nil

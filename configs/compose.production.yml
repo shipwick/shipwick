@@ -69,7 +69,9 @@ services:
       # it a TCP port on this network: application containers could reach it,
       # and whoever reaches it controls all routing and the certificate store.
       - caddy-admin:/run/caddy
-    networks: [shipwick]
+    # On the services network Caddy finds the replicas of an application by
+    # the application's name; which replicas carry it is the agent's doing.
+    networks: [shipwick, shipwick-services]
     restart: unless-stopped
 
   dashboard:
@@ -97,3 +99,6 @@ volumes:
 networks:
   shipwick:
     name: shipwick
+  # Named after the first: the agent derives it as "<network>-services".
+  shipwick-services:
+    name: shipwick-services
