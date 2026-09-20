@@ -481,10 +481,11 @@ Internet ──▶ Caddy :443 ──▶ shipwick_my-api_7_1:8080
 - **Only healthy replicas receive traffic.** A replica that crashes or fails
   its health check leaves the rotation within a second and rejoins once it
   passes again. Requests are spread round-robin.
-- **Deployments are zero-downtime.** A new replica joins the rotation only once
-  it is healthy, and the old one it replaces leaves the rotation *before* it is
-  stopped. If the proxy cannot be updated, the deployment fails and is undone.
-  (Measured: a rolling redeploy under constant load, 100 of 100 requests `200`.)
+- **The application stays available through a deployment.** A new replica
+  joins the rotation only once it is healthy, and the old one it replaces
+  leaves the rotation *before* it is stopped: no request goes to a replica that
+  is not ready, and none that is being served is cut off. If the proxy cannot
+  be updated, the deployment fails and is undone.
 - **No healthy replica, or `shipwick stop`:** the domain answers `503` rather
   than timing out, and keeps its certificate. An address no application serves
   answers `404`.
@@ -497,9 +498,21 @@ What a crash costs: requests in flight on the replica that died are lost with
 it, and the one request that discovers it is gone may get a `502` within half a
 second; everything after it goes to the surviving replicas.
 
+What a deployment costs: each replica that is replaced is one reload of Caddy's
+configuration, and Caddy resets connections that are being *established* at
+that instant — a TLS handshake in progress, a first request not yet read.
+Established connections are unaffected, so browsers and clients that reuse
+connections rarely notice; a client that opens a new connection for every
+request is the worst case. Measured that way, against a server 100 ms away,
+through two minutes of back-to-back rolling redeploys: 5 of 233 requests were
+lost, all at those instants, and none was answered with an error status. Over
+loopback, where a connection takes a millisecond to establish, the same test
+loses none. Rollouts that do not
+reload the proxy are at the top of the [roadmap](#14-roadmap).
+
 **The agent owns Caddy's configuration entirely** — it regenerates and reloads
-the full config (gracefully; connections are not dropped) whenever routing
-changes, and restores it within seconds should Caddy ever come back without it.
+the full config whenever routing changes, and restores it within seconds should
+Caddy ever come back without it.
 Do not edit it by hand: it would be overwritten. Custom Caddy directives are
 not supported yet.
 
@@ -638,6 +651,9 @@ What 0.1.0 does is this document; what changed between versions is in the
 
 Next, roughly in this order:
 
+- **Rollouts that do not reload the proxy.** Replacing a replica reloads Caddy's
+  configuration today, and a connection being established at that instant is
+  reset (see [Caddy](#11-caddy)).
 - **Encrypted secrets.** `env` values are stored in plain text in the agent's
   SQLite file today.
 - **Volumes**, so that stateful applications can be deployed too.

@@ -323,9 +323,25 @@ predecessor is touched.
 `stop` follows the same principle in reverse: routing goes to "no upstreams"
 (`503`) first, SIGTERM second, so no request is cut off mid-flight.
 
-**What a crash costs.** Planned changes are lossless (measured under constant
-load: 100/100 `200` through a rolling redeploy, 76/76 through a rollout that
-failed half-way and was rolled back). An unplanned one is not, and cannot quite be:
+**What a reload costs.** A planned change loses no request that is being
+served: over loopback, under constant load, 100/100 `200` through a rolling
+redeploy and 76/76 through a rollout that failed half-way and was rolled back.
+Over a real network that is not the whole story. Every change of routing is a
+`POST /load`, Caddy replaces its servers on each one, and connections that are
+being *established* at that instant — a TLS handshake in progress, a first
+request not yet read — are reset. The client sees a connection error, never an
+error status. Measured from 100 ms away with a new connection per request, the
+worst case: 5 of 233 requests through two minutes of back-to-back rolling
+redeploys, every one of them at a load. It reproduces with Caddy alone, from
+2.7 to 2.11, and neither `grace_period` nor `shutdown_delay` changes it; over
+loopback a connection is established in a millisecond, which is why it cannot
+be seen there. Clients that keep connections open are affected far less. A
+rollout already costs only one load per replica replaced; the way to zero is not
+to reload at all — upstream names that stay the same from one deployment to the
+next and that a replica takes over only when it is ready — and that is where
+routing is headed.
+
+**What a crash costs.** An unplanned change is not lossless, and cannot quite be:
 requests in flight on the dying replica are gone, and the one request that
 discovers the dead upstream may get a `502`. Caddy would normally retry it on
 another replica, but it abandons retries in progress when its config is
