@@ -8,6 +8,10 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- The CLI can be installed with Homebrew: `brew install shipwick/tap/shipwick`.
+
 ## [0.1.0] - 2026-09-20
 
 The first release: production deployments on a single server, without

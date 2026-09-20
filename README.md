@@ -122,6 +122,8 @@ On your laptop or in CI, only the CLI:
 curl -fsSL https://get.shipwick.com | sh -s -- --cli
 ```
 
+Or with Homebrew, on macOS and Linux: `brew install shipwick/tap/shipwick`.
+
 Everything the installer fetches comes from one
 [release](https://github.com/shipwick/shipwick/releases) and is verified against
 its checksums; the images are pinned to that release, so a server runs the

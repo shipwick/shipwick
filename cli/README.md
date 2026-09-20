@@ -3,8 +3,13 @@
 The Shipwick command-line client.
 
 ```bash
-go build -o bin/shipwick ./cli/cmd/shipwick      # or: make build
+curl -fsSL https://get.shipwick.com | sh -s -- --cli    # Linux, macOS
+brew install shipwick/tap/shipwick                      # Homebrew
+go build -o bin/shipwick ./cli/cmd/shipwick             # from source; or: make build
 ```
+
+On Windows, download `shipwick_windows_amd64.exe` from the
+[releases](https://github.com/shipwick/shipwick/releases).
 
 ## Commands
 
