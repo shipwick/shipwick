@@ -146,8 +146,14 @@ type Engine struct {
 	mu     sync.Mutex
 	closed bool
 	locks  map[string]*appLock // applications with an operation in progress
-	wg     sync.WaitGroup      // one count per held lock
-	bg     sync.WaitGroup      // the supervisor loop
+	// ops counts operations in progress: one per lock taken, until the
+	// operation is done (a deployment outlives its lock by its bookkeeping).
+	// A counter under mu rather than a WaitGroup, because Wait may be called
+	// at any time — also while the supervisor is starting new operations,
+	// which a WaitGroup does not allow once its counter has reached zero.
+	ops  int
+	idle *sync.Cond     // on mu; signalled when ops drops to zero
+	bg   sync.WaitGroup // the supervisor loop
 
 	sup     *supervisor
 	metrics *metricsCache
@@ -177,6 +183,7 @@ func New(st *store.Store, rt Runtime, opts Options) *Engine {
 
 		routeOverrides: map[string]routeOverride{},
 	}
+	e.idle = sync.NewCond(&e.mu)
 	e.sup = newSupervisor(e)
 	e.metrics = newMetricsCache()
 	return e
@@ -226,13 +233,23 @@ func (e *Engine) tryLock(app string, bySupervisor bool) (wait <-chan struct{}, e
 	e.locks[app] = &appLock{bySupervisor: bySupervisor, released: make(chan struct{})}
 	// Counted under the same mutex that guards closed, so Shutdown can never
 	// start waiting while an operation is about to begin.
-	e.wg.Add(1)
+	e.ops++
 	return nil, nil
 }
 
 func (e *Engine) unlock(app string) {
 	e.release(app)
-	e.wg.Done()
+	e.opDone()
+}
+
+// opDone ends an operation begun by a successful tryLock.
+func (e *Engine) opDone() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ops--
+	if e.ops == 0 {
+		e.idle.Broadcast()
+	}
 }
 
 // release frees the application for the next operation without ending the
@@ -288,7 +305,7 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 	e.log.Info("deployment created", "app", d.Application, "deployment", d.ID, "version", d.Version, "kind", d.Kind)
 
 	go func() {
-		defer e.wg.Done()
+		defer e.opDone()
 		e.run(d)
 
 		// completed_at is the signal clients wait for before issuing the next
@@ -306,7 +323,11 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 // Wait blocks until every operation in progress, background deployments
 // included, has finished.
 func (e *Engine) Wait() {
-	e.wg.Wait()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for e.ops > 0 {
+		e.idle.Wait()
+	}
 }
 
 // Shutdown rejects new operations, aborts in-flight deployments (each is
@@ -320,7 +341,7 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 
 	done := make(chan struct{})
 	go func() {
-		e.wg.Wait()
+		e.Wait()
 		e.bg.Wait()         // the supervisor loop: no more probes are launched after this
 		e.sup.probes.Wait() // in-flight probes may still record events
 		close(done)
