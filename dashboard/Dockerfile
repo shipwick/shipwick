@@ -8,7 +8,7 @@
 # ---- build -------------------------------------------------------------------
 # Built on the builder's own architecture: .output is plain JavaScript (no
 # native modules), so only the runtime stage differs per platform.
-FROM --platform=$BUILDPLATFORM node:24-alpine AS build
+FROM --platform=$BUILDPLATFORM node:25-alpine AS build
 WORKDIR /app
 
 # Dependencies first, so this layer is cached until the lockfile changes.
@@ -24,7 +24,7 @@ RUN npm run build
 # ---- runtime -----------------------------------------------------------------
 # .output is self-contained (Nitro bundles and traces its dependencies):
 # no node_modules, no npm install, no source in the final image.
-FROM node:24-alpine AS runtime
+FROM node:25-alpine AS runtime
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
