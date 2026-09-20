@@ -227,12 +227,29 @@ func (r *rollout) swap(ctx context.Context, ready []store.Replica) error {
 		serving = append(serving, routeMember{replica: rep, port: d.Spec.Port})
 	}
 
-	// Routing first, retiring second: an old replica must be out of rotation
-	// before it gets its SIGTERM.
+	// Routing first, retiring second. The newcomers get the application's
+	// names; the outgoing replicas keep theirs until they stop, when Docker's
+	// DNS drops them by itself. Taking the names away first would mean taking
+	// them off the network, and cut the requests they are serving.
 	r.serving = serving
 	e.routeVia(d.Application, routeOverride{domain: d.Spec.Domain, members: serving, desired: r.desired()})
 	if err := e.SyncProxy(ctx); err != nil {
-		return fmt.Errorf("could not route %s to the new version: %w", d.Spec.Domain, err)
+		what := d.Application
+		if d.Spec.Domain != "" {
+			what = d.Spec.Domain
+		}
+		return fmt.Errorf("could not route %s to the new version: %w", what, err)
+	}
+	if len(ready) > 0 && len(outgoing) > 0 {
+		// Let the proxy's next lookup find the newcomers before the replicas
+		// it knows stop answering. Whenever there are newcomers, not only when
+		// this call named them: the supervisor's tick syncs routing too, and
+		// may have been the one to do it a moment ago.
+		select {
+		case <-time.After(e.opts.NameSettle):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	if len(outgoing) > 0 {
