@@ -87,7 +87,8 @@ Details: [docs/architecture.md](docs/architecture.md) · API: [docs/api.md](docs
 
 ## 4. Installation
 
-On the server (Linux, with Docker already installed), as root:
+On the server (Linux, with Docker already installed, ports 80 and 443 free —
+no other web server or reverse proxy), as root:
 
 ```bash
 curl -fsSL https://get.shipwick.com | sh

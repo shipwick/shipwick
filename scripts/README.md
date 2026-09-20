@@ -13,6 +13,8 @@ What it does on a server:
 
 1. Checks for Linux, root, a running Docker and the Compose plugin. It does
    **not** install Docker: that is the server owner's decision.
+   Then, before it writes anything, that the HTTP and HTTPS ports are free —
+   unless its own Caddy holds them, which is an upgrade.
 2. Writes `/opt/shipwick/compose.yml`: the release's `compose.production.yml`,
    in which both images are pinned to the release's version. Verified against
    the release's `checksums.txt` before it replaces anything.

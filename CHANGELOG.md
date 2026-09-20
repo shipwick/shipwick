@@ -12,6 +12,18 @@ says so under **Changed** and explains how to upgrade.
 
 - The CLI can be installed with Homebrew: `brew install shipwick/tap/shipwick`.
 
+### Fixed
+
+- The installer checks that ports 80 and 443 are free before it changes
+  anything, and says what holds them. It used to write its files, start half of
+  the services and stop at Docker's error.
+- Run again after a first run that did not finish, the installer says where the
+  API token is; it used to show it only in the run that generated it.
+- `SHIPWICK_HTTP_PORT`, `SHIPWICK_HTTPS_PORT` and the image overrides given to
+  the installer are kept in `.env`, so an upgrade does not move the proxy back
+  to the default ports.
+- The installer works with BusyBox `wget` (Alpine without curl).
+
 ## [0.1.0] - 2026-09-20
 
 The first release: production deployments on a single server, without

@@ -51,7 +51,13 @@ download() {
     if have curl; then
         curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp" "$1" || { rm -f "$tmp"; return 1; }
     elif have wget; then
-        wget -q --https-only -O "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+        # --https-only keeps redirects on HTTPS too. BusyBox wget (Alpine) does
+        # not have it; what it downloads is still checked against the release's
+        # checksums before anything is installed.
+        https_only=""
+        if wget --help 2>&1 | grep -q -- --https-only; then https_only="--https-only"; fi
+        # shellcheck disable=SC2086  # one optional flag, deliberately unquoted
+        wget -q $https_only -O "$tmp" "$1" || { rm -f "$tmp"; return 1; }
     else
         die "Neither curl nor wget is installed."
     fi
@@ -171,6 +177,37 @@ check_server_requirements() {
     step "Docker $(docker version --format '{{.Server.Version}}') with Compose $(docker compose version --short)"
 }
 
+# setting NAME DEFAULT — NAME from the environment, else from an existing .env.
+setting() {
+    eval "value=\${$1:-}"
+    if [ -z "$value" ] && [ -f "$INSTALL_DIR/.env" ]; then
+        value="$(sed -n "s/^$1=//p" "$INSTALL_DIR/.env" | tail -n 1)"
+    fi
+    printf '%s' "${value:-$2}"
+}
+
+# Caddy needs the HTTP and HTTPS ports to itself. Found out now, that is one
+# clear sentence; found out by Docker, it is half a started stack.
+check_ports() {
+    # On an upgrade the ports are held by our own Caddy.
+    if [ -n "$(docker ps -q --filter label=com.docker.compose.project=shipwick --filter label=com.docker.compose.service=caddy)" ]; then
+        return 0
+    fi
+    for port in "$(setting SHIPWICK_HTTP_PORT 80)" "$(setting SHIPWICK_HTTPS_PORT 443)"; do
+        holder="$(docker ps --filter "publish=$port" --format '{{.Names}} ({{.Image}})' | head -n 1)"
+        if [ -n "$holder" ]; then
+            holder="the container $holder"
+        elif have ss && [ -n "$(ss -H -ltn "sport = :$port" 2>/dev/null)" ]; then
+            holder="a process on this server (find it with:  ss -ltnp 'sport = :$port')"
+        else
+            continue
+        fi
+        die "Port $port is already in use by $holder.
+  Shipwick's reverse proxy needs ports 80 and 443: certificates are issued and renewed through them.
+  Stop what is using the port, or install Shipwick on a server where both are free. Nothing was changed."
+    done
+}
+
 write_env() {
     env_file="$INSTALL_DIR/.env"
     if [ -f "$env_file" ]; then
@@ -208,12 +245,19 @@ SHIPWICK_AGENT_TOKEN=$GENERATED_TOKEN
 SHIPWICK_AGENT_DOMAIN=$SHIPWICK_AGENT_DOMAIN
 SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
+      # Settings given for this run have to outlive it: the next run, an
+      # upgrade, must not quietly move the proxy back to the default ports.
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE; do
+          eval "value=\${$name:-}"
+          [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
+      done
     )
     step "Wrote $env_file"
 }
 
 install_server() {
     check_server_requirements
+    check_ports
 
     ( umask 077; mkdir -p "$INSTALL_DIR" )
     chmod 0700 "$INSTALL_DIR"
@@ -278,6 +322,8 @@ print_summary() {
     if [ -n "${GENERATED_TOKEN:-}" ]; then
         info "${BOLD}API token${RESET} (also in $INSTALL_DIR/.env — it is root on this server, treat it so):"
         printf '\n      %s\n\n' "$GENERATED_TOKEN"
+    else
+        info "Your API token is unchanged: SHIPWICK_AGENT_TOKEN in $INSTALL_DIR/.env"
     fi
     if [ -n "$agent_domain" ]; then
         info "From your laptop or CI:   shipwick login --url https://$agent_domain"
