@@ -19,6 +19,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 )
 
@@ -53,6 +54,10 @@ type Container struct {
 	ExitCode  int
 	OOMKilled bool
 	StartedAt *time.Time
+	// OnServicesNetwork is false for a replica created before the services
+	// network existed. ServiceNames are the names it answers to there.
+	OnServicesNetwork bool
+	ServiceNames      []string
 }
 
 type LogEntry struct {
@@ -74,6 +79,7 @@ type Info struct {
 type Runtime struct {
 	cli        *client.Client
 	network    string
+	services   string
 	configPath string
 }
 
@@ -84,8 +90,16 @@ func New(network string) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
-	return &Runtime{cli: cli, network: network, configPath: dockerConfigPath()}, nil
+	return &Runtime{cli: cli, network: network, services: ServicesNetwork(network), configPath: dockerConfigPath()}, nil
 }
+
+// ServicesNetwork names the second network of an installation. Every replica
+// is on it from birth, but carries its application's names there only while it
+// is ready: those names are how the reverse proxy and other applications find
+// it. They cannot live on the main network, because Docker sets an endpoint's
+// aliases when it is connected and never afterwards — to gain or lose one, a
+// replica would have to leave the network that holds its database connections.
+func ServicesNetwork(network string) string { return network + "-services" }
 
 func (r *Runtime) Close() error {
 	return r.cli.Close()
@@ -114,23 +128,32 @@ func (r *Runtime) Info(ctx context.Context) (Info, error) {
 	}, nil
 }
 
-// EnsureNetwork creates the bridge network shared by application containers
-// and the reverse proxy, if it does not exist yet.
+// EnsureNetwork creates the two bridge networks of an installation, if they do
+// not exist yet.
 func (r *Runtime) EnsureNetwork(ctx context.Context) error {
-	_, err := r.cli.NetworkInspect(ctx, r.network, client.NetworkInspectOptions{})
+	for _, name := range []string{r.network, r.services} {
+		if err := r.ensureNetwork(ctx, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) ensureNetwork(ctx context.Context, name string) error {
+	_, err := r.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 	if err == nil {
 		return nil
 	}
 	if !cerrdefs.IsNotFound(err) {
-		return fmt.Errorf("inspect network %s: %w", r.network, err)
+		return fmt.Errorf("inspect network %s: %w", name, err)
 	}
-	_, err = r.cli.NetworkCreate(ctx, r.network, client.NetworkCreateOptions{
+	_, err = r.cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{LabelManaged: "true"},
 	})
 	// Lost a creation race: someone else made it, which is just as good.
 	if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsAlreadyExists(err) {
-		return fmt.Errorf("create network %s: %w", r.network, err)
+		return fmt.Errorf("create network %s: %w", name, err)
 	}
 	return nil
 }
@@ -237,7 +260,48 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 	if err != nil {
 		return "", "", fmt.Errorf("create container %s: %w", name, err)
 	}
+	// On the services network from birth, nameless: the replica can find other
+	// applications while it starts, and nobody can find it until it is ready.
+	if err := r.connectServices(ctx, res.ID, nil); err != nil {
+		_ = r.RemoveContainer(context.WithoutCancel(ctx), res.ID)
+		return "", "", fmt.Errorf("create container %s: %w", name, err)
+	}
 	return res.ID, name, nil
+}
+
+// SetServiceNames makes names the DNS names of the container on the services
+// network — all of them, replacing any it had; none takes it out of service
+// discovery without touching its other connections.
+//
+// Docker cannot change the aliases of a connected endpoint, so this leaves the
+// services network and joins it again. Whatever the container had open over
+// that network is cut; what it holds over the main network — its database, the
+// agent's health probes — is not.
+func (r *Runtime) SetServiceNames(ctx context.Context, id string, names []string) error {
+	_, err := r.cli.NetworkDisconnect(ctx, r.services, client.NetworkDisconnectOptions{Container: id, Force: true})
+	// Not connected is where an installation that predates the services
+	// network starts from, and where a failed earlier attempt leaves things.
+	if err != nil && !cerrdefs.IsNotFound(err) && !isNotConnected(err) {
+		return fmt.Errorf("leave network %s: %w", r.services, wrapNotFound(err))
+	}
+	return r.connectServices(ctx, id, names)
+}
+
+func (r *Runtime) connectServices(ctx context.Context, id string, names []string) error {
+	_, err := r.cli.NetworkConnect(ctx, r.services, client.NetworkConnectOptions{
+		Container:      id,
+		EndpointConfig: &network.EndpointSettings{Aliases: names},
+	})
+	if err != nil {
+		return fmt.Errorf("join network %s: %w", r.services, wrapNotFound(err))
+	}
+	return nil
+}
+
+// isNotConnected recognizes Docker's answer to disconnecting a container from
+// a network it is not on, which has no error type of its own.
+func isNotConnected(err error) bool {
+	return strings.Contains(err.Error(), "is not connected to")
 }
 
 func (r *Runtime) StartContainer(ctx context.Context, id string) error {
@@ -301,6 +365,10 @@ func (r *Runtime) InspectContainer(ctx context.Context, id string) (Container, e
 	if in.NetworkSettings != nil {
 		if ep := in.NetworkSettings.Networks[r.network]; ep != nil && ep.IPAddress.IsValid() {
 			c.IP = ep.IPAddress.String()
+		}
+		if ep := in.NetworkSettings.Networks[r.services]; ep != nil {
+			c.OnServicesNetwork = true
+			c.ServiceNames = append([]string(nil), ep.Aliases...)
 		}
 	}
 	return c, nil

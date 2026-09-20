@@ -36,6 +36,8 @@ type Fake struct {
 	PullDelay time.Duration
 	// StopDelay simulates a process that takes its time to exit on SIGTERM.
 	StopDelay time.Duration
+	// NamesErr makes SetServiceNames fail.
+	NamesErr error
 
 	mu         sync.Mutex
 	nextID     int
@@ -48,6 +50,7 @@ type Fake struct {
 	peak       int               // most containers that ever existed at once
 
 	statsCalls, blockingStatsCalls int
+	nameChanges                    int
 }
 
 func New() *Fake {
@@ -163,6 +166,8 @@ func (f *Fake) CreateContainer(_ context.Context, spec docker.ContainerSpec) (st
 		Replica:      spec.Replica,
 		Image:        spec.Image,
 		State:        "created",
+		// Born on the services network, nameless.
+		OnServicesNetwork: true,
 	}
 	f.specs[id] = spec
 	f.ips[id] = fmt.Sprintf("172.18.0.%d", f.nextID+1)
@@ -337,4 +342,62 @@ func (f *Fake) StatsCalls() (total, blocking int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.statsCalls, f.blockingStatsCalls
+}
+
+// SetServiceNames replaces the names a container answers to on the services
+// network, like the real runtime: any container, running or not.
+func (f *Fake) SetServiceNames(_ context.Context, id string, names []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.NamesErr != nil {
+		return f.NamesErr
+	}
+	c, ok := f.containers[id]
+	if !ok {
+		return docker.ErrNotFound
+	}
+	c.OnServicesNetwork = true
+	c.ServiceNames = append([]string(nil), names...)
+	f.nameChanges++
+	return nil
+}
+
+// Resolve answers like Docker's DNS on the services network: the names of the
+// running containers that carry name, sorted. It is what the reverse proxy and
+// other applications would reach.
+func (f *Fake) Resolve(name string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.containers {
+		if !c.Running {
+			continue
+		}
+		for _, n := range c.ServiceNames {
+			if n == name {
+				out = append(out, c.Name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// NameChanges counts SetServiceNames calls: each one cuts the container's
+// connections over the services network, so tests watch that it stays rare.
+func (f *Fake) NameChanges() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nameChanges
+}
+
+// LeaveServicesNetwork turns a container into one created before the services
+// network existed.
+func (f *Fake) LeaveServicesNetwork(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.containers[id]; ok {
+		c.OnServicesNetwork = false
+		c.ServiceNames = nil
+	}
 }
