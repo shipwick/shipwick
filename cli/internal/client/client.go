@@ -209,7 +209,7 @@ func (c *Client) send(ctx context.Context, httpClient *http.Client, method, path
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "deployctl/"+version.Version)
+	req.Header.Set("User-Agent", "shipwick/"+version.Version)
 	req.Header.Set("Accept", "application/json")
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)

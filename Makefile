@@ -10,7 +10,7 @@ dev:
 ## build: compile the binaries into ./bin
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/shipwick-agent ./agent/cmd/shipwick-agent
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/deployctl ./cli/cmd/deployctl
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/shipwick ./cli/cmd/shipwick
 
 ## test: unit tests (no Docker required)
 test:

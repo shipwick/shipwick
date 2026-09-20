@@ -150,7 +150,7 @@ func respondError(w http.ResponseWriter, status int, e api.Error) {
 
 var fixedNow = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
-// run executes deployctl with args inside dir and returns stdout, stderr and the error.
+// run executes shipwick with args inside dir and returns stdout, stderr and the error.
 func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 	f.t.Helper()
 	f.t.Chdir(dir)
@@ -342,7 +342,7 @@ func TestDeployConflictAndMissingFile(t *testing.T) {
 	}
 
 	_, _, err = f.run(t.TempDir(), "deploy")
-	if got := Render(err); !strings.Contains(got, "deploy.yaml not found") || !strings.Contains(got, "deployctl init") {
+	if got := Render(err); !strings.Contains(got, "deploy.yaml not found") || !strings.Contains(got, "shipwick init") {
 		t.Errorf("unexpected rendering: %s", got)
 	}
 }
@@ -482,7 +482,7 @@ func TestUnauthorizedAndUnreachable(t *testing.T) {
 	}
 
 	err := runWith(map[string]string{cliconfig.EnvURL: f.srv.URL, cliconfig.EnvToken: "wrong-token-0123456789"}, "ps")
-	if got := Render(err); !strings.Contains(got, "rejected the API token") || !strings.Contains(got, "deployctl login") {
+	if got := Render(err); !strings.Contains(got, "rejected the API token") || !strings.Contains(got, "shipwick login") {
 		t.Errorf("unexpected rendering: %s", got)
 	}
 	if strings.Contains(Render(err), "wrong-token") {

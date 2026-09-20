@@ -10,7 +10,7 @@ Shipwick deploys Docker applications to a single server. Three programs:
 | Path | What | Stack |
 |---|---|---|
 | `agent/` | `shipwick-agent`: runs on the server, drives Docker and Caddy, REST API | Go, SQLite |
-| `cli/` | `deployctl`: the command-line client | Go, Cobra |
+| `cli/` | `shipwick`: the command-line client | Go, Cobra |
 | `dashboard/` | Web UI, talks to the agent through its own server-side proxy | Nuxt 4, TypeScript, Tailwind |
 
 Shared Go packages are in `pkg/`: `spec` (parsing and validating `deploy.yaml`),

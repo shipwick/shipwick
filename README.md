@@ -15,7 +15,7 @@ replicas: 2
 ```
 
 ```bash
-deployctl deploy
+shipwick deploy
 ```
 
 **[Documentation](https://shipwick.com/docs/)** · [Install](https://shipwick.com/docs/getting-started/install) · [deploy.yaml reference](https://shipwick.com/docs/reference/deploy-yaml) · [Changelog](CHANGELOG.md)
@@ -60,7 +60,7 @@ Kubernetes.
 ## 3. Architecture
 
 ```text
-                 deployctl / dashboard
+              shipwick CLI / dashboard
                           │  HTTP + token
                           ▼
                     Shipwick Agent
@@ -106,7 +106,7 @@ and the **dashboard**. When it is done it prints the API token, once.
 
 Shipwick is running.
 
-  From your laptop or CI:   deployctl login --url https://agent.example.com
+  From your laptop or CI:   shipwick login --url https://agent.example.com
   Dashboard:                https://dashboard.example.com
 ```
 
@@ -171,14 +171,14 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 
 ## 5. Quick start
 
-With the CLI installed (above; on Windows, download `deployctl_windows_amd64.exe`
+With the CLI installed (above; on Windows, download `shipwick_windows_amd64.exe`
 from the [releases](https://github.com/shipwick/shipwick/releases)), in your
 application's repository:
 
 ```bash
-deployctl login     # once: agent URL + token
-deployctl init      # writes deploy.yaml
-deployctl deploy
+shipwick login     # once: agent URL + token
+shipwick init      # writes deploy.yaml
+shipwick deploy
 ```
 
 ```text
@@ -199,14 +199,14 @@ my-api 1.4.2  deployed in 6.1s
 https://api.example.com
 ```
 
-Then `deployctl status`, `deployctl logs -f`, `deployctl ps`. The full command
-reference, and how deployctl finds the agent (SSH tunnel, CI variables), is in
+Then `shipwick status`, `shipwick logs -f`, `shipwick ps`. The full command
+reference, and how the CLI finds the agent (SSH tunnel, CI variables), is in
 [cli/README.md](cli/README.md).
 
 In CI, keep `deploy.yaml` in the repository and pass the image you just built:
 
 ```bash
-deployctl deploy --image ghcr.io/company/my-api:$GIT_SHA
+shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA
 ```
 
 It exits non-zero if the deployment fails, so it works as a pipeline gate.
@@ -222,7 +222,7 @@ everyday actions: deploy another image, roll back, stop, start, delete.
 Sign in with the API token. The browser never holds it: the dashboard's own
 server keeps it in an `httpOnly` cookie and relays requests to the agent, so the
 agent needs no CORS and can stay off the public internet. It has no database and
-no state of its own — anything it does, `deployctl` and `curl` can do too.
+no state of its own — anything it does, `shipwick` and `curl` can do too.
 Details: [dashboard/README.md](dashboard/README.md).
 
 ## 6. deploy.yaml
@@ -320,7 +320,7 @@ my-api is still running 1.4.1; the failed deployment did not affect it.
 ```
 
 One deployment per application at a time; a second is refused rather than
-queued. Every attempt is kept as history, visible in `deployctl status`.
+queued. Every attempt is kept as history, visible in `shipwick status`.
 
 If the agent crashes or restarts mid-deployment, it marks that deployment
 `FAILED` on the next start and removes its leftovers. Running applications are
@@ -334,8 +334,8 @@ replicas is rolled back on its own — see [Deployment](#7-deployment).
 **On request:**
 
 ```bash
-deployctl rollback            # to the version that ran before this one
-deployctl rollback --to 3     # to deployment #3, as numbered by `deployctl status`
+shipwick rollback            # to the version that ran before this one
+shipwick rollback --to 3     # to deployment #3, as numbered by `shipwick status`
 ```
 
 ```text
@@ -360,7 +360,7 @@ deployment. What that buys you:
 - Only deployments that once served successfully are targets. A `FAILED`
   attempt is not a version to return to.
 
-`deployctl redeploy [--image …]` is the same idea applied to the *running*
+`shipwick redeploy [--image …]` is the same idea applied to the *running*
 configuration: deploy it again, optionally with another image, without needing
 the `deploy.yaml` at hand.
 
@@ -401,7 +401,7 @@ stay up for a few seconds.
 | A replica runs for a minute since its last restart, and is not failing its health check | Its restart history is forgiven; the next crash starts again at 1s |
 | A replica's container is gone — `docker rm`, `docker system prune`, anything that is not Shipwick | Recreates it from the deployment's stored configuration, within about a second: desired 3, present 2 → create 1 |
 
-`deployctl status` shows each replica's health and restart count, and a feed of
+`shipwick status` shows each replica's health and restart count, and a feed of
 what the supervisor did and why:
 
 ```text
@@ -444,7 +444,7 @@ whatever the server has.
 Usage is one command away, and live in the dashboard:
 
 ```text
-$ deployctl status
+$ shipwick status
 my-api  ● HEALTHY
 
 Replicas   2/2 healthy
@@ -482,7 +482,7 @@ Internet ──▶ Caddy :443 ──▶ shipwick_my-api_7_1:8080
   it is healthy, and the old one it replaces leaves the rotation *before* it is
   stopped. If the proxy cannot be updated, the deployment fails and is undone.
   (Measured: a rolling redeploy under constant load, 100 of 100 requests `200`.)
-- **No healthy replica, or `deployctl stop`:** the domain answers `503` rather
+- **No healthy replica, or `shipwick stop`:** the domain answers `503` rather
   than timing out, and keeps its certificate. An address no application serves
   answers `404`.
 - **One domain, one application.** A second application claiming a domain in
@@ -505,7 +505,7 @@ and the API is served there through Caddy — the way to reach it from a laptop
 or CI without an SSH tunnel:
 
 ```bash
-deployctl login --url https://agent.example.com
+shipwick login --url https://agent.example.com
 ```
 
 Try it locally: `*.localhost` resolves to your machine and Caddy issues
@@ -542,7 +542,7 @@ What Shipwick does:
   passing it in; do the same if you set things up by hand.
 - Tokens, `Authorization` headers, request bodies and env values are never
   logged. Env values are masked in every API response.
-- `deployctl` never takes the token as a flag (arguments leak through `ps` and
+- `shipwick` never takes the token as a flag (arguments leak through `ps` and
   shell history), stores it `0600`, refuses to send a saved token to a
   different agent than the one it was saved for, and warns before a token
   crosses the network over plain HTTP.
@@ -584,8 +584,8 @@ machine, and Caddy issues certificates for it from its own local CA.
 
 ```bash
 export SHIPWICK_AGENT_TOKEN=dev-token-do-not-use-in-production
-cd /tmp && deployctl init --name hello --image nginx:alpine --port 80 --domain hello.localhost
-deployctl deploy
+cd /tmp && shipwick init --name hello --image nginx:alpine --port 80 --domain hello.localhost
+shipwick deploy
 curl -k https://hello.localhost:8443
 ```
 

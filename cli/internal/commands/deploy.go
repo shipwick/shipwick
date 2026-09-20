@@ -36,7 +36,7 @@ command exits non-zero.
 
 In CI, keep deploy.yaml in the repository and supply the freshly built image:
 
-  deployctl deploy --image ghcr.io/company/my-api:$GIT_SHA`,
+  shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return c.deploy(cmd.Context(), file, image, noWait)
@@ -86,7 +86,7 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 	if noWait {
 		c.ui.Success("Deployment #%d started", d.Sequence)
 		c.ui.Println()
-		c.ui.Println("Follow it with: deployctl status " + name)
+		c.ui.Println("Follow it with: shipwick status " + name)
 		return nil
 	}
 
@@ -95,7 +95,7 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 		if ctx.Err() != nil {
 			c.ui.Println()
 			c.ui.Println("Stopped waiting. The deployment continues on the server:")
-			c.ui.Println("  deployctl status " + name)
+			c.ui.Println("  shipwick status " + name)
 			return ErrReported
 		}
 		return err
@@ -215,7 +215,7 @@ func (c *cli) reportFailedDeployment(ctx context.Context, cl *client.Client, d a
 	case detail.ActiveDeployment != nil && detail.Status != api.AppHealthy && detail.Status != api.AppStopped:
 		// Say what is true now rather than what usually is: a rollback can
 		// fail too, and then "did not affect it" would be a lie.
-		c.ui.Printf("%s is running %s, but it is %s right now (%d/%d replicas healthy). Shipwick keeps trying to restore it:\n  deployctl status %s\n",
+		c.ui.Printf("%s is running %s, but it is %s right now (%d/%d replicas healthy). Shipwick keeps trying to restore it:\n  shipwick status %s\n",
 			d.Application, detail.ActiveDeployment.Version, detail.Status, detail.Replicas.Healthy, detail.Replicas.Desired, d.Application)
 	case detail.ActiveDeployment != nil && d.Status == api.StatusRolledBack:
 		// Part of the old version had already been replaced when the new one

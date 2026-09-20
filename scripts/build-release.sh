@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the files attached to a GitHub release into ./dist:
 #
-#   deployctl_<os>_<arch>[.exe]   the CLI, for every supported platform
+#   shipwick_<os>_<arch>[.exe]   the CLI, for every supported platform
 #   compose.production.yml        with both images pinned to this version
 #   checksums.txt                 SHA-256 of all of the above
 #
@@ -27,11 +27,11 @@ mkdir dist
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
     os="${target%/*}"
     arch="${target#*/}"
-    out="dist/deployctl_${os}_${arch}"
+    out="dist/shipwick_${os}_${arch}"
     [ "$os" = "windows" ] && out="$out.exe"
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
         -ldflags "-s -w -X github.com/shipwick/shipwick/pkg/version.Version=$VERSION" \
-        -o "$out" ./cli/cmd/deployctl
+        -o "$out" ./cli/cmd/shipwick
     echo "built $out"
 done
 

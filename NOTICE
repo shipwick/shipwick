@@ -9,7 +9,7 @@ Third-party software
 The source code in this repository is original. The artifacts built from it
 include third-party software, all of it under permissive licenses:
 
-shipwick-agent and deployctl (Go binaries) are compiled together with the
+shipwick-agent and shipwick (Go binaries) are compiled together with the
 modules listed in go.mod — Apache-2.0 (Moby, containerd, Cobra, OpenContainers,
 OpenTelemetry and others), BSD-3-Clause (modernc.org/sqlite and its runtime,
 golang.org/x/sys, golang.org/x/term, pflag) and MIT (go.yaml.in/yaml, go-winio,

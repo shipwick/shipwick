@@ -136,7 +136,7 @@ func TestNoRollbackTargetFromAgentIsExplained(t *testing.T) {
 	f.deployError = api.Error{Code: api.CodeNoRollbackTarget, Message: "no earlier successful deployment to roll back to"}
 
 	_, _, err := f.run(t.TempDir(), "rollback", "my-api")
-	if got := Render(err); !strings.Contains(got, "no earlier successful deployment") || !strings.Contains(got, "deployctl status") {
+	if got := Render(err); !strings.Contains(got, "no earlier successful deployment") || !strings.Contains(got, "shipwick status") {
 		t.Errorf("unexpected rendering: %s", got)
 	}
 }
@@ -162,5 +162,5 @@ func TestFailureReportSaysWhatIsTrueNow(t *testing.T) {
 	if strings.Contains(out, "did not affect it") {
 		t.Errorf("must not claim the application is unaffected while it is DEGRADED:\n%s", out)
 	}
-	assertInOrder(t, out, []string{"the rollback to 1.4.1 then failed too", "my-api is running 1.4.1, but it is DEGRADED right now (2/3 replicas healthy)", "deployctl status my-api"})
+	assertInOrder(t, out, []string{"the rollback to 1.4.1 then failed too", "my-api is running 1.4.1, but it is DEGRADED right now (2/3 replicas healthy)", "shipwick status my-api"})
 }

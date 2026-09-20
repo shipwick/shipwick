@@ -5,8 +5,8 @@
 The installer behind `curl -fsSL https://get.shipwick.com | sh`.
 
 ```bash
-sh install.sh          # server: agent + Caddy + dashboard (as root), and deployctl
-sh install.sh --cli    # deployctl only
+sh install.sh          # server: agent + Caddy + dashboard (as root), and the CLI
+sh install.sh --cli    # the CLI only
 ```
 
 What it does on a server:
@@ -21,7 +21,7 @@ What it does on a server:
    asked for in a terminal, or taken from `SHIPWICK_AGENT_DOMAIN` /
    `SHIPWICK_DASHBOARD_DOMAIN`. Hostnames are validated before anything is written.
 4. Pulls the images, starts the stack, waits for the agent to report healthy.
-5. Installs `deployctl`, verified the same way. **A checksum mismatch installs
+5. Installs `shipwick`, verified the same way. **A checksum mismatch installs
    nothing** and leaves a running installation as it was.
 6. Prints the token (once, and only if it was generated in this run) and the
    next steps.

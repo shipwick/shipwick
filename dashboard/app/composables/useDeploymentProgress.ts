@@ -6,7 +6,7 @@ import { progressReducer } from '~/utils/deploymentProgress'
 const POLL_INTERVAL_MS = 1000
 
 /**
- * Follows one deployment until `completed_at` is set, the way `deployctl
+ * Follows one deployment until `completed_at` is set, the way `shipwick
  * deploy` does: poll GET /deployments/:id and narrate its events. It does not
  * stop at FAILED: a rollback may follow, and only `completed_at` ends it.
  */

@@ -1,4 +1,4 @@
-// Package cliconfig resolves how deployctl reaches the agent: its URL and
+// Package cliconfig resolves how shipwick reaches the agent: its URL and
 // API token.
 package cliconfig
 
@@ -23,7 +23,7 @@ const (
 	DefaultURL = "http://127.0.0.1:9000"
 )
 
-// Config is the content of the config file written by `deployctl login`.
+// Config is the content of the config file written by `shipwick login`.
 type Config struct {
 	URL   string `yaml:"url"`
 	Token string `yaml:"token"`
@@ -98,7 +98,7 @@ func Save(path string, cfg Config) error {
 // to every user on the machine (ps) and are kept in shell history.
 //
 // The saved token belongs to the saved URL. If a flag or variable points
-// deployctl at a different agent, the saved token is not sent there.
+// shipwick at a different agent, the saved token is not sent there.
 func Resolve(flagURL string, getenv func(string) string, file Config) Config {
 	savedURL := file.URL
 	if savedURL == "" {

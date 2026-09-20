@@ -11,7 +11,7 @@
 #
 #   4. docker compose -f compose.production.yml up -d
 #
-# Then, from your laptop or CI:   deployctl login --url https://agent.example.com
+# Then, from your laptop or CI:   shipwick login --url https://agent.example.com
 # and in a browser:               https://dashboard.example.com
 #
 # Certificates are obtained and renewed by Caddy on its own (Let's Encrypt).

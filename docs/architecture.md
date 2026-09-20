@@ -1,10 +1,10 @@
 # Architecture
 
 Shipwick is one long-running process per server — the **agent** — plus clients
-that talk to it over HTTP: the `deployctl` CLI and the dashboard.
+that talk to it over HTTP: the `shipwick` CLI and the dashboard.
 
 ```text
-                 deployctl / dashboard
+              shipwick CLI / dashboard
                           │  HTTP + bearer token
                           ▼
                     Shipwick Agent
@@ -34,7 +34,7 @@ agent/internal/deploy      deployment engine: state machine, supervisor, operati
 agent/internal/api         REST API: routing, auth, error envelope
 pkg/spec                   deploy.yaml parser + validator   (shared with the CLI)
 pkg/api                    API wire types                   (shared with the CLI)
-cli/cmd/deployctl          CLI entrypoint
+cli/cmd/shipwick          CLI entrypoint
 cli/internal/commands      cobra command tree, error rendering
 cli/internal/client        agent API client
 cli/internal/cliconfig     agent URL / token resolution
@@ -252,7 +252,7 @@ Design points:
   a replica is declared gone, Docker is asked once more, by ID.
 
 What the supervisor sees and does is recorded as application events
-(`GET /applications/:name/events`, shown by `deployctl status`), capped at the
+(`GET /applications/:name/events`, shown by `shipwick status`), capped at the
 newest 500 per application — a crash loop would otherwise grow the table
 forever.
 

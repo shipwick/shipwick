@@ -6,7 +6,7 @@ actions (deploy another image, roll back, stop/start, delete).
 
 It is a client of the agent's HTTP API ([docs/api.md](../docs/api.md)) and
 nothing more: it has no database and keeps no state of its own. Anything it can
-do, `deployctl` and `curl` can do too.
+do, `shipwick` and `curl` can do too.
 
 ## Architecture
 

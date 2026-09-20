@@ -172,7 +172,7 @@ const healthCheck = computed(() => {
           variant="primary"
           size="sm"
           :disabled="busy || !hasActive"
-          :title="!hasActive ? 'Nothing deployed yet. The first deployment needs deployctl deploy.' : busy ? 'A deployment is in progress' : undefined"
+          :title="!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : undefined"
           @click="dialog = 'deploy'"
         >
           Deploy

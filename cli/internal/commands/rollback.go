@@ -22,7 +22,7 @@ func (c *cli) rollbackCommand() *cobra.Command {
 		Short: "Go back to an earlier successful deployment",
 		Long: `Go back to an earlier successful deployment: by default the one that was
 active before the current one, or the one given with --to (the #number shown by
-"deployctl status").
+"shipwick status").
 
 A rollback is an ordinary deployment of the configuration that was stored with
 that earlier deployment — image, env, replicas, everything. It is rolled out
@@ -87,7 +87,7 @@ func rollbackTarget(history []api.Deployment, sequence int) (api.Deployment, err
 		}
 	}
 	if sequence != 0 {
-		return api.Deployment{}, fmt.Errorf("there is no deployment #%d\n\nSee the history with: deployctl status", sequence)
+		return api.Deployment{}, fmt.Errorf("there is no deployment #%d\n\nSee the history with: shipwick status", sequence)
 	}
 	return api.Deployment{}, fmt.Errorf("there is no earlier successful deployment to go back to")
 }

@@ -1,4 +1,4 @@
-// Package commands implements the deployctl command tree.
+// Package commands implements the shipwick command tree.
 package commands
 
 import (
@@ -20,7 +20,7 @@ import (
 	"github.com/shipwick/shipwick/pkg/version"
 )
 
-// DefaultFile is the config file deployctl looks for in the current directory.
+// DefaultFile is the config file shipwick looks for in the current directory.
 const DefaultFile = "deploy.yaml"
 
 // ErrReported marks a failure that has already been explained on screen; the
@@ -47,7 +47,7 @@ type cli struct {
 	pollInterval time.Duration
 }
 
-// NewRootCommand builds the deployctl command tree.
+// NewRootCommand builds the shipwick command tree.
 func NewRootCommand(opts Options) *cobra.Command {
 	_, root := newRoot(opts)
 	return root
@@ -64,16 +64,16 @@ func newRoot(opts Options) (*cli, *cobra.Command) {
 	}
 
 	root := &cobra.Command{
-		Use:   "deployctl",
+		Use:   "shipwick",
 		Short: "Deploy and manage applications on a Shipwick server",
-		Long: `deployctl deploys and manages applications on a Shipwick server.
+		Long: `shipwick deploys and manages applications on a Shipwick server.
 
 Describe your application in deploy.yaml, then:
 
-  deployctl deploy
+  shipwick deploy
 
 The agent is found through --url, SHIPWICK_AGENT_URL, or the config written by
-"deployctl login" (default: ` + cliconfig.DefaultURL + `). The API token comes from
+"shipwick login" (default: ` + cliconfig.DefaultURL + `). The API token comes from
 SHIPWICK_AGENT_TOKEN or that same config; it is never accepted as a flag.`,
 		Version:       version.Version,
 		SilenceUsage:  true, // a failed deploy is not a usage error
@@ -143,7 +143,7 @@ func readConfig(path string) ([]byte, spec.App, error) {
 func readFile(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("%s not found\n\nCreate one with: deployctl init", path)
+		return nil, fmt.Errorf("%s not found\n\nCreate one with: shipwick init", path)
 	}
 	return data, err
 }
@@ -163,7 +163,7 @@ func resolveApp(args []string, file string) (string, error) {
 		if errors.As(err, &verr) {
 			return "", err
 		}
-		return "", fmt.Errorf("no application given, and %s was not found here\n\nName one explicitly, e.g.: deployctl status my-api", file)
+		return "", fmt.Errorf("no application given, and %s was not found here\n\nName one explicitly, e.g.: shipwick status my-api", file)
 	}
 	return app.Name, nil
 }
@@ -189,7 +189,7 @@ func Render(err error) string {
 
 Is the agent running? If it is on a remote server, open a tunnel first:
   ssh -L 9000:127.0.0.1:9000 user@your-server
-or point deployctl at it with --url / ` + cliconfig.EnvURL + `.`
+or point shipwick at it with --url / ` + cliconfig.EnvURL + `.`
 	}
 
 	var apiErr *client.APIError
@@ -198,17 +198,17 @@ or point deployctl at it with --url / ` + cliconfig.EnvURL + `.`
 		case api.CodeUnauthorized:
 			return `The agent rejected the API token.
 
-Set ` + cliconfig.EnvToken + `, or save it with: deployctl login`
+Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 		case api.CodeDeploymentInProgress:
-			return "Another operation is already in progress for this application.\n\nWatch it with: deployctl status"
+			return "Another operation is already in progress for this application.\n\nWatch it with: shipwick status"
 		case api.CodeEndpointNotFound:
-			return "The agent does not know this operation — it is probably older than this deployctl.\n\nCompare versions with: deployctl server status"
+			return "The agent does not know this operation — it is probably older than this shipwick.\n\nCompare versions with: shipwick server status"
 		case api.CodeNotFound:
-			return "The server does not know that application.\n\nList what it runs with: deployctl ps"
+			return "The server does not know that application.\n\nList what it runs with: shipwick ps"
 		case api.CodeNotDeployed:
-			return "This application has no successful deployment yet.\n\nDeploy it with: deployctl deploy"
+			return "This application has no successful deployment yet.\n\nDeploy it with: shipwick deploy"
 		case api.CodeNoRollbackTarget:
-			return "There is no earlier successful deployment to go back to.\n\nSee the history with: deployctl status"
+			return "There is no earlier successful deployment to go back to.\n\nSee the history with: shipwick status"
 		}
 		return "Error: " + apiErr.Message
 	}

@@ -188,7 +188,7 @@ func (c *cli) psCommand() *cobra.Command {
 				return err
 			}
 			if len(apps) == 0 {
-				c.ui.Println("No applications yet. Deploy one with: deployctl deploy")
+				c.ui.Println("No applications yet. Deploy one with: shipwick deploy")
 				return nil
 			}
 
@@ -253,7 +253,7 @@ func (c *cli) containerState(ct api.Container) ui.Cell {
 	case ct.OOMKilled:
 		return ui.Cell{Text: "out of memory", Style: ui.Red}
 	case ct.State == "exited" && ct.ExitCode == 0:
-		return ui.Cell{Text: "exited (0)", Style: ui.Dim} // a clean stop, e.g. `deployctl stop`
+		return ui.Cell{Text: "exited (0)", Style: ui.Dim} // a clean stop, e.g. `shipwick stop`
 	case ct.State == "exited":
 		return ui.Cell{Text: fmt.Sprintf("exited (%d)", ct.ExitCode), Style: ui.Red}
 	}
@@ -268,7 +268,7 @@ func startedAgo(ct api.Container, now time.Time) string {
 }
 
 // truncate shortens s to at most max characters for a table cell. The full
-// text is one `deployctl deploy` away, or in GET /deployments/:id.
+// text is one `shipwick deploy` away, or in GET /deployments/:id.
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {

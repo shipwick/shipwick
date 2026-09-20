@@ -44,7 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// The only unauthenticated endpoint: liveness for load balancers and
-	// `deployctl server status`. It reveals nothing beyond the version.
+	// `shipwick server status`. It reveals nothing beyond the version.
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
 	authed := func(pattern string, h http.HandlerFunc) {

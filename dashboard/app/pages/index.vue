@@ -108,7 +108,7 @@ function retryAll() {
         <UiPanel title="Needs attention" :meta="apps.loading.value ? null : attention.length">
           <TableSkeleton v-if="apps.loading.value" :rows="2" :columns="4" />
           <EmptyState v-else-if="(apps.data.value?.length ?? 0) === 0" title="No applications yet">
-            Deploy the first one from your project directory with <span class="mono text-fg">deployctl deploy</span>.
+            Deploy the first one from your project directory with <span class="mono text-fg">shipwick deploy</span>.
           </EmptyState>
           <p v-else-if="attention.length === 0" class="flex items-center gap-2 px-4 py-3 text-fg-muted">
             <UiIcon name="check" :size="14" class="text-ok" />

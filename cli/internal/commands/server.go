@@ -90,7 +90,7 @@ func (c *cli) loginCommand() *cobra.Command {
 The token is asked for without echo, verified against the agent, and stored in
 a config file only you can read. In scripts, pipe it in:
 
-  printf %s "$TOKEN" | deployctl login --url https://agent.example.com --token-stdin
+  printf %s "$TOKEN" | shipwick login --url https://agent.example.com --token-stdin
 
 CI jobs usually need no login at all: set SHIPWICK_AGENT_URL and
 SHIPWICK_AGENT_TOKEN instead.`,

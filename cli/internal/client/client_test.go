@@ -39,7 +39,7 @@ func TestRequestShape(t *testing.T) {
 	if got.Header.Get("Authorization") != "Bearer secret-token" {
 		t.Errorf("Authorization = %q", got.Header.Get("Authorization"))
 	}
-	if !strings.HasPrefix(got.Header.Get("User-Agent"), "deployctl/") {
+	if !strings.HasPrefix(got.Header.Get("User-Agent"), "shipwick/") {
 		t.Errorf("User-Agent = %q", got.Header.Get("User-Agent"))
 	}
 }

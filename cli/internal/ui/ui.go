@@ -1,4 +1,4 @@
-// Package ui renders deployctl's terminal output: status lines, tables,
+// Package ui renders shipwick's terminal output: status lines, tables,
 // colors. Output degrades gracefully when it is piped or colors are disabled.
 package ui
 

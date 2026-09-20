@@ -5,7 +5,7 @@ which — only after the whole CI suite passed on that commit — publishes:
 
 | What | Where |
 |---|---|
-| `deployctl_<os>_<arch>` for Linux, macOS (amd64, arm64) and Windows (amd64) | the GitHub release |
+| `shipwick_<os>_<arch>` for Linux, macOS (amd64, arm64) and Windows (amd64) | the GitHub release |
 | `compose.production.yml`, **both images pinned to this version** | the GitHub release |
 | `checksums.txt` (SHA-256 of the files above) | the GitHub release |
 | `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |

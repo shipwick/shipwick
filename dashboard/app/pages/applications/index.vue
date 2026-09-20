@@ -59,7 +59,7 @@ function replicaTone(app: Application): string {
         />
         <EmptyState v-else-if="(apps.data.value?.length ?? 0) === 0" title="No applications yet">
           Applications appear here after their first deployment. In your project directory, run
-          <span class="mono text-fg">deployctl init</span> and then <span class="mono text-fg">deployctl deploy</span>.
+          <span class="mono text-fg">shipwick init</span> and then <span class="mono text-fg">shipwick deploy</span>.
         </EmptyState>
         <EmptyState v-else-if="rows.length === 0" :title="`No application matches “${query.trim()}”`" />
         <div v-else class="overflow-x-auto">

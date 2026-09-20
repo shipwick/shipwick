@@ -1,6 +1,6 @@
 // Command shipwick-agent is the Shipwick server component. It manages
 // application containers through the Docker Engine API and exposes the
-// HTTP API used by deployctl and the dashboard.
+// HTTP API used by the shipwick CLI and the dashboard.
 package main
 
 import (
@@ -254,7 +254,7 @@ func printGeneratedToken(token string) {
   Store it now: only its hash is kept, so it cannot be shown again.
   If this output is being collected (docker logs, journald), the token is in
   those logs too: prefer setting %s yourself.
-  Use it with deployctl and the dashboard as %s.
+  Use it with the shipwick CLI and the dashboard as %s.
   To choose your own token instead, set %s.
 
 `, token, config.EnvToken, config.EnvToken, config.EnvToken)

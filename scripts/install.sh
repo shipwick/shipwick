@@ -1,8 +1,8 @@
 #!/bin/sh
 # Shipwick installer.
 #
-#   curl -fsSL https://get.shipwick.com | sh                 # server: agent + Caddy + dashboard, and deployctl
-#   curl -fsSL https://get.shipwick.com | sh -s -- --cli     # deployctl only (your laptop, CI)
+#   curl -fsSL https://get.shipwick.com | sh                 # server: agent + Caddy + dashboard, and the CLI
+#   curl -fsSL https://get.shipwick.com | sh -s -- --cli     # the CLI only (your laptop, CI)
 #
 # Safe to run again: that is how you upgrade. An existing .env — and with it
 # your API token — is never touched.
@@ -91,7 +91,7 @@ detect_platform() {
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
     case "$os" in
         linux|darwin) ;;
-        *) die "Unsupported operating system: $os. On Windows, download deployctl.exe from https://github.com/$REPO/releases" ;;
+        *) die "Unsupported operating system: $os. On Windows, download shipwick_windows_amd64.exe from https://github.com/$REPO/releases" ;;
     esac
     arch="$(uname -m)"
     case "$arch" in
@@ -133,26 +133,26 @@ valid_hostname() {
     esac
 }
 
-# --- deployctl --------------------------------------------------------------
+# --- the CLI ------------------------------------------------------------------
 
 install_cli() {
     detect_platform
-    asset="deployctl_${PLATFORM}"
-    if ! fetch_release_asset "$asset" "$WORK_DIR/deployctl"; then
-        warn "Could not download deployctl ($asset) from https://github.com/$REPO/releases."
-        info "Build it from source instead:  go build -o deployctl ./cli/cmd/deployctl"
+    asset="shipwick_${PLATFORM}"
+    if ! fetch_release_asset "$asset" "$WORK_DIR/shipwick"; then
+        warn "Could not download the shipwick CLI ($asset) from https://github.com/$REPO/releases."
+        info "Build it from source instead:  go build -o shipwick ./cli/cmd/shipwick"
         return 1
     fi
 
-    chmod 0755 "$WORK_DIR/deployctl"
+    chmod 0755 "$WORK_DIR/shipwick"
     if [ -w "$BIN_DIR" ]; then
-        mv "$WORK_DIR/deployctl" "$BIN_DIR/deployctl"
+        mv "$WORK_DIR/shipwick" "$BIN_DIR/shipwick"
     elif have sudo; then
-        sudo mv "$WORK_DIR/deployctl" "$BIN_DIR/deployctl"
+        sudo mv "$WORK_DIR/shipwick" "$BIN_DIR/shipwick"
     else
         die "$BIN_DIR is not writable and sudo is not available. Set SHIPWICK_BIN_DIR to a directory on your PATH."
     fi
-    step "Installed deployctl to $BIN_DIR/deployctl"
+    step "Installed the shipwick CLI to $BIN_DIR/shipwick"
 }
 
 # --- server -----------------------------------------------------------------
@@ -184,7 +184,7 @@ write_env() {
     if [ -r /dev/tty ] && [ -t 1 ]; then
         printf '\n%s\n' "${BOLD}Two hostnames, both optional${RESET} ${DIM}(press Enter to skip; their DNS must point at this server)${RESET}"
     fi
-    ask SHIPWICK_AGENT_DOMAIN "Hostname for the API, used by deployctl (e.g. agent.example.com)"
+    ask SHIPWICK_AGENT_DOMAIN "Hostname for the API, used by the shipwick CLI (e.g. agent.example.com)"
     ask SHIPWICK_DASHBOARD_DOMAIN "Hostname for the dashboard (e.g. dashboard.example.com)"
     for name in SHIPWICK_AGENT_DOMAIN SHIPWICK_DASHBOARD_DOMAIN; do
         eval "value=\${$name}"
@@ -280,7 +280,7 @@ print_summary() {
         printf '\n      %s\n\n' "$GENERATED_TOKEN"
     fi
     if [ -n "$agent_domain" ]; then
-        info "From your laptop or CI:   deployctl login --url https://$agent_domain"
+        info "From your laptop or CI:   shipwick login --url https://$agent_domain"
     else
         info "No API hostname was set, so the API is not exposed. Reach it through a tunnel:"
         info "  1. create $INSTALL_DIR/compose.override.yml:"
@@ -288,7 +288,7 @@ print_summary() {
         info "           agent:"
         info "             ports: [\"127.0.0.1:9000:9000\"]"
         info "     and run:   cd $INSTALL_DIR && docker compose up -d"
-        info "  2. on your laptop:   ssh -N -L 9000:127.0.0.1:9000 root@<this-server> &   deployctl login"
+        info "  2. on your laptop:   ssh -N -L 9000:127.0.0.1:9000 root@<this-server> &   shipwick login"
     fi
     [ -z "$dashboard_domain" ] || info "Dashboard:                https://$dashboard_domain"
     info "Open ports 80 and 443 (and 443/udp) — and nothing else — in your firewall."
@@ -303,8 +303,8 @@ usage() {
     cat <<EOF
 Shipwick installer
 
-  install.sh          install or upgrade the server (agent, Caddy, dashboard) and deployctl
-  install.sh --cli    install deployctl only
+  install.sh          install or upgrade the server (agent, Caddy, dashboard) and the CLI
+  install.sh --cli    install the CLI only
 
 Environment:
   SHIPWICK_VERSION            release to install (default: latest)
@@ -332,7 +332,7 @@ main() {
     printf '%s\n\n' "${BOLD}Shipwick installer${RESET} ${DIM}($REPO@$VERSION)${RESET}"
     if [ "$mode" = "cli" ]; then
         install_cli || exit 1
-        printf '\n'; info "Next:   deployctl login"
+        printf '\n'; info "Next:   shipwick login"
     else
         install_server
     fi

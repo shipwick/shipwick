@@ -1,27 +1,27 @@
-# deployctl
+# shipwick
 
 The Shipwick command-line client.
 
 ```bash
-go build -o bin/deployctl ./cli/cmd/deployctl      # or: make build
+go build -o bin/shipwick ./cli/cmd/shipwick      # or: make build
 ```
 
 ## Commands
 
 | Command | |
 |---|---|
-| `deployctl init` | Create a `deploy.yaml`. Prompts in a terminal; `--image` makes it non-interactive |
-| `deployctl validate` | Check `deploy.yaml` offline and show how it will be applied, defaults included |
-| `deployctl deploy` | Deploy and wait for the result. `--image` overrides the image (CI), `--no-wait` returns at once |
-| `deployctl rollback [app]` | Go back to the previous successful deployment, or `--to N` (the #number from `status`). A full, ordinary deployment of the stored configuration |
-| `deployctl redeploy [app]` | Deploy the running configuration again, `--image` to change the image. Needs no `deploy.yaml` |
-| `deployctl status [app]` | Version, CPU and memory, replica health and restart counts, recent deployments, and what the supervisor has been doing |
-| `deployctl ps` | All applications on the server |
-| `deployctl logs [app]` | `-n 100` lines, `-f` to follow, `-t` for timestamps |
-| `deployctl stop\|start [app]` | Stop an application / start it again |
-| `deployctl delete <app>` | Remove an application, its containers and its history. Asks for the name; `--yes` to skip |
-| `deployctl server status` | Is the agent reachable, and what does it run on |
-| `deployctl login` | Save the agent URL and token |
+| `shipwick init` | Create a `deploy.yaml`. Prompts in a terminal; `--image` makes it non-interactive |
+| `shipwick validate` | Check `deploy.yaml` offline and show how it will be applied, defaults included |
+| `shipwick deploy` | Deploy and wait for the result. `--image` overrides the image (CI), `--no-wait` returns at once |
+| `shipwick rollback [app]` | Go back to the previous successful deployment, or `--to N` (the #number from `status`). A full, ordinary deployment of the stored configuration |
+| `shipwick redeploy [app]` | Deploy the running configuration again, `--image` to change the image. Needs no `deploy.yaml` |
+| `shipwick status [app]` | Version, CPU and memory, replica health and restart counts, recent deployments, and what the supervisor has been doing |
+| `shipwick ps` | All applications on the server |
+| `shipwick logs [app]` | `-n 100` lines, `-f` to follow, `-t` for timestamps |
+| `shipwick stop\|start [app]` | Stop an application / start it again |
+| `shipwick delete <app>` | Remove an application, its containers and its history. Asks for the name; `--yes` to skip |
+| `shipwick server status` | Is the agent reachable, and what does it run on |
+| `shipwick login` | Save the agent URL and token |
 
 Commands taking `[app]` default to the application named in `./deploy.yaml`
 (`-f`/`--file` selects another file; for `logs`, where `-f` means `--follow`,
@@ -34,7 +34,7 @@ wants the name spelled out.
 |---|---|---|
 | 1. Flag | `--url` | — never a flag: arguments show up in `ps` and shell history |
 | 2. Environment | `SHIPWICK_AGENT_URL` | `SHIPWICK_AGENT_TOKEN` |
-| 3. Saved by `deployctl login` | ✓ | ✓ |
+| 3. Saved by `shipwick login` | ✓ | ✓ |
 | 4. Default | `http://127.0.0.1:9000` | |
 
 The saved token belongs to the saved URL: point `--url` at a different agent
@@ -48,15 +48,15 @@ Typical setups:
 ```bash
 # Your laptop → a server: keep the API on loopback and tunnel to it.
 ssh -N -L 9000:127.0.0.1:9000 user@server &
-deployctl login                      # URL defaults to the tunnel; token is asked without echo
+shipwick login                      # URL defaults to the tunnel; token is asked without echo
 
 # CI: no login, just two secrets.
 export SHIPWICK_AGENT_URL=https://agent.example.com
 export SHIPWICK_AGENT_TOKEN=…
-deployctl deploy --image ghcr.io/company/my-api:$GIT_SHA
+shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA
 ```
 
-deployctl warns whenever a token is about to travel over plain HTTP to
+The CLI warns whenever a token is about to travel over plain HTTP to
 anything other than this machine.
 
 ## Behavior worth knowing
@@ -76,7 +76,7 @@ anything other than this machine.
 ## Layout
 
 ```text
-cmd/deployctl          entrypoint: signals, exit code
+cmd/shipwick          entrypoint: signals, exit code
 internal/commands      cobra command tree, error rendering
 internal/client        agent API client
 internal/cliconfig     URL/token resolution, config file

@@ -80,7 +80,7 @@ async function submit() {
         </p>
       </div>
       <p class="text-xs text-fg-muted">
-        The running version keeps serving until the new replicas are healthy. To change anything other than the image, use <span class="mono text-fg">deployctl deploy</span>.
+        The running version keeps serving until the new replicas are healthy. To change anything other than the image, use <span class="mono text-fg">shipwick deploy</span>.
       </p>
       <InlineError :error="error" />
     </form>

@@ -35,9 +35,9 @@ Kubernetes.
   continuously. Optionally serves the agent's API and the dashboard over HTTPS.
 - **Metrics**: CPU and memory per replica and per application, against their
   limits.
-- **CLI** (`deployctl`): `init`, `validate`, `deploy`, `redeploy`, `rollback`,
+- **CLI** (`shipwick`): `init`, `validate`, `deploy`, `redeploy`, `rollback`,
   `status`, `ps`, `logs`, `stop`, `start`, `delete`, `login`, `server status`.
-  Made for terminals and for CI (`deployctl deploy --image …:$GIT_SHA`).
+  Made for terminals and for CI (`shipwick deploy --image …:$GIT_SHA`).
 - **Dashboard**: overview, applications, deployments, servers, live logs;
   redeploy and rollback. The token never reaches the browser.
 - **Installer**: `curl -fsSL https://get.shipwick.com | sh` sets up the agent,

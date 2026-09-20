@@ -37,11 +37,11 @@ func (c *cli) initCommand() *cobra.Command {
 Run in a terminal, init asks for what it needs. With --image it never prompts,
 which suits scripts:
 
-  deployctl init --name my-api --image ghcr.io/company/my-api:1.0.0 --port 8080`,
+  shipwick init --name my-api --image ghcr.io/company/my-api:1.0.0 --port 8080`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			if _, err := os.Stat(file); err == nil && !force {
-				return fmt.Errorf("%s already exists\n\nEdit it, or overwrite it with: deployctl init --force", file)
+				return fmt.Errorf("%s already exists\n\nEdit it, or overwrite it with: shipwick init --force", file)
 			}
 
 			if answers.Name == "" {
@@ -65,7 +65,7 @@ which suits scripts:
 			}
 			c.ui.Success("Created %s", file)
 			c.ui.Println()
-			c.ui.Println("Review it, then run: deployctl deploy")
+			c.ui.Println("Review it, then run: shipwick deploy")
 			return nil
 		},
 	}

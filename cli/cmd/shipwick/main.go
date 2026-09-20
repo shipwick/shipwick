@@ -1,4 +1,4 @@
-// Command deployctl is the Shipwick command-line client.
+// Command shipwick is the Shipwick command-line client.
 package main
 
 import (

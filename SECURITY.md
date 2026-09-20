@@ -11,7 +11,7 @@ runs on. We treat security reports accordingly.
 - GitHub: [Report a vulnerability](https://github.com/shipwick/shipwick/security/advisories/new)
   (private; only maintainers see it)
 
-Helpful to include: the version (`deployctl --version`, or `deployctl server status` for the agent's),
+Helpful to include: the version (`shipwick --version`, or `shipwick server status` for the agent's),
 how you run the agent (the installer, your own compose file, a bare process),
 what an attacker needs to start with, and steps to reproduce. A proof of
 concept is welcome but not required.
