@@ -30,6 +30,10 @@ Properties worth keeping if you change it:
 
 - **Idempotent.** Running it again is how you upgrade. An existing `.env` —
   the token — is never rewritten.
+- **`compose.yml` belongs to the installer, `compose.override.yml` to the
+  user.** The first is replaced on every run; the second is never touched, and
+  Compose merges the two because the installer runs `docker compose` without
+  `-f`. Do not add `-f` back.
 - **Safe to pipe.** Everything is in functions and `main "$@"` is the last
   line: a download cut off half-way executes nothing.
 - **POSIX `sh`**, checked with `shellcheck -s sh` in CI. No bashisms.

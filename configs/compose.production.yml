@@ -15,14 +15,19 @@
 # and in a browser:               https://dashboard.example.com
 #
 # Certificates are obtained and renewed by Caddy on its own (Let's Encrypt).
+#
+# Installed by scripts/install.sh, this file is /opt/shipwick/compose.yml and is
+# replaced on every upgrade. Keep your own changes in a compose.override.yml
+# next to it: Compose merges the two, and the installer never touches it.
 
 # Pinned so container and volume names do not depend on the checkout directory.
 name: shipwick
 
 services:
   agent:
-    # Until images are published, build them on the server from the repository:
-    #   docker build -t ghcr.io/shipwick/agent .  &&  docker build -t ghcr.io/shipwick/dashboard dashboard/
+    # In a release, both images are pinned to the release's version. To run
+    # images built from source instead, set SHIPWICK_AGENT_IMAGE and
+    # SHIPWICK_DASHBOARD_IMAGE in .env.
     image: ${SHIPWICK_AGENT_IMAGE:-ghcr.io/shipwick/agent:latest}
     environment:
       SHIPWICK_AGENT_TOKEN: ${SHIPWICK_AGENT_TOKEN:?set SHIPWICK_AGENT_TOKEN in .env}
@@ -34,11 +39,11 @@ services:
       SHIPWICK_LOG_FORMAT: json
     # No published port on purpose: the API is plain HTTP, and the only ways in
     # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a
-    # public domain, add:   ports: ["127.0.0.1:9000:9000"]
+    # public domain, add in compose.override.yml:   ports: ["127.0.0.1:9000:9000"]
     volumes:
       - agent-data:/var/lib/shipwick
       - caddy-admin:/run/caddy
-      # `docker login` credentials, for private images:
+      # `docker login` credentials, for private images — in compose.override.yml:
       # - /root/.docker/config.json:/root/.docker/config.json:ro
       # Root-equivalent access to this server. See README → Security.
       - /var/run/docker.sock:/var/run/docker.sock

@@ -232,11 +232,11 @@ install_server() {
     write_env
     cd "$INSTALL_DIR"
 
-    if ! docker compose -f "$COMPOSE_FILE" pull --quiet 2>/dev/null; then
+    if ! docker compose pull --quiet 2>/dev/null; then
         # Not fatal if every image the compose file names is here anyway: built
         # locally (then only Caddy's needs pulling), or pulled earlier.
         missing=""
-        for image in $(docker compose -f "$COMPOSE_FILE" config --images); do
+        for image in $(docker compose config --images); do
             docker image inspect "$image" >/dev/null 2>&1 \
                 || docker pull --quiet "$image" >/dev/null 2>&1 \
                 || missing="$missing $image"
@@ -250,12 +250,12 @@ install_server() {
         warn "Could not pull images; using the ones already on this server."
     fi
 
-    docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+    docker compose up -d --remove-orphans
     step "Started the Shipwick services"
 
     printf '%s' "  Waiting for the agent"
     i=0
-    until docker compose -f "$COMPOSE_FILE" exec -T agent shipwick-agent healthcheck >/dev/null 2>&1; do
+    until docker compose exec -T agent shipwick-agent healthcheck >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -ge 60 ]; then
             printf '\n'
@@ -283,7 +283,11 @@ print_summary() {
         info "From your laptop or CI:   deployctl login --url https://$agent_domain"
     else
         info "No API hostname was set, so the API is not exposed. Reach it through a tunnel:"
-        info "  1. in $INSTALL_DIR/$COMPOSE_FILE, give the agent   ports: [\"127.0.0.1:9000:9000\"]   and run: docker compose up -d"
+        info "  1. create $INSTALL_DIR/compose.override.yml:"
+        info "         services:"
+        info "           agent:"
+        info "             ports: [\"127.0.0.1:9000:9000\"]"
+        info "     and run:   cd $INSTALL_DIR && docker compose up -d"
         info "  2. on your laptop:   ssh -N -L 9000:127.0.0.1:9000 root@<this-server> &   deployctl login"
     fi
     [ -z "$dashboard_domain" ] || info "Dashboard:                https://$dashboard_domain"
