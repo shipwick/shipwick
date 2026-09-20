@@ -1,0 +1,23 @@
+Shipwick
+Copyright 2026 The Shipwick Authors
+
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+Third-party software
+--------------------
+
+The source code in this repository is original. The artifacts built from it
+include third-party software, all of it under permissive licenses:
+
+shipwick-agent and deployctl (Go binaries) are compiled together with the
+modules listed in go.mod — Apache-2.0 (Moby, containerd, Cobra, OpenContainers,
+OpenTelemetry and others), BSD-3-Clause (modernc.org/sqlite and its runtime,
+golang.org/x/sys, golang.org/x/term, pflag) and MIT (go.yaml.in/yaml, go-winio,
+go-isatty and others). `go mod download` followed by `go list -m all` gives the
+exact versions; each module's license file is in its source tree.
+
+The dashboard image is built from the packages listed in
+dashboard/package-lock.json, which records the license of each. It bundles the
+Geist and Geist Mono typefaces, Copyright 2024 The Geist Project Authors
+(https://github.com/vercel/geist-font), licensed under the SIL Open Font
+License, Version 1.1 (https://openfontlicense.org).

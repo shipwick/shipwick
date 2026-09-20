@@ -1,0 +1,94 @@
+# Shipwick on a server: the agent, its reverse proxy, and the dashboard.
+# One self-contained file — scripts/install.sh sets all of this up for you.
+#
+#   1. Point DNS at this server: every application domain, plus the two below.
+#   2. Open ports 80 and 443 (443/udp too, for HTTP/3). Nothing else.
+#   3. Create `.env` next to this file:
+#
+#        SHIPWICK_AGENT_TOKEN=<openssl rand -hex 32>
+#        SHIPWICK_AGENT_DOMAIN=agent.example.com
+#        SHIPWICK_DASHBOARD_DOMAIN=dashboard.example.com
+#
+#   4. docker compose -f compose.production.yml up -d
+#
+# Then, from your laptop or CI:   deployctl login --url https://agent.example.com
+# and in a browser:               https://dashboard.example.com
+#
+# Certificates are obtained and renewed by Caddy on its own (Let's Encrypt).
+
+# Pinned so container and volume names do not depend on the checkout directory.
+name: shipwick
+
+services:
+  agent:
+    # Until images are published, build them on the server from the repository:
+    #   docker build -t ghcr.io/shipwick/agent .  &&  docker build -t ghcr.io/shipwick/dashboard dashboard/
+    image: ${SHIPWICK_AGENT_IMAGE:-ghcr.io/shipwick/agent:latest}
+    environment:
+      SHIPWICK_AGENT_TOKEN: ${SHIPWICK_AGENT_TOKEN:?set SHIPWICK_AGENT_TOKEN in .env}
+      SHIPWICK_CADDY_ADMIN: unix//run/caddy/admin.sock
+      # Served over HTTPS through Caddy. Leave either empty to not expose it:
+      # the API can still be reached through an SSH tunnel (see `ports` below).
+      SHIPWICK_AGENT_DOMAIN: ${SHIPWICK_AGENT_DOMAIN:-}
+      SHIPWICK_DASHBOARD_DOMAIN: ${SHIPWICK_DASHBOARD_DOMAIN:-}
+      SHIPWICK_LOG_FORMAT: json
+    # No published port on purpose: the API is plain HTTP, and the only ways in
+    # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a
+    # public domain, add:   ports: ["127.0.0.1:9000:9000"]
+    volumes:
+      - agent-data:/var/lib/shipwick
+      - caddy-admin:/run/caddy
+      # `docker login` credentials, for private images:
+      # - /root/.docker/config.json:/root/.docker/config.json:ro
+      # Root-equivalent access to this server. See README → Security.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [shipwick]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    command: caddy run --config /etc/caddy/bootstrap.json --resume
+    configs:
+      - source: caddy-bootstrap
+        target: /etc/caddy/bootstrap.json
+    ports:
+      # Override only if something else owns 80/443 — automatic HTTPS needs the
+      # real ones to be reachable from the internet.
+      - "${SHIPWICK_HTTP_PORT:-80}:80"
+      - "${SHIPWICK_HTTPS_PORT:-443}:443"
+      - "${SHIPWICK_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - caddy-data:/data # certificates — back this volume up, never delete it casually
+      - caddy-config:/config
+      # Caddy's admin API, on a unix socket only the agent shares. Never give
+      # it a TCP port on this network: application containers could reach it,
+      # and whoever reaches it controls all routing and the certificate store.
+      - caddy-admin:/run/caddy
+    networks: [shipwick]
+    restart: unless-stopped
+
+  dashboard:
+    image: ${SHIPWICK_DASHBOARD_IMAGE:-ghcr.io/shipwick/dashboard:latest}
+    environment:
+      SHIPWICK_AGENT_URL: http://agent:9000
+    # Reached only through Caddy, at SHIPWICK_DASHBOARD_DOMAIN. It has no
+    # credentials of its own: whoever signs in brings the agent token.
+    networks: [shipwick]
+    depends_on: [agent]
+    restart: unless-stopped
+
+configs:
+  # All Caddy needs to start with; the agent loads the real configuration.
+  caddy-bootstrap:
+    content: |
+      {"admin": {"listen": "unix//run/caddy/admin.sock"}}
+
+volumes:
+  agent-data:
+  caddy-data:
+  caddy-config:
+  caddy-admin:
+
+networks:
+  shipwick:
+    name: shipwick

@@ -1,0 +1,54 @@
+# deploy.yaml — everything Shipwick needs to run your application.
+# Only `name` and `image` are required.
+
+# Lowercase letters, digits and dashes. Identifies the application on the server.
+name: my-api
+
+# Any image reference Docker understands. For private registries, run
+# `docker login <registry>` once on the server; Shipwick uses those credentials.
+# Pin a version tag: deployments are recorded by it (1.4.2 here).
+image: ghcr.io/company/my-api:1.4.2
+
+# The port your application listens on inside the container. It is never
+# published on the host; the reverse proxy reaches it over a private network.
+# Required when `domain` or `health` is set.
+port: 8080
+
+# Public hostname. Shipwick configures Caddy to serve it over HTTPS.
+domain: api.example.com
+
+# Number of identical containers to run. Default: 1.
+replicas: 2
+
+# Environment variables. Values are stored on the server, never logged, and
+# masked in API responses.
+env:
+  DATABASE_URL: postgres://user:password@db.internal:5432/app
+  LOG_LEVEL: info
+
+# HTTP health check. A replica is healthy when `path` answers 2xx.
+#
+# Deploying: new replicas get interval × retries (30s here) to answer once;
+# if they never do, the deployment fails and the old version keeps running.
+# Slow starter? Raise retries.
+#
+# Running: a replica that fails `retries` checks in a row is restarted.
+health:
+  path: /health
+  interval: 10s # default 10s
+  timeout: 3s   # default 3s
+  retries: 3    # default 3
+
+# Per-replica limits. Omit for unlimited.
+resources:
+  cpu: 2        # cores; fractions allowed: 0.5
+  memory: 1gb   # 128mb, 512mb, 1gb, ...
+
+# What to do when a replica exits or turns unhealthy:
+#   always (default) | on-failure (non-zero exit / out of memory only) | never
+# Restarts back off (1s, 2s, 5s, 10s, 30s, then every 5m): no hot crash loops.
+restart:
+  policy: always
+
+deploy:
+  strategy: rolling

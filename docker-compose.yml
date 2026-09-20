@@ -1,0 +1,98 @@
+# Local development stack.
+#
+#   docker compose up --build        (or: make dev)
+#
+#   Dashboard  http://localhost:3000      (token: dev-token-do-not-use-in-production)
+#   Agent      http://localhost:9000
+#   Proxy      http://localhost:8080  ·  https://localhost:8443
+#
+# Try a routed application without touching DNS — *.localhost resolves to this
+# machine, and Caddy issues certificates for it from its own local CA:
+#
+#   domain: hello.localhost      →   curl -k https://hello.localhost:8443
+#
+# For a server, start from configs/compose.production.yml instead.
+
+# Pinned so container and volume names do not depend on the checkout directory.
+name: shipwick
+
+services:
+  agent:
+    build:
+      context: .
+      args:
+        VERSION: dev
+    environment:
+      # Development only. Production: generate one with `openssl rand -hex 32`.
+      SHIPWICK_AGENT_TOKEN: ${SHIPWICK_AGENT_TOKEN:-dev-token-do-not-use-in-production}
+      SHIPWICK_LOG_LEVEL: ${SHIPWICK_LOG_LEVEL:-debug}
+      SHIPWICK_CADDY_ADMIN: unix//run/caddy/admin.sock
+      # Optional: serve the agent API itself over HTTPS, e.g. agent.localhost
+      SHIPWICK_AGENT_DOMAIN: ${SHIPWICK_AGENT_DOMAIN:-}
+      # Optional: serve the dashboard through Caddy too, e.g. dashboard.localhost
+      SHIPWICK_DASHBOARD_DOMAIN: ${SHIPWICK_DASHBOARD_DOMAIN:-}
+    ports:
+      # Loopback only: the API is plain HTTP and must not face the network.
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - agent-data:/var/lib/shipwick
+      - caddy-admin:/run/caddy
+      # Root-equivalent access to this machine. See README → Security.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - shipwick
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    # --resume: after a restart, come back with the last configuration the
+    # agent loaded rather than the empty bootstrap one. (The agent would
+    # notice and reload within seconds either way.)
+    command: caddy run --config /etc/caddy/bootstrap.json --resume
+    configs:
+      - source: caddy-bootstrap
+        target: /etc/caddy/bootstrap.json
+    ports:
+      - "${SHIPWICK_HTTP_PORT:-8080}:80"
+      - "${SHIPWICK_HTTPS_PORT:-8443}:443"
+      - "${SHIPWICK_HTTPS_PORT:-8443}:443/udp" # HTTP/3
+    volumes:
+      - caddy-data:/data     # certificates: keep this volume
+      - caddy-config:/config # autosaved configuration, for --resume
+      # The admin API lives on a unix socket in a volume only the agent shares.
+      # On a TCP port it would be open to every application container on the
+      # network — and whoever can reach it controls all routing.
+      - caddy-admin:/run/caddy
+    networks:
+      - shipwick
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    environment:
+      # As seen from the dashboard's server side; the browser never talks to the agent.
+      SHIPWICK_AGENT_URL: http://agent:9000
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - shipwick
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+configs:
+  # All Caddy needs to start with; the agent loads the real configuration.
+  caddy-bootstrap:
+    content: |
+      {"admin": {"listen": "unix//run/caddy/admin.sock"}}
+
+volumes:
+  agent-data:
+  caddy-data:
+  caddy-config:
+  caddy-admin:
+
+networks:
+  # Applications, the agent (health checks) and Caddy (upstreams) share it.
+  shipwick:
+    name: shipwick

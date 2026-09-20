@@ -1,0 +1,22 @@
+node_modules
+.nuxt
+.output
+.nitro
+.cache
+dist
+
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+*.log
+
+# Development-only: the mock agent and the unit tests are not part of the image.
+mock
+tests
+vitest.config.ts

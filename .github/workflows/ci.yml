@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow runs all of this before it publishes anything.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: test -z "$(gofmt -l agent cli pkg)" || { gofmt -l agent cli pkg; exit 1; }
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags integration ./agent/internal/docker/
+      - name: go mod tidy is a no-op
+        run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: Known vulnerabilities in dependencies
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      # The race detector needs cgo, which is why it runs here and not on
+      # every developer machine.
+      - name: Unit tests (race detector)
+        run: go test -race -count=1 ./...
+
+      # Real container lifecycle against the runner's Docker daemon.
+      - name: Integration tests
+        run: go test -tags integration -count=1 -run Integration ./agent/internal/docker/
+
+      - name: Cross-compile
+        run: |
+          for target in linux/amd64 linux/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./agent/cmd/shipwick-agent
+          done
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cli/cmd/deployctl
+          done
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  images:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the agent image
+        run: docker build -t ghcr.io/shipwick/agent:ci .
+      - name: The agent image answers for itself
+        run: docker run --rm ghcr.io/shipwick/agent:ci version
+      - name: Build the dashboard image
+        run: docker build -t ghcr.io/shipwick/dashboard:ci dashboard/
+      - name: Compose files are valid
+        run: |
+          docker compose config --quiet
+          SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml config --quiet
+
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -s sh scripts/*.sh

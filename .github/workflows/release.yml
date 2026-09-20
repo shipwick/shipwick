@@ -1,0 +1,116 @@
+name: Release
+
+# Pushing a tag publishes a release:
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# A tag with a suffix (v0.2.0-rc.1) becomes a pre-release: it never moves the
+# images' "latest" tag and is not what the installer picks by default.
+# How to cut a release, step by step: docs/releasing.md
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
+  assets:
+    name: Release files
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Before anything is published: a release without notes is not a release.
+      - name: CHANGELOG.md has notes for this version
+        run: sh scripts/release-notes.sh "$GITHUB_REF_NAME"
+      - name: Build
+        run: sh scripts/build-release.sh "$GITHUB_REF_NAME"
+      - name: The binary knows its version
+        run: test "$(./dist/deployctl_linux_amd64 --version)" = "deployctl version $GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  images:
+    name: Image (${{ matrix.image }})
+    needs: [checks, assets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: agent
+            context: .
+            title: Shipwick agent
+          - image: dashboard
+            context: dashboard
+            title: Shipwick dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # v0.2.0 → 0.2.0, 0.2 and latest; v0.2.0-rc.1 → 0.2.0-rc.1 only.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/shipwick/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.licenses=Apache-2.0
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ github.ref_name }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+
+  publish:
+    name: GitHub release
+    # Last, and only if the images exist: a release whose compose file points
+    # at images that were never pushed would break every new installation.
+    needs: [assets, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Release notes from CHANGELOG.md
+        run: sh scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md $prerelease

@@ -1,0 +1,515 @@
+@import "tailwindcss";
+@import "@fontsource-variable/geist/wght.css";
+@import "@fontsource-variable/geist-mono/wght.css";
+
+/* ---------------------------------------------------------------------------
+   Design tokens
+
+   The UI is near-monochrome. Color carries meaning only: status (ok / warn /
+   danger / muted) and one accent for focus, links and selection.
+   Dark is a neutral dark: no blue tint, not pure black.
+   --------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-subtle: #fafafa;
+  --bg-hover: #f3f3f3;
+  --bg-active: #ebebeb;
+  --bg-inset: #f6f6f6;
+  --bg-overlay: rgb(0 0 0 / 0.32);
+
+  --line: #e6e6e6;
+  --line-strong: #d0d0d0;
+
+  --fg: #161616;
+  --fg-muted: #5a5a5a;
+  --fg-subtle: #737373;
+  --fg-faint: #a8a8a8;
+
+  --primary: #161616;
+  --primary-hover: #333333;
+  --primary-fg: #ffffff;
+
+  --accent: #0b62d6;
+
+  --ok: #12753a;
+  --ok-dot: #1f9d55;
+  --warn: #935f00;
+  --warn-dot: #d29411;
+  --warn-bg: #fdf6e3;
+  --warn-line: #ecd9a4;
+  --danger: #b4231f;
+  --danger-dot: #d93a35;
+  --danger-bg: #fdf1f0;
+  --danger-line: #f0c4c1;
+  --danger-solid: #b4231f;
+  --danger-solid-hover: #981b18;
+  --muted-dot: #a3a3a3;
+
+  /* Replica marks in the log viewer: a fixed categorical order, never status colors. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --bg: #121212;
+    --bg-subtle: #171717;
+    --bg-hover: #1e1e1e;
+    --bg-active: #262626;
+    --bg-inset: #0d0d0d;
+    --bg-overlay: rgb(0 0 0 / 0.6);
+
+    --line: #262626;
+    --line-strong: #383838;
+
+    --fg: #ededed;
+    --fg-muted: #a6a6a6;
+    --fg-subtle: #858585;
+    --fg-faint: #5c5c5c;
+
+    --primary: #ededed;
+    --primary-hover: #ffffff;
+    --primary-fg: #121212;
+
+    --accent: #5b9dff;
+
+    --ok: #4cc47d;
+    --ok-dot: #3bb36c;
+    --warn: #e0ab45;
+    --warn-dot: #d59a25;
+    --warn-bg: #211a0b;
+    --warn-line: #4a3a14;
+    --danger: #f2716a;
+    --danger-dot: #e5534b;
+    --danger-bg: #241110;
+    --danger-line: #55221f;
+    --danger-solid: #c93f39;
+    --danger-solid-hover: #dc4d46;
+    --muted-dot: #5c5c5c;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #121212;
+  --bg-subtle: #171717;
+  --bg-hover: #1e1e1e;
+  --bg-active: #262626;
+  --bg-inset: #0d0d0d;
+  --bg-overlay: rgb(0 0 0 / 0.6);
+
+  --line: #262626;
+  --line-strong: #383838;
+
+  --fg: #ededed;
+  --fg-muted: #a6a6a6;
+  --fg-subtle: #858585;
+  --fg-faint: #5c5c5c;
+
+  --primary: #ededed;
+  --primary-hover: #ffffff;
+  --primary-fg: #121212;
+
+  --accent: #5b9dff;
+
+  --ok: #4cc47d;
+  --ok-dot: #3bb36c;
+  --warn: #e0ab45;
+  --warn-dot: #d59a25;
+  --warn-bg: #211a0b;
+  --warn-line: #4a3a14;
+  --danger: #f2716a;
+  --danger-dot: #e5534b;
+  --danger-bg: #241110;
+  --danger-line: #55221f;
+  --danger-solid: #c93f39;
+  --danger-solid-hover: #dc4d46;
+  --muted-dot: #5c5c5c;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+}
+
+/* ---------------------------------------------------------------------------
+   Tailwind theme: the default palette is removed on purpose, so the only
+   colors available as utilities are the semantic tokens above.
+   --------------------------------------------------------------------------- */
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  --color-*: initial;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-bg: var(--bg);
+  --color-subtle: var(--bg-subtle);
+  --color-hover: var(--bg-hover);
+  --color-active: var(--bg-active);
+  --color-inset: var(--bg-inset);
+  --color-overlay: var(--bg-overlay);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-fg-faint: var(--fg-faint);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-fg: var(--primary-fg);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-ok-dot: var(--ok-dot);
+  --color-warn: var(--warn);
+  --color-warn-dot: var(--warn-dot);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-line: var(--warn-line);
+  --color-danger: var(--danger);
+  --color-danger-dot: var(--danger-dot);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-line: var(--danger-line);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-solid-hover: var(--danger-solid-hover);
+  --color-muted-dot: var(--muted-dot);
+
+  /* Type scale: 11 / 12 / 13 (base) / 14 / 16 / 20 */
+  --text-*: initial;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+
+  --radius-*: initial;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-full: 9999px;
+
+  --shadow-*: initial;
+  --shadow-dialog: 0 16px 48px -12px rgb(0 0 0 / 0.28);
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+   --------------------------------------------------------------------------- */
+
+@layer base {
+  html {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  body {
+    min-height: 100dvh;
+    font-size: 0.8125rem;
+    line-height: 1.25rem;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  h1, h2, h3 {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+  }
+
+  code, kbd, pre, samp {
+    font-family: var(--font-mono);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Components that are easier to express as classes than as utility strings
+   --------------------------------------------------------------------------- */
+
+@layer components {
+  /* Identifiers and measurements: names, versions, images, IDs, durations, sizes, timestamps. */
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  /* Short mono phrases ("2m ago"): a full mono space between words reads as a gap. */
+  .tight {
+    word-spacing: -0.2em;
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Uppercase micro-label: table headers, section labels, definition terms. */
+  .label {
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-subtle);
+  }
+
+  .link {
+    color: var(--fg);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+
+  .link:hover {
+    text-decoration-color: var(--fg);
+  }
+
+  /* Dense data table. Below 640px each row becomes a stacked block and cells
+     show their column name (data-label) on the left. */
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+
+  .data-table th {
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-subtle);
+    text-align: left;
+    white-space: nowrap;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-subtle);
+  }
+
+  .data-table td {
+    padding: 0.5625rem 0.75rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+  }
+
+  .data-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  .data-table th:first-child,
+  .data-table td:first-child {
+    padding-left: 1rem;
+  }
+
+  .data-table th:last-child,
+  .data-table td:last-child {
+    padding-right: 1rem;
+  }
+
+  .data-table .right {
+    text-align: right;
+  }
+
+  .data-table tr.clickable {
+    cursor: pointer;
+  }
+
+  .data-table tr.clickable:hover td {
+    background: var(--bg-hover);
+  }
+
+  @media (max-width: 639px) {
+    .data-table.stack thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+
+    .data-table.stack,
+    .data-table.stack tbody,
+    .data-table.stack tr,
+    .data-table.stack td {
+      display: block;
+      width: 100%;
+    }
+
+    .data-table.stack tr {
+      padding: 0.625rem 1rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .data-table.stack tbody tr:last-child {
+      border-bottom: 0;
+    }
+
+    .data-table.stack td,
+    .data-table.stack td:first-child,
+    .data-table.stack td:last-child {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.1875rem 0;
+      border: 0;
+      text-align: right;
+      min-width: 0;
+    }
+
+    .data-table.stack td::before {
+      content: attr(data-label);
+      flex: none;
+      font-family: var(--font-sans);
+      word-spacing: normal;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--fg-subtle);
+      text-align: left;
+    }
+
+    .data-table.stack td[data-primary] {
+      justify-content: flex-start;
+      text-align: left;
+      padding-bottom: 0.25rem;
+    }
+
+    .data-table.stack td[data-primary]::before,
+    .data-table.stack td:not([data-label])::before {
+      content: none;
+    }
+
+    .data-table.stack td:empty {
+      display: none;
+    }
+  }
+
+  /* Form controls */
+  .input {
+    width: 100%;
+    height: 2rem;
+    padding: 0 0.625rem;
+    font-size: 0.8125rem;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    transition: border-color 120ms;
+  }
+
+  .input::placeholder {
+    color: var(--fg-faint);
+  }
+
+  .input:hover {
+    border-color: var(--fg-faint);
+  }
+
+  .input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+    border-color: var(--accent);
+    border-radius: 4px;
+  }
+
+  .input[aria-invalid="true"] {
+    border-color: var(--danger-dot);
+  }
+
+  select.input {
+    appearance: none;
+    padding-right: 1.75rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23808080' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4.5 6.5 3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.375rem center;
+  }
+
+  /* Skeleton placeholder: flat, with a slow opacity pulse (disabled by reduced motion). */
+  .skeleton {
+    display: block;
+    height: 0.75rem;
+    border-radius: 2px;
+    background: var(--bg-active);
+    animation: skeleton-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes skeleton-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .spinner {
+    animation: spin 0.7s linear infinite;
+  }
+}

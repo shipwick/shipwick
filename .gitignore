@@ -1,0 +1,26 @@
+# Build output
+/bin/
+/dist/
+
+# Local agent state
+*.db
+*.db-shm
+*.db-wal
+/data/
+/shipwick-data/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Dashboard
+node_modules/
+.nuxt/
+.output/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

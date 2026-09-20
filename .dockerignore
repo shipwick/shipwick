@@ -1,0 +1,10 @@
+.git
+bin
+dist
+dashboard
+docs
+configs
+scripts
+**/*.md
+**/*.db
+.env*
