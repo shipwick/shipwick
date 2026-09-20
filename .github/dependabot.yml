@@ -1,4 +1,9 @@
 # Weekly, grouped: one pull request per ecosystem instead of one per package.
+#
+# Major versions are left out for npm and for the Node base image: moving to a
+# new TypeScript, Nuxt or Node major is a decision, made by hand and tested by
+# hand — and the dashboard stays on Node's LTS line, which odd majors are not.
+# Security updates are not affected by `ignore`; Dependabot opens those anyway.
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -10,12 +15,18 @@ updates:
   - package-ecosystem: npm
     directory: /dashboard
     schedule: { interval: weekly }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       dashboard: { patterns: ["*"] }
 
   - package-ecosystem: docker
     directories: ["/", "/dashboard"]
     schedule: { interval: weekly }
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
