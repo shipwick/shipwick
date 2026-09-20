@@ -8,6 +8,11 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-21
+
+Found by installing 0.1.0 on real servers. The agent, the CLI and the dashboard
+are unchanged; upgrade by running the installer again.
+
 ### Added
 
 - The CLI can be installed with Homebrew: `brew install shipwick/tap/shipwick`.
@@ -23,6 +28,14 @@ says so under **Changed** and explains how to upgrade.
   the installer are kept in `.env`, so an upgrade does not move the proxy back
   to the default ports.
 - The installer works with BusyBox `wget` (Alpine without curl).
+
+### Documentation
+
+- What a deployment costs is stated as measured on a real server: connections
+  being established at the instant Caddy's configuration is reloaded are reset —
+  5 of 233 requests in the worst case, a new connection per request from 100 ms
+  away. The earlier figure, 100 of 100, was measured over loopback, where this
+  cannot be seen.
 
 ## [0.1.0] - 2026-09-20
 
@@ -67,5 +80,6 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/shipwick/shipwick/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/shipwick/shipwick/releases/tag/v0.1.0
