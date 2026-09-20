@@ -6,17 +6,32 @@ name: Release
 #
 # A tag with a suffix (v0.2.0-rc.1) becomes a pre-release: it never moves the
 # images' "latest" tag and is not what the installer picks by default.
+#
+# Run by hand (Actions → Release → Run workflow), this is a dry run: everything
+# is built exactly as for a release — binaries, both images for both platforms,
+# the notes — and nothing is pushed or published. Use it after changing this
+# file, the Dockerfiles or the release scripts.
+#
 # How to cut a release, step by step: docs/releasing.md
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to pretend to release (dry run; nothing is published)
+        default: v0.0.0-dryrun
 
 permissions:
   contents: read
 
 concurrency:
   group: release-${{ github.ref }}
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
+  PUBLISH: ${{ github.event_name == 'push' }}
 
 jobs:
   checks:
@@ -34,11 +49,11 @@ jobs:
           go-version-file: go.mod
       # Before anything is published: a release without notes is not a release.
       - name: CHANGELOG.md has notes for this version
-        run: sh scripts/release-notes.sh "$GITHUB_REF_NAME"
+        run: sh scripts/release-notes.sh "$VERSION"
       - name: Build
-        run: sh scripts/build-release.sh "$GITHUB_REF_NAME"
+        run: sh scripts/build-release.sh "$VERSION"
       - name: The binary knows its version
-        run: test "$(./dist/shipwick_linux_amd64 --version)" = "shipwick version $GITHUB_REF_NAME"
+        run: test "$(./dist/shipwick_linux_amd64 --version)" = "shipwick version $VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -66,6 +81,7 @@ jobs:
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
+        if: env.PUBLISH == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -76,8 +92,8 @@ jobs:
         with:
           images: ghcr.io/shipwick/${{ matrix.image }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ env.VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }}
           labels: |
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.licenses=Apache-2.0
@@ -85,10 +101,10 @@ jobs:
         with:
           context: ${{ matrix.context }}
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ env.VERSION }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          push: true
+          push: ${{ env.PUBLISH == 'true' }}
 
   publish:
     name: GitHub release
@@ -104,13 +120,22 @@ jobs:
         with:
           name: dist
           path: dist
+      - name: The files are the ones that were built
+        run: cd dist && sha256sum -c checksums.txt
       - name: Release notes from CHANGELOG.md
-        run: sh scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+        run: sh scripts/release-notes.sh "$VERSION" > notes.md
       - name: Publish
+        if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           prerelease=""
-          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md $prerelease
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$VERSION" dist/* \
+            --verify-tag --title "$VERSION" --notes-file notes.md $prerelease
+      - name: Dry run — this is what a release would have published
+        if: env.PUBLISH != 'true'
+        run: |
+          ls -l dist
+          echo "--- notes"
+          cat notes.md

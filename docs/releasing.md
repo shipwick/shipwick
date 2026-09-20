@@ -49,6 +49,17 @@ curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.2.0-rc.1 sh
 Use one whenever a release touches the installer, the compose file or the
 upgrade path: those are only really tested on a real server.
 
+## Dry run
+
+**Actions → Release → Run workflow** runs the whole pipeline without publishing
+anything: the checks, the binaries, both images for both platforms, the trip of
+the files from one job to the next, the notes. Nothing is pushed to the
+registry and no release is created.
+
+Do this after changing `release.yml`, a Dockerfile or the release scripts — and
+after merging an update of the actions the workflow uses. The CI of such a pull
+request says nothing about it: the release workflow only runs on tags.
+
 ## If a release goes wrong
 
 - **The workflow failed before "GitHub release"**: nothing users see has
@@ -62,6 +73,8 @@ upgrade path: those are only really tested on a real server.
 
 Things the workflow cannot do for itself:
 
+- **Allow public packages in the organization**, or the next step is greyed
+  out: Organization settings → Packages → Package creation → Public.
 - **Make the two packages public.** GHCR creates packages as private on the
   first push, and a server cannot pull a private image:
   github.com/orgs/shipwick/packages → each package → *Package settings* →
