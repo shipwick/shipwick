@@ -106,7 +106,9 @@ a dashboard change, and the race detector for anything that touches
 Behavior users can see is documented in [README.md](README.md); keep it true.
 User-visible changes get a line under *Unreleased* in
 [CHANGELOG.md](CHANGELOG.md). Measured numbers in the docs were measured; do not
-invent new ones.
+invent new ones. The public documentation at shipwick.com is a separate
+repository, `shipwick/website`; say so in your summary when a change makes it
+out of date.
 
 ## Git
 

@@ -24,7 +24,8 @@ go build -o bin/deployctl ./cli/cmd/deployctl      # or: make build
 | `deployctl login` | Save the agent URL and token |
 
 Commands taking `[app]` default to the application named in `./deploy.yaml`
-(`-f` selects another file). `delete` is the deliberate exception: it always
+(`-f`/`--file` selects another file; for `logs`, where `-f` means `--follow`,
+only the long form `--file`). `delete` is the deliberate exception: it always
 wants the name spelled out.
 
 ## Connecting to the agent

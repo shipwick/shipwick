@@ -38,15 +38,15 @@ Failure — `details` is always an object:
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 400 | `INVALID_REQUEST` | Malformed path or query parameter, body/URL name mismatch |
-| 400 | `INVALID_CONFIG` | deploy.yaml failed validation; `details.fields` lists **every** problem. Also returned, with field `domain`, when the domain is already served by another application or by the agent |
+| 400 | `INVALID_REQUEST` | Malformed path or query parameter; body/URL name mismatch; invalid JSON, an unknown field or an invalid `image` in a redeploy or rollback body; such a body larger than 4 KB |
+| 400 | `INVALID_CONFIG` | deploy.yaml failed validation; `details.fields` lists **every** problem. Also returned, with field `domain`, when the domain is already served by another application or by the agent — by `redeploy` and `rollback` too, since a stored configuration's domain may have been taken since |
 | 401 | `UNAUTHORIZED` | Missing or wrong token |
-| 404 | `NOT_FOUND` | Unknown application or deployment |
-| 404 | `ENDPOINT_NOT_FOUND` | This agent has no such operation — an older agent, or a typo in the path |
+| 404 | `NOT_FOUND` | Unknown application or deployment, including a rollback's `deployment_id` that does not exist |
+| 404 | `ENDPOINT_NOT_FOUND` | This agent has no such operation — an older agent, a typo in the path, or a method the path does not support (there is no `405`). Answered without checking the token |
 | 409 | `DEPLOYMENT_IN_PROGRESS` | Another operation holds this application |
 | 409 | `NOT_DEPLOYED` | The application has no active deployment to act on |
 | 409 | `NO_ROLLBACK_TARGET` | No earlier successful deployment; or the requested one is active, never succeeded, or belongs to another application |
-| 413 | `INVALID_REQUEST` | Body larger than 64 KB |
+| 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB |
 | 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down |
 | 500 | `INTERNAL_ERROR` | Anything else; `message` carries the cause |
 
@@ -141,6 +141,13 @@ The body is optional; unknown fields are rejected (a typo such as `"imgae"`
 must not quietly redeploy the old image). Every `Deployment` carries
 `kind` — `deploy`, `redeploy` or `rollback` — and, for the latter two,
 `source_deployment_id`: the deployment whose configuration it re-used.
+
+A rollback's `deployment_id` is the deployment's `id`, not its per-application
+`sequence`. Omitted or `0`, the target is the most recent `SUPERSEDED`
+deployment. Only `SUPERSEDED` deployments of the same application are valid
+targets — they are the ones that once served successfully: anything else is
+`409 NO_ROLLBACK_TARGET`, an id that does not exist is `404 NOT_FOUND`, and a
+negative one is `400 INVALID_REQUEST`.
 
 ### Following logs
 

@@ -18,6 +18,8 @@ replicas: 2
 deployctl deploy
 ```
 
+**[Documentation](https://shipwick.com/docs/)** · [Install](https://shipwick.com/docs/getting-started/install) · [deploy.yaml reference](https://shipwick.com/docs/reference/deploy-yaml) · [Changelog](CHANGELOG.md)
+
 > **Status: 0.x.** Shipwick is young. Before 1.0, a minor version may still
 > change the API, `deploy.yaml` or the on-disk format; the
 > [changelog](CHANGELOG.md) will say so when it happens, and how to upgrade.
@@ -136,8 +138,19 @@ version it installed until you run the installer again. A specific version:
 with `SHIPWICK_AGENT_TOKEN` and the hostnames.
 
 **No hostname to spare for the API?** Leave `SHIPWICK_AGENT_DOMAIN` empty,
-publish the API on the server's loopback only (see the comment in the compose
-file), and reach it through `ssh -L 9000:127.0.0.1:9000 user@server`.
+publish the API on the server's loopback only, and reach it through
+`ssh -L 9000:127.0.0.1:9000 user@server`.
+
+**Your own changes** — that loopback port, a mount for registry credentials —
+go into `/opt/shipwick/compose.override.yml`. Compose merges it with
+`compose.yml`; the installer replaces `compose.yml` on every upgrade and never
+touches the override:
+
+```yaml
+services:
+  agent:
+    ports: ["127.0.0.1:9000:9000"]
+```
 
 The agent also runs as a plain binary on Linux (`make build`), next to a Caddy
 installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
@@ -145,8 +158,8 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 | Variable | Default | |
 |---|---|---|
 | `SHIPWICK_AGENT_TOKEN` | generated | API bearer token, min. 16 characters |
-| `SHIPWICK_LISTEN_ADDR` | `127.0.0.1:9000` | Loopback by default, on purpose |
-| `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database and token hash |
+| `SHIPWICK_LISTEN_ADDR` | `127.0.0.1:9000` | Loopback by default, on purpose. The container image sets `0.0.0.0:9000`, reachable on the Docker network only: the compose file publishes no port |
+| `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database and token hash. Off Linux, the default is `shipwick` in the user's configuration directory |
 | `SHIPWICK_DOCKER_NETWORK` | `shipwick` | Network application containers join |
 | `SHIPWICK_CADDY_ADMIN` | — | Caddy's admin endpoint: `unix//run/caddy/admin.sock` (recommended) or `http://127.0.0.1:2019`. Unset: domains are recorded but not served |
 | `SHIPWICK_AGENT_DOMAIN` | — | Serve the agent's API over HTTPS at this hostname, through Caddy |
@@ -219,7 +232,7 @@ Only `name` and `image` are required. Annotated example:
 
 | Field | Default | |
 |---|---|---|
-| `name` | — | Lowercase letters, digits, dashes; max 63 |
+| `name` | — | Lowercase letters, digits, dashes; starts and ends with a letter or digit; max 63 |
 | `image` | — | Any Docker image reference. Its tag becomes the deployment's version |
 | `port` | — | Port the app listens on. Required with `domain` or `health` |
 | `domain` | — | Public hostname, served over HTTPS by Caddy |
@@ -383,9 +396,9 @@ stay up for a few seconds.
 | What happens | What Shipwick does |
 |---|---|
 | A replica exits | Restarts it, as `restart.policy` allows: `always` (default), `on-failure` (non-zero exit or out of memory only), `never` |
-| A replica runs but fails `retries` checks in a row | Marks it `unhealthy` and restarts it — the classic cure for a deadlocked process. A single failed check changes nothing |
+| A replica runs but fails `retries` checks in a row | Marks it `unhealthy` and restarts it — the classic cure for a deadlocked process — under every policy except `never`. A single failed check changes nothing |
 | A replica keeps dying | Backs off: **1s, 2s, 5s, 10s, 30s**. After five restarts that did not hold, the application is `CRASH_LOOP` and is retried **every 5 minutes** — never in a hot loop, but if the cause goes away (the database comes back), it recovers on its own |
-| A replica stays healthy for a minute | Its restart history is forgiven; the next crash starts again at 1s |
+| A replica runs for a minute since its last restart, and is not failing its health check | Its restart history is forgiven; the next crash starts again at 1s |
 | A replica's container is gone — `docker rm`, `docker system prune`, anything that is not Shipwick | Recreates it from the deployment's stored configuration, within about a second: desired 3, present 2 → create 1 |
 
 `deployctl status` shows each replica's health and restart count, and a feed of

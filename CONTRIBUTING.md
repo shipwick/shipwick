@@ -74,6 +74,10 @@ make test-dashboard     # if you touched dashboard/
   [docs/api.md](docs/api.md) for the API (together with the dashboard and its
   mock agent, which implement the same contract), `CHANGELOG.md` under
   *Unreleased*.
+  The website, [shipwick.com](https://shipwick.com), is a repository of its own,
+  [shipwick/website](https://github.com/shipwick/website): a change to a
+  command, a `deploy.yaml` field, the API or the installer needs a pull request
+  there too.
 - Code reads like the code around it. Comments explain why, not what.
 
 Keep pull requests to one concern; a refactoring and a behavior change are two

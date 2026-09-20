@@ -1,0 +1,8 @@
+# LF everywhere, whatever the contributor's platform and core.autocrlf say:
+# shell scripts, Dockerfiles and compose files are run inside Linux containers
+# straight from the working tree, where a CRLF breaks them.
+* text=auto eol=lf
+
+*.png  binary
+*.ico  binary
+*.woff2 binary
