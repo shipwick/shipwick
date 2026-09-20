@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove tokens, `env` values and hostnames you do not want public before
+        you paste anything. A security problem does not belong here: report it
+        [privately](https://github.com/shipwick/shipwick/security/advisories/new).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The command you ran and its output; the `deploy.yaml`, if it matters.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: The output of `shipwick server status` — agent, CLI and Docker versions in one place.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is the agent installed?
+      options:
+        - The installer (get.shipwick.com)
+        - compose.production.yml by hand
+        - A plain binary
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Agent log and events
+      description: "`docker compose logs agent` in /opt/shipwick around the time it happened, and the event list at the end of `shipwick status <app>`."
+      render: text

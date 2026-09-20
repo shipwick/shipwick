@@ -6,6 +6,9 @@ welcome.
 **Security problems do not belong in issues or pull requests** — see
 [SECURITY.md](SECURITY.md).
 
+Everyone taking part is expected to follow the
+[code of conduct](https://github.com/shipwick/.github/blob/main/CODE_OF_CONDUCT.md).
+
 ## Before you write code
 
 For anything beyond a bug fix, open an issue first and describe the problem you

@@ -1,0 +1,22 @@
+name: Feature request
+description: Something Shipwick should do, or do differently.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Shipwick stays small on purpose: one server, no scheduler, nothing to
+        operate besides Docker. The [roadmap](https://github.com/shipwick/shipwick#14-roadmap)
+        says what is planned and what is out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem, not the solution. What do you do today instead?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: If you have it in mind, how it would look in `deploy.yaml`, on the command line or in the API.
