@@ -41,6 +41,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - shipwick
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
   caddy:
@@ -66,6 +67,7 @@ services:
     networks:
       - shipwick
       - shipwick-services
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
   dashboard:
@@ -79,6 +81,7 @@ services:
       - shipwick
     depends_on:
       - agent
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
 configs:

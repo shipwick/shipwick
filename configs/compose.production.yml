@@ -48,6 +48,7 @@ services:
       # Root-equivalent access to this server. See README → Security.
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [shipwick]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
   caddy:
@@ -72,6 +73,7 @@ services:
     # On the services network Caddy finds the replicas of an application by
     # the application's name; which replicas carry it is the agent's doing.
     networks: [shipwick, shipwick-services]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
   dashboard:
@@ -82,6 +84,7 @@ services:
     # credentials of its own: whoever signs in brings the agent token.
     networks: [shipwick]
     depends_on: [agent]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
 configs:

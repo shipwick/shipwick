@@ -86,3 +86,15 @@ Things the workflow cannot do for itself:
   always be able to install the latest *release*.
 - Repository settings: enable *Private vulnerability reporting* (SECURITY.md
   links to it), and protect `v*` tags so only maintainers can release.
+
+## After the release
+
+Two package managers carry the CLI, and neither reads the GitHub release on
+its own:
+
+- **Homebrew**: `shipwick/homebrew-tap` checks for a new release once a day and
+  updates the formula itself. To do it now, run its *Update* workflow
+  (`gh workflow run update.yml -R shipwick/homebrew-tap`).
+- **winget**: generate the manifests with `packaging/winget/update-manifests.sh`
+  and open the pull request to microsoft/winget-pkgs described in
+  [packaging/winget/README.md](../packaging/winget/README.md).

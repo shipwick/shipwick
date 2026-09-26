@@ -8,6 +8,21 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Old images are removed.** After a successful deployment, and after `shipwick
+  delete`, the images only retired deployments refer to are untagged. The running
+  version and the rollback target are always kept, and so is any image another
+  application or a container outside Shipwick uses.
+- winget manifests for the CLI under `packaging/winget/`, generated from a
+  release's checksums.
+
+### Fixed
+
+- The agent, Caddy and dashboard containers of the production compose file now
+  cap their logs at 3 × 10 MB each, like application replicas always did.
+  Applied on the next `curl -fsSL https://get.shipwick.com | sh`.
+
 ## [0.2.0] - 2026-09-27
 
 Before 1.0 a minor version may change how things work under the hood. This one

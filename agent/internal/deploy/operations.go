@@ -110,11 +110,15 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 			return fmt.Errorf("remove container %s: %w", containers[i].Name, err)
 		}
 	}
+	// Its images go too, unless another application keeps them. Listed
+	// before the records are deleted; the volumes stay, on purpose.
+	images, _ := e.deployedImages(ctx, name)
 	if err := e.store.DeleteApplication(ctx, app.ID); err != nil {
 		return err
 	}
 	e.syncProxyBestEffort(ctx, name)
-	e.log.Info("application deleted", "app", name, "containers", len(containers))
+	removed := e.pruneImages(ctx, images)
+	e.log.Info("application deleted", "app", name, "containers", len(containers), "images", removed)
 	return nil
 }
 

@@ -55,6 +55,7 @@ type Fake struct {
 	nameChanges                    int
 	renaming                       map[string]bool
 	namedAt, stoppedAt             map[string]time.Time // by container name
+	removedImages                  []string
 }
 
 func New() *Fake {
@@ -434,4 +435,28 @@ func (f *Fake) StoppedAt(name string) time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.stoppedAt[name]
+}
+
+// RemoveImage forgets a local image, unless a container — running or not —
+// still uses it, like the real daemon without --force.
+func (f *Fake) RemoveImage(_ context.Context, image string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.containers {
+		if c.Image == image {
+			return docker.ErrImageInUse
+		}
+	}
+	if f.local[image] {
+		delete(f.local, image)
+		f.removedImages = append(f.removedImages, image)
+	}
+	return nil
+}
+
+// RemovedImages lists the images removed so far, in order.
+func (f *Fake) RemovedImages() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.removedImages...)
 }

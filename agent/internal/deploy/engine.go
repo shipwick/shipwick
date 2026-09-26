@@ -35,6 +35,9 @@ type Runtime interface {
 	EnsureNetwork(ctx context.Context) error
 	PullImage(ctx context.Context, image string) error
 	ImageExists(ctx context.Context, image string) (bool, error)
+	// RemoveImage untags an image, or returns docker.ErrImageInUse if a
+	// container still uses it.
+	RemoveImage(ctx context.Context, image string) error
 	CreateContainer(ctx context.Context, spec docker.ContainerSpec) (id, name string, err error)
 	StartContainer(ctx context.Context, id string) error
 	StopContainer(ctx context.Context, id string, timeout time.Duration) error

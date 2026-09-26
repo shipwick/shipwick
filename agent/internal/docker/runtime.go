@@ -236,6 +236,23 @@ func (r *Runtime) ImageExists(ctx context.Context, image string) (bool, error) {
 	return true, nil
 }
 
+// ErrImageInUse means a container still uses the image; it was left alone.
+var ErrImageInUse = errors.New("image is in use")
+
+// RemoveImage untags an image. Never forced: an image a container uses —
+// anyone's container — stays, and the caller hears ErrImageInUse. A missing
+// image is not an error.
+func (r *Runtime) RemoveImage(ctx context.Context, image string) error {
+	_, err := r.cli.ImageRemove(ctx, image, client.ImageRemoveOptions{})
+	switch {
+	case err == nil, cerrdefs.IsNotFound(err):
+		return nil
+	case cerrdefs.IsConflict(err):
+		return ErrImageInUse
+	}
+	return fmt.Errorf("remove image %s: %w", image, err)
+}
+
 // CreateContainer creates (but does not start) a replica container attached
 // to the Shipwick network. Containers publish no host ports: the reverse proxy
 // reaches them over the network.

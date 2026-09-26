@@ -303,6 +303,14 @@ as the new version takes to start. If the new version fails, the old
 containers — kept, stopped — are started again. Applications with `volumes`
 must use it.
 
+**Old images are removed.** After a successful deployment, the images that only
+retired deployments of the application refer to are removed from the server, so
+a server that deploys daily does not fill its disk with versions nobody can
+return to. Two are always kept per application: the one running, and the one
+of the most recent earlier version — the rollback target, so a rollback never
+waits for a pull. Images another application uses, or a container started
+outside Shipwick, are never touched.
+
 **Volumes.** `volumes` mounts named Docker volumes into the replica:
 
 ```yaml
