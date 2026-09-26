@@ -129,15 +129,22 @@ func fileFlag(cmd *cobra.Command, target *string) {
 	cmd.Flags().StringVarP(target, "file", "f", DefaultFile, "path to the deployment config")
 }
 
-// readConfig loads and validates a deploy.yaml, returning both the raw
-// document (what is sent to the agent) and its parsed form.
-func readConfig(path string) ([]byte, spec.App, error) {
+// nameOnly parses a deploy.yaml for its application name.
+func (c *cli) nameOnly(path string) (spec.App, error) {
 	data, err := readFile(path)
 	if err != nil {
-		return nil, spec.App{}, err
+		return spec.App{}, err
 	}
-	app, err := spec.Parse(data)
-	return data, app, err
+	data, _, err = expand(data, func(name string) (string, bool) {
+		if v := c.getenv(name); v != "" {
+			return v, true
+		}
+		return "placeholder", true
+	})
+	if err != nil {
+		return spec.App{}, err
+	}
+	return spec.Parse(data)
 }
 
 func readFile(path string) ([]byte, error) {
@@ -150,14 +157,17 @@ func readFile(path string) ([]byte, error) {
 
 // resolveApp determines which application a command targets: the explicit
 // argument, or else the one described by the config file.
-func resolveApp(args []string, file string) (string, error) {
+func (c *cli) resolveApp(args []string, file string) (string, error) {
 	if len(args) > 0 {
 		if err := spec.ValidateName(args[0]); err != nil {
 			return "", err
 		}
 		return args[0], nil
 	}
-	_, app, err := readConfig(file)
+	// Only the name is wanted. Placeholders that are not set here — a CI
+	// secret, an image tag — are filled with a stand-in so that the rest of
+	// the file still parses.
+	app, err := c.nameOnly(file)
 	if err != nil {
 		var verr *spec.ValidationError
 		if errors.As(err, &verr) {

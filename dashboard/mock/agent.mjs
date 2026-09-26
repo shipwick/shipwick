@@ -285,6 +285,19 @@ function seed() {
     app.active_deployment_id = active.id
     app.updated_at = active.completed_at
     app.containers = makeContainers(app, active)
+    // A database: one replica, named volumes, recreate strategy.
+    const db = addApp('postgres', ago(20 * DAY))
+    const dbSpec = spec('postgres', 'postgres:17', {
+      port: 5432,
+      env: { POSTGRES_USER: MASK, POSTGRES_PASSWORD: MASK, POSTGRES_DB: MASK },
+      volumes: [{ name: 'data', path: '/var/lib/postgresql/data' }],
+      deploy: { strategy: 'recreate' },
+    })
+    const dbActive = addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
+    db.active_deployment_id = dbActive.id
+    db.updated_at = dbActive.completed_at
+    db.containers = makeContainers(db, dbActive)
+
     addAppEvent('my-api', 'warn', 'supervisor', 'Replica 2 exited with code 137 (out of memory); restarting in 1s', startedAt - 3 * DAY)
     addAppEvent('my-api', 'info', 'supervisor', 'Replica 2 restarted', startedAt - 3 * DAY + 1200)
     addAppEvent('my-api', 'info', 'supervisor', 'Replica 2 is healthy again', startedAt - 3 * DAY + 4100)

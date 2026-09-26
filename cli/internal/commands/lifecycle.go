@@ -15,7 +15,7 @@ func (c *cli) stopCommand() *cobra.Command {
 		Short: "Stop an application; it stays stopped until started or deployed again",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := resolveApp(args, file)
+			name, err := c.resolveApp(args, file)
 			if err != nil {
 				return err
 			}
@@ -43,7 +43,7 @@ func (c *cli) startCommand() *cobra.Command {
 		Short: "Start a stopped application",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := resolveApp(args, file)
+			name, err := c.resolveApp(args, file)
 			if err != nil {
 				return err
 			}
@@ -72,7 +72,7 @@ func (c *cli) deleteCommand() *cobra.Command {
 		// from the wrong directory is too easy a mistake.
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := resolveApp(args, "")
+			name, err := c.resolveApp(args, "")
 			if err != nil {
 				return err
 			}

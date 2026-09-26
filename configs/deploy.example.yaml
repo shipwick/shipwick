@@ -21,9 +21,11 @@ domain: api.example.com
 replicas: 2
 
 # Environment variables. Values are stored on the server, never logged, and
-# masked in API responses.
+# masked in API responses. ${NAME} is filled in by the CLI from its environment
+# or --env-file when you deploy, so that secrets never have to be in this file.
+# Other applications on the server are reached by name: postgres:5432.
 env:
-  DATABASE_URL: postgres://user:password@db.internal:5432/app
+  DATABASE_URL: postgres://app:${DATABASE_PASSWORD}@postgres:5432/app
   LOG_LEVEL: info
 
 # HTTP health check. A replica is healthy when `path` answers 2xx.
@@ -52,3 +54,17 @@ restart:
 
 deploy:
   strategy: rolling
+
+# Data that must outlive deployments — a database. Named volumes belong to the
+# application and are kept across redeployments, rollbacks and delete. They
+# need replicas: 1 and the recreate strategy: two versions on one volume is
+# how data gets lost.
+# volumes:
+#   - name: data
+#     path: /var/lib/postgresql/data
+
+# rolling (default): replicas are replaced one at a time, the application keeps
+# serving. recreate: the running version is stopped before the new one starts;
+# required with volumes.
+# deploy:
+#   strategy: recreate

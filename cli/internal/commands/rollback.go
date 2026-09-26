@@ -30,7 +30,7 @@ replica by replica, health-checked, and recorded as a new entry in the
 history; nothing is rewritten.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := resolveApp(args, file)
+			name, err := c.resolveApp(args, file)
 			if err != nil {
 				return err
 			}
@@ -106,7 +106,7 @@ it stored with the active deployment, env values included. Useful to move an
 application to a new image from anywhere, or to replace all its containers.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := resolveApp(args, file)
+			name, err := c.resolveApp(args, file)
 			if err != nil {
 				return err
 			}

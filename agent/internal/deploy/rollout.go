@@ -10,6 +10,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/api"
+	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 // A rollout replaces the application's replicas one at a time:
@@ -37,6 +38,12 @@ type rollout struct {
 	fresh   []store.Replica       // replicas of d created so far
 	serving []routeMember         // who receives traffic right now
 	retired bool                  // an old replica has been removed: failing now means rolling back
+
+	// recreate: the old version was stopped before the new one started (see
+	// spec.StrategyRecreate). stopped are its replicas, kept for a rollback
+	// until the new version is in service.
+	recreate bool
+	stopped  []store.Replica
 }
 
 func (e *Engine) run(d store.Deployment) {
@@ -77,6 +84,11 @@ func (r *rollout) execute(ctx context.Context) error {
 	}
 	if err := r.loadPrevious(ctx); err != nil {
 		return err
+	}
+	if d.Spec.Deploy.Strategy == spec.StrategyRecreate && len(r.old) > 0 {
+		if err := r.stopPrevious(ctx); err != nil {
+			return err
+		}
 	}
 
 	batches := r.batches()
@@ -176,6 +188,14 @@ func (r *rollout) desired() int {
 // nothing to replace (a first deployment, or scaling up) have no such
 // constraint and start together, so that N replicas do not cost N waits.
 func (r *rollout) batches() [][]int {
+	if r.recreate {
+		// Nothing runs that the newcomers could disturb: all at once.
+		all := make([]int, 0, r.d.Spec.Replicas)
+		for i := 1; i <= r.d.Spec.Replicas; i++ {
+			all = append(all, i)
+		}
+		return [][]int{all}
+	}
 	var batches [][]int
 	var additional []int
 	for i := 1; i <= r.d.Spec.Replicas; i++ {
@@ -240,11 +260,12 @@ func (r *rollout) swap(ctx context.Context, ready []store.Replica) error {
 		}
 		return fmt.Errorf("could not route %s to the new version: %w", what, err)
 	}
-	if len(ready) > 0 && len(outgoing) > 0 {
+	if len(ready) > 0 && len(outgoing) > 0 && !r.recreate {
 		// Let the proxy's next lookup find the newcomers before the replicas
 		// it knows stop answering. Whenever there are newcomers, not only when
 		// this call named them: the supervisor's tick syncs routing too, and
-		// may have been the one to do it a moment ago.
+		// may have been the one to do it a moment ago. (Under recreate the
+		// outgoing replicas stopped answering long ago.)
 		select {
 		case <-time.After(e.opts.NameSettle):
 		case <-ctx.Done():
@@ -307,7 +328,7 @@ func (r *rollout) abort(cause error) {
 		e.log.Error("could not mark deployment as failed", "deployment", d.ID, "error", err)
 	}
 
-	if !r.retired || r.prev == nil || e.baseCtx.Err() != nil {
+	if e.baseCtx.Err() != nil || r.prev == nil || (!r.retired && !r.recreate) {
 		// Nothing of the old version was lost — or the agent is going down
 		// and must not start a restore it cannot finish; at the next start,
 		// reconciliation completes the old version, which is still the
@@ -315,7 +336,110 @@ func (r *rollout) abort(cause error) {
 		r.discard(ctx, r.fresh)
 		return
 	}
+	if r.recreate {
+		r.rollBackRecreate(ctx, cause)
+		return
+	}
 	r.rollBack(ctx, cause)
+}
+
+// stopPrevious takes the running version out of service and stops it, for a
+// deployment whose two versions cannot run side by side. Its containers are
+// kept: they are the rollback.
+func (r *rollout) stopPrevious(ctx context.Context) error {
+	e, d, prev := r.e, r.d, r.prev
+	r.recreate = true
+
+	// Out of the proxy first, so that nobody is sent to a replica that is
+	// about to stop.
+	r.serving = nil
+	e.routeVia(d.Application, routeOverride{domain: prev.Spec.Domain, desired: r.desired()})
+	if err := e.SyncProxy(ctx); err != nil {
+		return fmt.Errorf("could not take %s out of service: %w", d.Application, err)
+	}
+
+	indexes := make([]int, 0, len(r.old))
+	for i := range r.old {
+		indexes = append(indexes, i)
+	}
+	sort.Ints(indexes)
+	for _, i := range indexes {
+		rep := r.old[i]
+		if err := e.rt.StopContainer(ctx, rep.ContainerID, e.opts.StopTimeout); err != nil {
+			return fmt.Errorf("stop replica %d of %s: %w", rep.Index, prev.Version, err)
+		}
+		r.stopped = append(r.stopped, rep)
+	}
+	e.step(ctx, d, "Stopped %s: %s cannot run next to it", prev.Version, d.Version)
+	return nil
+}
+
+// rollBackRecreate undoes a recreate deployment: the new version is removed
+// first — it must be gone before the old one touches the volumes again — and
+// the old version is started again, from the containers it kept if it can.
+func (r *rollout) rollBackRecreate(ctx context.Context, cause error) {
+	e, d, prev := r.e, r.d, r.prev
+
+	if err := e.transition(ctx, d, api.StatusRollback); err != nil {
+		e.log.Error("could not start rollback", "deployment", d.ID, "error", err)
+		r.discard(ctx, r.fresh)
+		return
+	}
+	r.serving = nil
+	e.routeVia(d.Application, routeOverride{domain: prev.Spec.Domain, desired: r.desired()})
+	e.syncProxyBestEffort(ctx, d.Application)
+	for _, rep := range r.fresh {
+		if err := e.retireContainer(ctx, rep.ContainerID); err != nil {
+			e.log.Error("could not remove failed replica", "container", rep.ContainerName, "error", err)
+		}
+	}
+	r.fresh = nil
+
+	e.step(ctx, d, "Rolling back: starting %s again", prev.Version)
+	if err := e.transition(ctx, d, api.StatusRestoring); err != nil {
+		e.log.Error("could not enter RESTORING", "deployment", d.ID, "error", err)
+	}
+
+	var restored []store.Replica
+	var err error
+	if !r.retired {
+		for _, rep := range r.stopped {
+			if err = e.startNameless(ctx, rep.ContainerID); err != nil {
+				break
+			}
+			e.sup.reset(rep.ContainerID, prev.Spec.Health != nil)
+			restored = append(restored, rep)
+		}
+	} else {
+		// The old containers were removed at the switch; the volumes were
+		// not. New containers of the old version find their data there.
+		missing := make([]int, 0, prev.Spec.Replicas)
+		for i := 1; i <= prev.Spec.Replicas; i++ {
+			missing = append(missing, i)
+		}
+		restored, err = e.ensureReplicas(ctx, *prev, missing)
+	}
+	if err == nil {
+		asPrev := *prev
+		asPrev.ID = d.ID
+		err = e.awaitReady(ctx, &asPrev, restored)
+	}
+	if err != nil {
+		msg := fmt.Sprintf("%v; the rollback to %s then failed too: %v", cause, prev.Version, err)
+		if terr := e.transitionWithError(ctx, d, api.StatusFailed, msg); terr != nil {
+			e.log.Error("could not mark rollback as failed", "deployment", d.ID, "error", terr)
+		}
+		// Whatever exists stays: the previous deployment is still the active
+		// one, and the supervisor keeps trying to bring its replicas up.
+		r.discard(ctx, nil)
+		return
+	}
+
+	r.discard(ctx, nil)
+	if err := e.transition(ctx, d, api.StatusRolledBack); err != nil {
+		e.log.Error("could not mark deployment as rolled back", "deployment", d.ID, "error", err)
+	}
+	e.step(ctx, d, "Rolled back: %s is running %s again", d.Application, prev.Version)
 }
 
 // discard drops the rollout's grip on routing and removes new replicas.
@@ -410,7 +534,7 @@ func (r *rollout) rollBack(ctx context.Context, cause error) {
 func (e *Engine) ensureReplicas(ctx context.Context, d store.Deployment, indexes []int) ([]store.Replica, error) {
 	var created []store.Replica
 	for _, i := range indexes {
-		spec := docker.ContainerSpec{
+		cspec := docker.ContainerSpec{
 			App:          d.Application,
 			DeploymentID: d.ID,
 			Sequence:     d.Sequence,
@@ -420,14 +544,17 @@ func (e *Engine) ensureReplicas(ctx context.Context, d store.Deployment, indexes
 			NanoCPUs:     d.Spec.Resources.NanoCPUs(),
 			MemoryBytes:  d.Spec.Resources.MemoryBytes,
 		}
-		id, name, err := e.rt.CreateContainer(ctx, spec)
+		for _, v := range d.Spec.Volumes {
+			cspec.Mounts = append(cspec.Mounts, docker.Mount{Volume: v.Name, Path: v.Path})
+		}
+		id, name, err := e.rt.CreateContainer(ctx, cspec)
 		if err != nil {
 			// The image may have been pruned since it was deployed.
 			if exists, ierr := e.rt.ImageExists(ctx, d.Spec.Image); ierr == nil && !exists {
 				if perr := e.rt.PullImage(ctx, d.Spec.Image); perr != nil {
 					return created, fmt.Errorf("replica %d: image %s is gone and could not be pulled again: %w", i, d.Spec.Image, perr)
 				}
-				id, name, err = e.rt.CreateContainer(ctx, spec)
+				id, name, err = e.rt.CreateContainer(ctx, cspec)
 			}
 			if err != nil {
 				return created, fmt.Errorf("replica %d: %w", i, err)

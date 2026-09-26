@@ -45,6 +45,7 @@ type fakeAgent struct {
 	deployBodies []string
 	actionBodies map[string]string // "redeploy" | "rollback" → the JSON body received
 	requests     []string
+	env          map[string]string // extra environment for the CLI under test
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
@@ -160,6 +161,9 @@ func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 		cliconfig.EnvURL:    f.srv.URL,
 		cliconfig.EnvToken:  testToken,
 		cliconfig.EnvConfig: filepath.Join(f.t.TempDir(), "config.yaml"),
+	}
+	for k, v := range f.env {
+		env[k] = v
 	}
 	c, root := newRoot(Options{
 		In:     strings.NewReader(""),
@@ -648,6 +652,6 @@ func TestDeployRolledBack(t *testing.T) {
 		"✓ Rolled back: my-api is running 1.4.1 again",
 		"✗ Deployment failed and was rolled back",
 		"replica 2 exited with code 1",
-		"my-api is running 1.4.1 again: the replicas that had already been replaced were restored",
+		"my-api is running 1.4.1 again: the previous version was restored",
 	})
 }

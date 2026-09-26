@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +22,9 @@ const MaxConfigBytes = 64 * 1024
 
 // MaxReplicas is a sanity bound for a single server.
 const MaxReplicas = 50
+
+// MaxVolumes bounds the volumes of one application.
+const MaxVolumes = 10
 
 // raw mirrors deploy.yaml before validation. Values with their own syntax
 // (sizes, durations, cpu) are decoded as strings so that a bad value yields a
@@ -41,6 +46,10 @@ type raw struct {
 		CPU    string `yaml:"cpu"`
 		Memory string `yaml:"memory"`
 	} `yaml:"resources"`
+	Volumes []struct {
+		Name string `yaml:"name"`
+		Path string `yaml:"path"`
+	} `yaml:"volumes"`
 	Restart struct {
 		Policy string `yaml:"policy"`
 	} `yaml:"restart"`
@@ -172,6 +181,9 @@ func (r raw) validate() (App, error) {
 	case !namePattern.MatchString(r.Name):
 		verr.add("name", fmt.Sprintf("invalid value %q", r.Name),
 			"lowercase letters, digits and dashes, e.g. my-api (max 63 characters)")
+	case slices.Contains(ReservedNames, r.Name):
+		verr.add("name", fmt.Sprintf("%q is reserved for Shipwick's own services", r.Name),
+			"another name, e.g. my-"+r.Name)
 	}
 
 	if app.Image == "" {
@@ -233,10 +245,22 @@ func (r raw) validate() (App, error) {
 
 	if s := r.Deploy.Strategy; s != "" {
 		switch s {
-		case StrategyRolling:
+		case StrategyRolling, StrategyRecreate:
 			app.Deploy.Strategy = s
 		default:
-			verr.add("deploy.strategy", fmt.Sprintf("invalid value %q", s), "rolling")
+			verr.add("deploy.strategy", fmt.Sprintf("invalid value %q", s), "rolling, recreate")
+		}
+	}
+
+	app.Volumes = r.validateVolumes(verr)
+	if len(app.Volumes) > 0 {
+		// Two versions writing the same files at once is how data gets lost.
+		if app.Deploy.Strategy != StrategyRecreate {
+			verr.add("deploy.strategy", "must be \"recreate\" for an application with volumes: two versions cannot write the same files at once",
+				"deploy:\n    strategy: recreate")
+		}
+		if app.Replicas != 1 {
+			verr.add("replicas", fmt.Sprintf("must be 1 for an application with volumes, got %d: replicas cannot share a volume", app.Replicas), "1")
 		}
 	}
 
@@ -244,6 +268,43 @@ func (r raw) validate() (App, error) {
 		return App{}, verr
 	}
 	return app, nil
+}
+
+func (r raw) validateVolumes(verr *ValidationError) []Volume {
+	if len(r.Volumes) == 0 {
+		return nil
+	}
+	if len(r.Volumes) > MaxVolumes {
+		verr.add("volumes", fmt.Sprintf("too many (%d)", len(r.Volumes)), fmt.Sprintf("at most %d", MaxVolumes))
+		return nil
+	}
+	out := make([]Volume, 0, len(r.Volumes))
+	names, paths := map[string]bool{}, map[string]bool{}
+	for i, v := range r.Volumes {
+		field := fmt.Sprintf("volumes[%d]", i)
+		switch {
+		case v.Name == "":
+			verr.add(field+".name", "is required", "data")
+		case !namePattern.MatchString(v.Name):
+			verr.add(field+".name", fmt.Sprintf("invalid value %q", v.Name), "lowercase letters, digits and dashes, e.g. data")
+		case names[v.Name]:
+			verr.add(field+".name", fmt.Sprintf("%q is used twice", v.Name), "a different name for each volume")
+		}
+		names[v.Name] = true
+
+		p := strings.TrimSpace(v.Path)
+		switch {
+		case p == "":
+			verr.add(field+".path", "is required", "/var/lib/postgresql/data")
+		case !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\x00\r\n") || path.Clean(p) != p || p == "/":
+			verr.add(field+".path", fmt.Sprintf("invalid value %q", v.Path), "an absolute path inside the container, e.g. /var/lib/postgresql/data")
+		case paths[p]:
+			verr.add(field+".path", fmt.Sprintf("%q is mounted twice", p), "a different path for each volume")
+		}
+		paths[p] = true
+		out = append(out, Volume{Name: v.Name, Path: p})
+	}
+	return out
 }
 
 func (r raw) validateEnv(verr *ValidationError) map[string]string {

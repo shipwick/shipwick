@@ -19,6 +19,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 )
@@ -36,6 +37,22 @@ type ContainerSpec struct {
 	Env          map[string]string
 	NanoCPUs     int64 // 0 = unlimited
 	MemoryBytes  int64 // 0 = unlimited
+	// Mounts are the application's named volumes and where they go. The
+	// volumes are created with the first container that mounts them and
+	// belong to the application: no container's removal removes them.
+	Mounts []Mount
+}
+
+// Mount is a named volume of an application at a path inside its containers.
+type Mount struct {
+	Volume string // the volume's name in deploy.yaml, not Docker's
+	Path   string
+}
+
+// VolumeName is the Docker volume behind an application's volume. Shared by
+// every deployment of the application; that is what makes it persistent.
+func VolumeName(app, volume string) string {
+	return "shipwick_" + app + "_" + volume
 }
 
 // Container is the runtime state of a Shipwick-managed container.
@@ -229,6 +246,22 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 	}
 	sort.Strings(env)
 
+	// Volumes are created explicitly, so that they carry the labels that
+	// mark them as the application's; Docker would create them on the fly,
+	// unlabelled.
+	mounts := make([]mount.Mount, 0, len(spec.Mounts))
+	for _, m := range spec.Mounts {
+		volume := VolumeName(spec.App, m.Volume)
+		_, err := r.cli.VolumeCreate(ctx, client.VolumeCreateOptions{
+			Name:   volume,
+			Labels: map[string]string{LabelManaged: "true", LabelApp: spec.App},
+		})
+		if err != nil {
+			return "", "", fmt.Errorf("create volume %s: %w", volume, err)
+		}
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: volume, Target: m.Path})
+	}
+
 	name = ContainerName(spec.App, spec.Sequence, spec.Replica)
 	res, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: name,
@@ -248,6 +281,8 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 				// Equal to Memory: the limit is a hard cap, swap does not extend it.
 				MemorySwap: spec.MemoryBytes,
 			},
+			// Named volumes only: never a path on the host.
+			Mounts:      mounts,
 			Privileged:  false,
 			SecurityOpt: []string{"no-new-privileges:true"},
 			// Bounded logs: a chatty app must not fill the server's disk.

@@ -21,7 +21,8 @@ import (
 const maxPollFailures = 20
 
 func (c *cli) deployCommand() *cobra.Command {
-	var file, image string
+	var files, envFiles []string
+	var image string
 	var noWait bool
 
 	cmd := &cobra.Command{
@@ -36,29 +37,53 @@ command exits non-zero.
 
 In CI, keep deploy.yaml in the repository and supply the freshly built image:
 
-  shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA`,
+  shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA
+
+Values that must not be in the file — passwords, API keys — are written as
+${NAME} and filled in from the environment or from --env-file before the file
+is sent. A name that is set nowhere is an error.
+
+Several applications deploy in the order given, one after the other:
+
+  shipwick deploy -f api/deploy.yaml -f worker/deploy.yaml -f web/deploy.yaml`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return c.deploy(cmd.Context(), file, image, noWait)
+			if image != "" && len(files) > 1 {
+				return errors.New("--image applies to one application; deploy several with one deploy.yaml each and no --image")
+			}
+			return c.deploy(cmd.Context(), files, envFiles, image, noWait)
 		},
 	}
-	fileFlag(cmd, &file)
+	filesFlag(cmd, &files, &envFiles)
 	cmd.Flags().StringVar(&image, "image", "", "deploy this image instead of the one in the config")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "start the deployment and return immediately")
 	return cmd
 }
 
-func (c *cli) deploy(ctx context.Context, file, image string, noWait bool) error {
-	data, err := readFile(file)
-	if err != nil {
-		return err
+// filesFlag is fileFlag for commands that take several configs.
+func filesFlag(cmd *cobra.Command, files, envFiles *[]string) {
+	cmd.Flags().StringArrayVarP(files, "file", "f", []string{DefaultFile}, "path to a deployment config; repeat for several applications")
+	cmd.Flags().StringArrayVar(envFiles, "env-file", nil, "NAME=value file for ${NAME} placeholders; repeat for several")
+}
+
+// deploy deploys every file in order and stops at the first failure: what
+// comes later usually depends on what came before.
+func (c *cli) deploy(ctx context.Context, files, envFiles []string, image string, noWait bool) error {
+	// Every file is read and validated before the first deployment starts,
+	// so that a typo in the third does not leave the first two half done.
+	type loaded struct {
+		file string
+		data []byte
+		app  spec.App
+		vars []string
 	}
-	if image != "" {
-		data = overrideImage(data, image)
-	}
-	app, err := spec.Parse(data)
-	if err != nil {
-		return err
+	configs := make([]loaded, 0, len(files))
+	for _, file := range files {
+		data, app, vars, err := c.loadConfig(file, envFiles, image)
+		if err != nil {
+			return err
+		}
+		configs = append(configs, loaded{file, data, app, vars})
 	}
 
 	cl, err := c.connect()
@@ -66,16 +91,46 @@ func (c *cli) deploy(ctx context.Context, file, image string, noWait bool) error
 		return err
 	}
 
-	c.ui.Println("Deploying " + c.ui.Styled(ui.Bold, app.Name) + "...")
-	c.ui.Println()
-	c.ui.Success("Validated %s", file)
+	for i, cfg := range configs {
+		if i > 0 {
+			c.ui.Println()
+		}
+		c.ui.Println("Deploying " + c.ui.Styled(ui.Bold, cfg.app.Name) + "...")
+		c.ui.Println()
+		c.ui.Success("Validated %s%s", cfg.file, substitutedNote(cfg.vars))
 
-	started := c.now()
-	d, err := cl.Deploy(ctx, app.Name, data)
-	if err != nil {
-		return err
+		started := c.now()
+		d, err := cl.Deploy(ctx, cfg.app.Name, cfg.data)
+		if err != nil {
+			return err
+		}
+		if err := c.followDeployment(ctx, cl, d, started, noWait); err != nil {
+			if len(configs) > 1 && errors.Is(err, ErrReported) {
+				c.ui.Println()
+				c.ui.Println(fmt.Sprintf("Stopped at %s: %d of %d applications deployed.", cfg.app.Name, i, len(configs)))
+			}
+			return err
+		}
 	}
-	return c.followDeployment(ctx, cl, d, started, noWait)
+	if len(configs) > 1 {
+		c.ui.Println()
+		c.ui.Println(fmt.Sprintf("%d of %d applications deployed.", len(configs), len(configs)))
+	}
+	return nil
+}
+
+func substitutedNote(vars []string) string {
+	if len(vars) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%s substituted)", plural(len(vars), "variable"))
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // followDeployment is the second half of every command that starts a
@@ -220,7 +275,7 @@ func (c *cli) reportFailedDeployment(ctx context.Context, cl *client.Client, d a
 	case detail.ActiveDeployment != nil && d.Status == api.StatusRolledBack:
 		// Part of the old version had already been replaced when the new one
 		// failed; it was restored. Capacity may have dipped, service did not stop.
-		c.ui.Printf("%s is running %s again: the replicas that had already been replaced were restored.\n",
+		c.ui.Printf("%s is running %s again: the previous version was restored.\n",
 			d.Application, detail.ActiveDeployment.Version)
 	case detail.ActiveDeployment != nil:
 		c.ui.Printf("%s is still running %s; the failed deployment did not affect it.\n",
@@ -264,23 +319,31 @@ func overrideImage(data []byte, image string) []byte {
 }
 
 func (c *cli) validateCommand() *cobra.Command {
-	var file string
+	var files, envFiles []string
 	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Check deploy.yaml without deploying",
-		Args:  cobra.NoArgs,
+		Long: `Check deploy.yaml without deploying: it is read, its ${NAME} placeholders are
+filled in from the environment and --env-file, and it is validated exactly as
+the agent would validate it.`,
+		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			_, app, err := readConfig(file)
-			if err != nil {
-				return err
+			for i, file := range files {
+				_, app, vars, err := c.loadConfig(file, envFiles, "")
+				if err != nil {
+					return err
+				}
+				if i > 0 {
+					c.ui.Println()
+				}
+				c.ui.Success("%s is valid%s", file, substitutedNote(vars))
+				c.ui.Println()
+				c.ui.Fields(describeSpec(app))
 			}
-			c.ui.Success("%s is valid", file)
-			c.ui.Println()
-			c.ui.Fields(describeSpec(app))
 			return nil
 		},
 	}
-	fileFlag(cmd, &file)
+	filesFlag(cmd, &files, &envFiles)
 	return cmd
 }
 
@@ -303,7 +366,13 @@ func describeSpec(app spec.App) [][2]string {
 			app.Health.Path, app.Health.Interval, app.Health.Timeout, app.Health.Retries)})
 	}
 	fields = append(fields, [2]string{"Resources", describeResources(app.Resources)})
+	for _, v := range app.Volumes {
+		fields = append(fields, [2]string{"Volume", v.Name + " at " + v.Path})
+	}
 	fields = append(fields, [2]string{"Restart", app.Restart.Policy})
+	if app.Deploy.Strategy != spec.StrategyRolling {
+		fields = append(fields, [2]string{"Strategy", app.Deploy.Strategy})
+	}
 	if len(app.Env) > 0 {
 		fields = append(fields, [2]string{"Environment", fmt.Sprintf("%d variables", len(app.Env))})
 	}
