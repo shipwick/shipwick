@@ -132,6 +132,25 @@ What keeps this tractable:
 - If the agent is shutting down, a failing rollout does not start a restore it
   could not finish; the next start completes the old version.
 
+### Recreate
+
+`deploy.strategy: recreate` is for the application that cannot run twice:
+anything with a volume, or that holds a lock or a port it cannot share. The
+same `rollout` runs it with three differences: after `loadPrevious` the old
+version is taken out of routing and *stopped* — not removed — one replica at a
+time (`stopPrevious`); all new replicas then start as one batch, since nothing
+runs that they could disturb; and a failure is undone by `rollBackRecreate`:
+the new containers are removed first (they must be gone before the old version
+touches the volumes again), then the stopped containers are started again,
+nameless, and verified against the previous spec. If the switch had already
+removed them, new containers of the old version are created instead; the
+volumes are still there. The application is down from the stop to the moment
+the new version is ready, and the events say so.
+
+`pkg/spec` refuses volumes without `recreate`, and more than one replica with
+volumes: two processes on one volume is how data gets lost, and Shipwick would
+rather not offer the option.
+
 ### Rollback and redeploy on request
 
 `Engine.Rollback` and `Engine.Redeploy` contain no deployment logic. Each
@@ -282,74 +301,103 @@ Caddy terminates TLS and proxies to replicas; `agent/internal/proxy` tells it
 what to route where. Shipwick does not touch certificates, ACME or HTTP/3 —
 listening on `:443` with host matchers is all Caddy needs to do those itself.
 
-**The agent owns the whole configuration.** On every change it renders the
-complete Caddy JSON from the desired routes and `POST`s it to `/load`, which
-Caddy applies gracefully. There is no patching of config paths, hence no
-half-applied state and no drift: same routes in, same bytes out.
+**Routing is two things.** Who serves an application is decided by *names on
+the services network*; what Caddy is told is only which name stands behind
+which domain. The split exists because loading a Caddy config is not free:
+Caddy replaces its servers, and a connection being established at that instant
+— a TLS handshake in progress, a first request not yet read — is reset. That
+reproduces with Caddy alone, from 2.7 to 2.11, and neither `grace_period` nor
+`shutdown_delay` changes it. Measured with a new connection per request from
+100 ms away, one reload per replica replaced cost 5 of 233 requests through two
+minutes of redeploys. So replicas must come and go without Caddy hearing of it.
+
+**Names.** Every installation has two bridge networks. A replica is born on
+`shipwick` (the agent's health probes, user-run databases, and every replica)
+and on `shipwick-services` (Caddy and every replica), the second one without
+a name. When it is ready it is given its application's names there — `<app>`
+and `<app>_<port>` as Docker network aliases — and it loses them when it is not:
+running but failing its health check, or being restarted. A stopped container
+drops out of Docker's DNS by itself. Docker sets an endpoint's aliases only when
+the container joins the network, so changing them means leaving
+`shipwick-services` and joining it again; that cuts what the replica has open
+over *that* network, and nothing else — its database connections live on
+`shipwick`. It is done to newcomers, which have nothing open, and never to a
+replica on its way out: that one is stopped with its names on, and stopping is
+what takes it out of DNS. (Taking it off the network first was tried; it cuts
+the requests it is serving.)
 
 ```text
-desired routes = for every application with a domain:
-                   the ready replicas of its serving deployment
-                 + the agent's own route (SHIPWICK_AGENT_DOMAIN)
+routing = for every replica that should serve: give it its names
+        + for every running replica that should not: take them
+        + tell Caddy: domain → <app>_<port>, for every name a running replica carries
 ```
 
 - **Ready** means running and not failing its health check (`unknown` counts;
   `starting` does not — a restarted replica waits for its first passing check).
-- **Upstreams are container names**, not IPs: a restarted container may get a
-  new address, and Docker's DNS always knows the current one.
+- **Caddy resolves the name for every request** (`dynamic_upstreams`, the `a`
+  source, refreshed every second, IPv4 only — an AAAA query would be forwarded
+  to the outside resolvers). Two versions on different ports are two sources of
+  one route while the rollout lasts. A name is put in the config only while a
+  running replica carries it: Docker's DNS forwards a name nobody carries to the
+  outside resolvers, and every request would wait seconds for that to fail. With
+  no such name the route is a static `503`, and a server-level error route turns
+  the `502` Caddy would produce between a replica's death and the next sync into
+  the same `503`.
+- **A rollout waits 1.5 s** between naming a newcomer and stopping its
+  predecessor, so that Caddy's next lookup has found the newcomer. Whoever named
+  it — the rollout or the supervisor's tick, which syncs routing too.
 - **Who syncs:** a rollout (at every swap), stop/start/delete, and the
-  supervisor at the end of *every* tick. That last one is what takes crashed
-  and unhealthy replicas out of rotation. It is affordable because the rendered
-  config is fingerprinted and an unchanged fingerprint skips the reload.
+  supervisor at the end of *every* tick. All of it under one mutex: naming is
+  two calls to Docker, and two callers renaming the same replica collide in the
+  middle. The proxy part is cheap because the rendered config is fingerprinted
+  and an unchanged fingerprint skips the load; the config changes when a domain
+  or a port does, and a rollout, a crash or a restart is not that.
 - The fingerprint covers the *rendered config*, not just the routes, so an
-  agent upgrade that renders routes differently reloads Caddy too. It is
+  agent upgrade that renders routes differently reloads Caddy once. It is
   embedded as the `@id` of the final catch-all route; every 10s the agent asks
   Caddy for that id, and reloads if it is gone — i.e. if Caddy came back from a
   restart with an older config.
+- **The names are service discovery.** `orders` reaches `payments` at
+  `http://payments:8080` and gets a healthy replica of the current version,
+  because a replica is on `shipwick-services` from its first second (it may
+  need a peer to pass its own health check) and findable only once ready.
+  Application names that would shadow Shipwick's own containers on that network
+  (`agent`, `caddy`, `dashboard`, `localhost`) are refused by `pkg/spec`.
 
 **During a rollout, the rollout dictates routing.** It registers a *route
 override* — the exact list of replicas that serve right now, a mix of two
-deployments — and updates it at every swap: new replica in, its predecessor
-out, sync, *then* retire the predecessor. The override exists for the
-supervisor's sake: its tick computes routes from the database, which until the
-commit still names the old deployment, and would route traffic straight back to
-replicas the rollout has just retired. At the commit the override is dropped;
-the database now says the same thing. On failure it is dropped too, and routing
-follows the database back to the previous deployment.
+deployments — and updates it at every swap: newcomers in, sync (they get their
+names), the settle wait, *then* stop the predecessors. The override exists for
+the supervisor's sake: its tick computes routing from the database, which until
+the commit still names the old deployment, and would hand the names straight
+back to replicas the rollout has just retired. At the commit the override is
+dropped; the database now says the same thing. On failure it is dropped too,
+and routing follows the database back to the previous deployment. Under
+`recreate` the override says "nobody" from the moment the old version is
+stopped until the new one is ready.
 
-A proxy that cannot be updated fails the deployment at that swap, before the
-predecessor is touched.
+A proxy or a Docker that cannot be updated fails the deployment at that swap,
+before the predecessor is touched.
 
-`stop` follows the same principle in reverse: routing goes to "no upstreams"
-(`503`) first, SIGTERM second, so no request is cut off mid-flight.
+`stop` follows the same principle: the route goes to the static `503` and the
+names are dropped with the containers, SIGTERM second, so no request is cut off
+mid-flight. `start` brings replicas back nameless; they earn the names when
+they are ready.
 
-**What a reload costs.** A planned change loses no request that is being
-served: over loopback, under constant load, 100/100 `200` through a rolling
-redeploy and 76/76 through a rollout that failed half-way and was rolled back.
-Over a real network that is not the whole story. Every change of routing is a
-`POST /load`, Caddy replaces its servers on each one, and connections that are
-being *established* at that instant — a TLS handshake in progress, a first
-request not yet read — are reset. The client sees a connection error, never an
-error status. Measured from 100 ms away with a new connection per request, the
-worst case: 5 of 233 requests through two minutes of back-to-back rolling
-redeploys, every one of them at a load. It reproduces with Caddy alone, from
-2.7 to 2.11, and neither `grace_period` nor `shutdown_delay` changes it; over
-loopback a connection is established in a millisecond, which is why it cannot
-be seen there. Clients that keep connections open are affected far less. A
-rollout already costs only one load per replica replaced; the way to zero is not
-to reload at all — upstream names that stay the same from one deployment to the
-next and that a replica takes over only when it is ready — and that is where
-routing is headed.
+**What a crash costs.** An unplanned change is not lossless, and cannot quite
+be: requests in flight on the dying replica are gone, and until the supervisor's
+next tick moves the route to `503`, a request whose lookup still lists the dead
+address is retried elsewhere (`try_duration` 5s, `dial_timeout` 500ms, passive
+health checks) or, if it was the last replica, answered `503`. Measured on the
+real stack (12 clients, 50 ms added latency, a new connection per request) a
+planned change costs nothing: 15,774 of 15,774 requests through 18 rolling
+redeploys, 0 Caddy loads.
 
-**What a crash costs.** An unplanned change is not lossless, and cannot quite be:
-requests in flight on the dying replica are gone, and the one request that
-discovers the dead upstream may get a `502`. Caddy would normally retry it on
-another replica, but it abandons retries in progress when its config is
-reloaded — and removing the dead replica *is* a reload. A short `dial_timeout`
-(Docker's DNS takes seconds to give up on a name it no longer knows) and
-passive health checks keep that window to about half a second and one request.
-Delaying the removal to let retries finish was considered and rejected as not
-worth the machinery.
+**Upgrading to this from an agent that routed by container name.** The
+replicas it finds on startup carry no names. `Recover` reads each container's
+names from Docker, and the first sync gives the nameless ones theirs — before
+Caddy is told to look for them; the Caddy config then changes once. Caddy
+itself is recreated by that upgrade, because it joins the second network.
 
 **Security.** The config is built as Go data and marshalled, never templated:
 input cannot change its structure (there is a test that tries). Domains are
@@ -371,10 +419,11 @@ second signal kills immediately.
 |---|---|
 | Name | `shipwick_<app>_<deployment sequence>_<replica>`, e.g. `shipwick_my-api_7_1`. For humans. App names cannot contain `_`, so it parses unambiguously. |
 | Identity | Labels `com.shipwick.managed`, `.app`, `.deployment`, `.replica`. The agent finds its containers by label, never by name. |
-| Network | All containers join one bridge network (`shipwick`), shared with the agent (health probes) and Caddy (upstreams). **No host ports are published** — no port conflicts, replicas just work, and the proxy is the only way in. |
+| Networks | Two bridge networks. `shipwick`: every replica, the agent (health probes) and whatever the user runs beside Shipwick. `shipwick-services`: every replica and Caddy; a replica carries its application's names here while it is ready (see Routing). **No host ports are published** — no port conflicts, replicas just work, and the proxy is the only way in. |
+| Volumes | `volumes` in deploy.yaml become named Docker volumes `shipwick_<app>_<volume>`, created with labels, mounted at the given path. They belong to the application: every deployment mounts the same ones, and nothing removes them — not a rollback, not `delete`. Never a host path. |
 | Restart policy | Docker's is set to `no`. Restarts belong to Shipwick's supervisor, which adds backoff, health awareness and crash-loop detection; two restart mechanisms would fight. |
 | Limits | `resources.cpu` → `NanoCPUs`; `resources.memory` → `Memory`, with `MemorySwap` equal to it so the limit is a hard cap. |
-| Hardening | Never privileged; `no-new-privileges`; no host mounts; no user-controlled command execution. |
+| Hardening | Never privileged; `no-new-privileges`; no host mounts (named volumes only); no user-controlled command execution. |
 | Logs | `json-file` driver capped at 3 × 10 MB per container, so a chatty app cannot fill the disk. |
 
 ## Storage

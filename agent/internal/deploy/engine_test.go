@@ -31,6 +31,7 @@ func newHarness(t *testing.T) *harness {
 	rt := dockertest.New()
 	engine := New(st, rt, Options{
 		StabilizeWindow: 50 * time.Millisecond,
+		NameSettle:      time.Millisecond,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	t.Cleanup(func() {

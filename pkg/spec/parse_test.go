@@ -287,3 +287,56 @@ func TestRedactedMasksEnvValues(t *testing.T) {
 		t.Error("Redacted must not mutate the original")
 	}
 }
+
+func TestReservedNames(t *testing.T) {
+	for _, name := range []string{"caddy", "agent", "dashboard", "localhost"} {
+		_, err := Parse([]byte("name: " + name + "\nimage: nginx\n"))
+		var verr *ValidationError
+		if !errors.As(err, &verr) || len(verr.Fields) != 1 || verr.Fields[0].Field != "name" || !strings.Contains(verr.Fields[0].Message, "reserved") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	if _, err := Parse([]byte("name: my-caddy\nimage: nginx\n")); err != nil {
+		t.Errorf("a name that merely contains a reserved word is fine: %v", err)
+	}
+}
+
+func TestVolumes(t *testing.T) {
+	app, err := Parse([]byte("name: db\nimage: postgres:17\nvolumes:\n  - name: data\n    path: /var/lib/postgresql/data\ndeploy:\n  strategy: recreate\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(app.Volumes) != 1 || app.Volumes[0] != (Volume{Name: "data", Path: "/var/lib/postgresql/data"}) || app.Deploy.Strategy != StrategyRecreate {
+		t.Errorf("app = %+v", app)
+	}
+
+	for _, tt := range []struct{ name, config, field, msg string }{
+		{"volumes need recreate", "name: db\nimage: postgres\nvolumes:\n  - name: data\n    path: /data\n", "deploy.strategy", `must be "recreate"`},
+		{"volumes need one replica", "name: db\nimage: postgres\nreplicas: 2\nvolumes:\n  - name: data\n    path: /data\ndeploy:\n  strategy: recreate\n", "replicas", "must be 1"},
+		{"relative path", "name: db\nimage: postgres\nvolumes:\n  - name: data\n    path: data\ndeploy:\n  strategy: recreate\n", "volumes[0].path", "invalid value"},
+		{"path traversal", "name: db\nimage: postgres\nvolumes:\n  - name: data\n    path: /data/../etc\ndeploy:\n  strategy: recreate\n", "volumes[0].path", "invalid value"},
+		{"root", "name: db\nimage: postgres\nvolumes:\n  - name: data\n    path: /\ndeploy:\n  strategy: recreate\n", "volumes[0].path", "invalid value"},
+		{"bad name", "name: db\nimage: postgres\nvolumes:\n  - name: My Data\n    path: /data\ndeploy:\n  strategy: recreate\n", "volumes[0].name", "invalid value"},
+		{"duplicate name", "name: db\nimage: postgres\nvolumes:\n  - name: data\n    path: /a\n  - name: data\n    path: /b\ndeploy:\n  strategy: recreate\n", "volumes[1].name", "used twice"},
+		{"duplicate path", "name: db\nimage: postgres\nvolumes:\n  - name: a\n    path: /data\n  - name: b\n    path: /data\ndeploy:\n  strategy: recreate\n", "volumes[1].path", "mounted twice"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.config))
+			var verr *ValidationError
+			if !errors.As(err, &verr) {
+				t.Fatalf("err = %v", err)
+			}
+			for _, f := range verr.Fields {
+				if f.Field == tt.field && strings.Contains(f.Message, tt.msg) {
+					return
+				}
+			}
+			t.Errorf("no error for %q containing %q; got %+v", tt.field, tt.msg, verr.Fields)
+		})
+	}
+
+	// recreate without volumes is a legitimate choice on its own.
+	if app, err := Parse([]byte("name: a\nimage: nginx\ndeploy:\n  strategy: recreate\n")); err != nil || app.Deploy.Strategy != StrategyRecreate {
+		t.Errorf("recreate alone: %+v, %v", app, err)
+	}
+}

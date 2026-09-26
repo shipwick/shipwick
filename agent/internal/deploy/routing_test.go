@@ -3,12 +3,15 @@ package deploy
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/shipwick/shipwick/agent/internal/docker/dockertest"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
 	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/api"
@@ -17,9 +20,16 @@ import (
 
 // fakeProxy records every Sync. onSync, when set, runs inside Sync — the
 // moment a test can observe the rest of the system mid-switch.
+//
+// The proxy is told names, not replicas; who serves is what Docker's DNS
+// answers for those names. The fake asks the fake Docker, so that tests keep
+// reading routing the way a request would experience it.
 type fakeProxy struct {
+	rt *dockertest.Fake
+
 	mu     sync.Mutex
 	syncs  [][]proxy.Route
+	seen   []map[string]string // per Sync: domain → who served it at that moment
 	err    error
 	onSync func(routes []proxy.Route)
 }
@@ -29,6 +39,11 @@ func (p *fakeProxy) Sync(_ context.Context, routes []proxy.Route) error {
 	err, hook := p.err, p.onSync
 	if err == nil {
 		p.syncs = append(p.syncs, routes)
+		view := map[string]string{}
+		for _, r := range routes {
+			view[r.Domain] = strings.Join(p.resolve(r), ",")
+		}
+		p.seen = append(p.seen, view)
 	}
 	p.mu.Unlock()
 	if hook != nil {
@@ -45,8 +60,20 @@ func (p *fakeProxy) failWith(err error) {
 	p.err = err
 }
 
-// upstreams returns what domain is currently routed to, sorted; nil if the
-// domain has no route at all.
+// resolve is who a request for the route would reach: "container:port", sorted.
+func (p *fakeProxy) resolve(r proxy.Route) []string {
+	ups := append([]string{}, r.Upstreams...)
+	for _, b := range r.Backends {
+		for _, name := range p.rt.Resolve(b.Name) {
+			ups = append(ups, name+":"+strconv.Itoa(b.Port))
+		}
+	}
+	sort.Strings(ups)
+	return ups
+}
+
+// upstreams returns who serves domain right now, sorted; nil if the domain
+// has no route at all.
 func (p *fakeProxy) upstreams(domain string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -55,32 +82,46 @@ func (p *fakeProxy) upstreams(domain string) []string {
 	}
 	for _, r := range p.syncs[len(p.syncs)-1] {
 		if r.Domain == domain {
-			ups := append([]string{}, r.Upstreams...)
-			sort.Strings(ups)
-			return ups
+			return p.resolve(r)
 		}
 	}
 	return nil
 }
 
-// history returns every distinct upstream set domain went through, in order.
+// history returns every distinct set of replicas that served domain at the
+// moment of a Sync, in order.
 func (p *fakeProxy) history(domain string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []string
-	for _, routes := range p.syncs {
-		for _, r := range routes {
-			if r.Domain != domain {
-				continue
-			}
-			ups := append([]string{}, r.Upstreams...)
-			sort.Strings(ups)
-			if s := strings.Join(ups, ","); len(out) == 0 || out[len(out)-1] != s {
-				out = append(out, s)
-			}
+	for _, view := range p.seen {
+		s, routed := view[domain]
+		if !routed {
+			continue
+		}
+		if len(out) == 0 || out[len(out)-1] != s {
+			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// configs counts how many different configurations the proxy was given: each
+// one is a reload, and a reload resets connections that are being established.
+func (p *fakeProxy) configs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n, last := 0, ""
+	for _, routes := range p.syncs {
+		_, fingerprint, err := proxy.Build("unix//run/caddy/admin.sock", routes)
+		if err != nil {
+			panic(err)
+		}
+		if fingerprint != last {
+			n, last = n+1, fingerprint
+		}
+	}
+	return n
 }
 
 // storeFilterLatest selects the most recent deployment.
@@ -88,7 +129,7 @@ var storeFilterLatest = store.DeploymentFilter{Limit: 1}
 
 func newRouted(t *testing.T) (*supervised, *fakeProxy) {
 	s := newSupervised(t)
-	p := &fakeProxy{}
+	p := &fakeProxy{rt: s.rt}
 	s.engine.opts.Proxy = p
 	return s, p
 }
@@ -130,17 +171,17 @@ func TestTrafficMovesBeforeTheCommitAndWhileTheOldReplicaStillRuns(t *testing.T)
 		status     api.DeploymentStatus
 		containers int
 	}
-	p.onSync = func(routes []proxy.Route) {
-		for _, r := range routes {
-			if len(r.Upstreams) == 1 && r.Upstreams[0] == "shipwick_web_2_1:8080" {
-				all, _ := s.store.ListDeployments(context.Background(), storeFilterLatest)
-				observed.Lock()
-				if observed.status == "" {
-					observed.status, observed.containers = all[0].Status, len(s.rt.Containers())
-				}
-				observed.Unlock()
-			}
+	p.onSync = func([]proxy.Route) {
+		// The moment the new replica answers to the application's name.
+		if !slices.Contains(s.rt.Resolve(backendName("web", 8080)), "shipwick_web_2_1") {
+			return
 		}
+		all, _ := s.store.ListDeployments(context.Background(), storeFilterLatest)
+		observed.Lock()
+		if observed.status == "" {
+			observed.status, observed.containers = all[0].Status, len(s.rt.Containers())
+		}
+		observed.Unlock()
 	}
 	s.deploy(web("web:1.1", 1))
 
@@ -160,16 +201,20 @@ func TestRollingRedeployKeepsFullCapacityInRotation(t *testing.T) {
 	s.advance(time.Second)
 
 	history := p.history("web.example.com")
+	// A newcomer joins before its predecessor leaves: the predecessor keeps the
+	// application's name until it stops, because taking the name away would
+	// take it off the network and cut the requests it is serving.
 	want := []string{
-		"shipwick_web_1_1:8080,shipwick_web_1_2:8080", // v1
-		"shipwick_web_1_2:8080,shipwick_web_2_1:8080", // replica 1 replaced
-		"shipwick_web_2_1:8080,shipwick_web_2_2:8080", // replica 2 replaced
+		"shipwick_web_1_1:8080,shipwick_web_1_2:8080",                       // v1
+		"shipwick_web_1_1:8080,shipwick_web_1_2:8080,shipwick_web_2_1:8080", // replica 1 has a successor
+		"shipwick_web_1_2:8080,shipwick_web_2_1:8080,shipwick_web_2_2:8080", // replica 1 retired, replica 2 has one
+		"shipwick_web_2_1:8080,shipwick_web_2_2:8080",                       // v1.1
 	}
 	if strings.Join(history, " | ") != strings.Join(want, " | ") {
 		t.Errorf("routing history:\n  got  %q\n  want %q", history, want)
 	}
 	for _, step := range history {
-		if strings.Count(step, ",") != 1 {
+		if strings.Count(step, ",") < 1 {
 			t.Errorf("rotation dropped below 2 replicas: %q", step)
 		}
 	}

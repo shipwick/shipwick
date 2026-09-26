@@ -38,8 +38,10 @@ type Runtime interface {
 	CreateContainer(ctx context.Context, spec docker.ContainerSpec) (id, name string, err error)
 	StartContainer(ctx context.Context, id string) error
 	StopContainer(ctx context.Context, id string, timeout time.Duration) error
-	RestartContainer(ctx context.Context, id string, timeout time.Duration) error
 	RemoveContainer(ctx context.Context, id string) error
+	// SetServiceNames replaces the names a container answers to on the
+	// services network; none takes it out of service discovery.
+	SetServiceNames(ctx context.Context, id string, names []string) error
 	InspectContainer(ctx context.Context, id string) (docker.Container, error)
 	ListContainers(ctx context.Context, app string) ([]docker.Container, error)
 	Logs(ctx context.Context, id string, tail int) ([]docker.LogEntry, error)
@@ -55,6 +57,12 @@ type Options struct {
 	StabilizeWindow time.Duration
 	// StopTimeout is the grace period between SIGTERM and SIGKILL.
 	StopTimeout time.Duration
+	// NameSettle is how long a rollout waits between giving a new replica its
+	// names and stopping the replica it replaces. The proxy asks who stands
+	// behind a name about once a second; an application with a single replica
+	// would otherwise spend that second with a proxy that only knows the one
+	// that just stopped.
+	NameSettle time.Duration
 	// DeployTimeout bounds a whole deployment, image pull included.
 	DeployTimeout time.Duration
 	// LockWait is how long a user operation waits for the supervisor to let
@@ -121,6 +129,9 @@ func (o *Options) applyDefaults() {
 	if o.StopTimeout == 0 {
 		o.StopTimeout = 10 * time.Second
 	}
+	if o.NameSettle == 0 {
+		o.NameSettle = 1500 * time.Millisecond
+	}
 	if o.DeployTimeout == 0 {
 		o.DeployTimeout = 15 * time.Minute
 	}
@@ -158,8 +169,14 @@ type Engine struct {
 	sup     *supervisor
 	metrics *metricsCache
 
+	// routing serializes syncRouting and everything else that renames replicas.
+	routing    sync.Mutex
+	lastRoutes string // what the proxy was last told, for the log; guarded by routing
 	// routeOverrides: see routeVia. Guarded by mu.
 	routeOverrides map[string]routeOverride
+	// names are the names each container answers to on the services network,
+	// as far as this agent gave or found them: see setNames. Guarded by mu.
+	names map[string][]string
 }
 
 // appLock records who holds an application, because the two kinds of holder
@@ -182,6 +199,7 @@ func New(st *store.Store, rt Runtime, opts Options) *Engine {
 		locks:   map[string]*appLock{},
 
 		routeOverrides: map[string]routeOverride{},
+		names:          map[string][]string{},
 	}
 	e.idle = sync.NewCond(&e.mu)
 	e.sup = newSupervisor(e)

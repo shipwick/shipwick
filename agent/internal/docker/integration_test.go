@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ func newIntegrationRuntime(t *testing.T) (*Runtime, context.Context) {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		rt.cli.NetworkRemove(cleanup, network, client.NetworkRemoveOptions{})
+		rt.cli.NetworkRemove(cleanup, rt.services, client.NetworkRemoveOptions{})
 		rt.Close()
 	})
 	return rt, ctx
@@ -272,5 +274,121 @@ func TestIntegrationPullMissingImageFails(t *testing.T) {
 	rt, ctx := newIntegrationRuntime(t)
 	if err := rt.PullImage(ctx, "shipwick/does-not-exist:nope"); err == nil {
 		t.Error("expected an error pulling a missing image")
+	}
+}
+
+// execIn runs a command inside a container and returns what it printed. Test
+// code only: the agent itself never executes anything in a container.
+func execIn(t *testing.T, ctx context.Context, rt *Runtime, id string, cmd ...string) string {
+	t.Helper()
+	created, err := rt.cli.ExecCreate(ctx, id, client.ExecCreateOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true, TTY: true})
+	if err != nil {
+		t.Fatalf("exec create %v: %v", cmd, err)
+	}
+	attached, err := rt.cli.ExecAttach(ctx, created.ID, client.ExecAttachOptions{TTY: true})
+	if err != nil {
+		t.Fatalf("exec attach %v: %v", cmd, err)
+	}
+	defer attached.Close()
+	out, _ := io.ReadAll(attached.Reader)
+	return string(out)
+}
+
+func TestIntegrationServiceNames(t *testing.T) {
+	rt, ctx := newIntegrationRuntime(t)
+	if err := rt.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+	if err := rt.PullImage(ctx, testImage); err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+
+	suffix := time.Now().UnixNano() % 1_000_000
+	start := func(app string) string {
+		t.Helper()
+		id, _, err := rt.CreateContainer(ctx, ContainerSpec{App: app, DeploymentID: 1, Sequence: 1, Replica: 1, Image: testImage})
+		if err != nil {
+			t.Fatalf("CreateContainer %s: %v", app, err)
+		}
+		t.Cleanup(func() { rt.RemoveContainer(context.Background(), id) })
+		if err := rt.StartContainer(ctx, id); err != nil {
+			t.Fatalf("StartContainer %s: %v", app, err)
+		}
+		return id
+	}
+	orders := start(fmt.Sprintf("orders-%d", suffix))
+	caller := start(fmt.Sprintf("caller-%d", suffix))
+	name := fmt.Sprintf("orders-%d", suffix)
+	resolves := func() bool {
+		return strings.Contains(execIn(t, ctx, rt, caller, "getent", "hosts", name), name)
+	}
+
+	born, err := rt.InspectContainer(ctx, orders)
+	if err != nil {
+		t.Fatalf("InspectContainer: %v", err)
+	}
+	if !born.OnServicesNetwork || len(born.ServiceNames) != 0 || born.IP == "" {
+		t.Fatalf("a replica is born on both networks, nameless: %+v", born)
+	}
+	if resolves() {
+		t.Fatal("a replica must not be findable under its application's name before it is given that name")
+	}
+
+	if err := rt.SetServiceNames(ctx, orders, []string{name, name + "-8080"}); err != nil {
+		t.Fatalf("SetServiceNames: %v", err)
+	}
+	named, err := rt.InspectContainer(ctx, orders)
+	if err != nil {
+		t.Fatalf("InspectContainer: %v", err)
+	}
+	if len(named.ServiceNames) != 2 {
+		t.Errorf("ServiceNames = %v, want both names", named.ServiceNames)
+	}
+	// Its address on the main network — the one its database connections and
+	// the agent's health probes use — must not move.
+	if named.IP != born.IP {
+		t.Errorf("address on the main network changed: %s → %s", born.IP, named.IP)
+	}
+	if !resolves() {
+		t.Error("the application's name does not resolve after SetServiceNames")
+	}
+
+	// Asking again for what it already has must work: it is how the agent
+	// repairs a replica after a half-finished attempt.
+	if err := rt.SetServiceNames(ctx, orders, []string{name}); err != nil {
+		t.Fatalf("SetServiceNames again: %v", err)
+	}
+
+	if err := rt.SetServiceNames(ctx, orders, nil); err != nil {
+		t.Fatalf("SetServiceNames(none): %v", err)
+	}
+	if resolves() {
+		t.Error("the name still resolves after it was taken away")
+	}
+	if c, _ := rt.InspectContainer(ctx, orders); !c.OnServicesNetwork || len(c.ServiceNames) != 0 {
+		t.Errorf("without names the replica stays on the services network: %+v", c)
+	}
+
+	// A stopped container leaves DNS by itself, names or not; that is what
+	// makes retiring a replica a plain stop.
+	if err := rt.SetServiceNames(ctx, orders, []string{name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.StopContainer(ctx, orders, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if resolves() {
+		t.Error("a stopped replica is still resolvable")
+	}
+	// ...and names can be changed while it is stopped, so that a restarted
+	// replica does not come back findable before it is ready.
+	if err := rt.SetServiceNames(ctx, orders, nil); err != nil {
+		t.Fatalf("SetServiceNames on a stopped container: %v", err)
+	}
+	if err := rt.StartContainer(ctx, orders); err != nil {
+		t.Fatal(err)
+	}
+	if resolves() {
+		t.Error("a restarted replica came back under its name although the name was taken away while it was stopped")
 	}
 }

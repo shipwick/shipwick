@@ -427,6 +427,14 @@ const healthCheck = computed(() => {
                 {{ spec.deploy.strategy }}
               </dd>
             </div>
+            <div v-if="spec.volumes?.length" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Volumes
+              </dt>
+              <dd class="mono mt-0.5">
+                <div v-for="v in spec.volumes" :key="v.name">{{ v.name }} <span class="text-fg-muted">at</span> {{ v.path }}</div>
+              </dd>
+            </div>
             <div class="bg-bg px-4 py-2.5">
               <dt class="label">
                 Environment

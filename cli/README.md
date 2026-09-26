@@ -16,8 +16,8 @@ On Windows, download `shipwick_windows_amd64.exe` from the
 | Command | |
 |---|---|
 | `shipwick init` | Create a `deploy.yaml`. Prompts in a terminal; `--image` makes it non-interactive |
-| `shipwick validate` | Check `deploy.yaml` offline and show how it will be applied, defaults included |
-| `shipwick deploy` | Deploy and wait for the result. `--image` overrides the image (CI), `--no-wait` returns at once |
+| `shipwick validate` | Check `deploy.yaml` offline — placeholders filled in, defaults applied — and show how it will be applied |
+| `shipwick deploy` | Deploy and wait for the result. `--image` overrides the image (CI), `--no-wait` returns at once, `-f` repeated deploys several applications in order, `--env-file` supplies `${NAME}` values |
 | `shipwick rollback [app]` | Go back to the previous successful deployment, or `--to N` (the #number from `status`). A full, ordinary deployment of the stored configuration |
 | `shipwick redeploy [app]` | Deploy the running configuration again, `--image` to change the image. Needs no `deploy.yaml` |
 | `shipwick status [app]` | Version, CPU and memory, replica health and restart counts, recent deployments, and what the supervisor has been doing |
@@ -59,6 +59,15 @@ shipwick login                      # URL defaults to the tunnel; token is asked
 export SHIPWICK_AGENT_URL=https://agent.example.com
 export SHIPWICK_AGENT_TOKEN=…
 shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA
+```
+
+Values that must not be in the file are written as `${NAME}` and filled in
+from the environment or `--env-file` before the file is sent; an unset name
+stops the deployment. Several applications deploy in order, stopping at the
+first failure:
+
+```bash
+shipwick deploy -f api/deploy.yaml -f worker/deploy.yaml --env-file .env.production
 ```
 
 The CLI warns whenever a token is about to travel over plain HTTP to

@@ -27,7 +27,7 @@ func (c *cli) statusCommand() *cobra.Command {
 Without an argument, the application described by deploy.yaml is shown.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, err := resolveApp(args, file)
+			name, err := c.resolveApp(args, file)
 			if err != nil {
 				return err
 			}

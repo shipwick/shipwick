@@ -113,8 +113,16 @@ export interface AppSpec {
   env?: Record<string, string>
   health?: SpecHealth | null
   resources: SpecResources
+  /** Named volumes; absent when the application has none. */
+  volumes?: SpecVolume[]
   restart: { policy: 'always' | 'on-failure' | 'never' | string }
-  deploy: { strategy: string }
+  deploy: { strategy: 'rolling' | 'recreate' | string }
+}
+
+export interface SpecVolume {
+  name: string
+  /** Absolute path inside the container. */
+  path: string
 }
 
 export interface Container {

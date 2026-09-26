@@ -8,6 +8,49 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+Before 1.0 a minor version may change how things work under the hood. This one
+does: routing. Upgrading is still running the installer again, but this
+upgrade recreates the Caddy container once, because it joins a second network.
+Established connections through the proxy are cut at that moment; nothing else
+is, and applications keep running throughout.
+
+### Added
+
+- **Applications reach each other by name.** Every application is `http://<name>:<port>`
+  for the other applications on the server, no domain needed: `orders` calls
+  `payments` at `http://payments:8080` and gets a healthy replica of the current
+  version. Nothing outside the server can reach these names.
+- **`volumes`** in `deploy.yaml`: named Docker volumes mounted into the
+  replica, for databases and everything else that must keep its data. A volume
+  belongs to the application and survives redeployments, rollbacks and
+  `shipwick delete`.
+- **`deploy.strategy: recreate`**: the running version is stopped before the
+  new one starts, for applications whose two versions cannot run side by side.
+  Required with `volumes`. A failed deployment starts the old containers again.
+- **`${NAME}` placeholders** in `deploy.yaml` are filled in by the CLI from its
+  environment or from `--env-file` before the file is validated or sent, so
+  that secrets stay out of the file and the repository. An unset name is an
+  error, never an empty value; `$${NAME}` is a literal.
+- **Several applications in one command**: `shipwick deploy -f a/deploy.yaml
+  -f b/deploy.yaml` deploys them in order and stops at the first failure.
+  `validate` takes several files too.
+
+### Changed
+
+- **Rollouts no longer reload the proxy.** Caddy is told an application's
+  name and asks Docker's DNS who carries it for every request; replicas take
+  the name when they are ready and lose it when they stop. A rollout, a crash
+  or a restart therefore changes nothing in Caddy's configuration, which used to
+  be reloaded once per replica replaced — and a reload resets connections that
+  are being established at that instant. Measured with a new connection per
+  request and added latency, 18 consecutive rolling redeploys answered 15,774
+  of 15,774 requests. A crashed replica now leaves the rotation at once instead
+  of at the supervisor's next look.
+- The names `agent`, `caddy`, `dashboard` and `localhost` can no longer be
+  application names: they are Shipwick's own on the network applications share.
+- The agent's Docker network is joined by a second one, `<network>-services`,
+  created on startup.
+
 ## [0.1.1] - 2026-09-21
 
 Found by installing 0.1.0 on real servers. The agent, the CLI and the dashboard

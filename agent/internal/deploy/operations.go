@@ -41,7 +41,7 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 func (e *Engine) Start(ctx context.Context, name string) error {
 	return e.withActive(ctx, name, func(app store.Application, replicas []store.Replica) error {
 		for _, r := range replicas {
-			err := e.rt.StartContainer(ctx, r.ContainerID)
+			err := e.startNameless(ctx, r.ContainerID)
 			if errors.Is(err, docker.ErrNotFound) {
 				return fmt.Errorf("replica %d: container %s no longer exists; deploy the application again", r.Index, r.ContainerName)
 			} else if err != nil {
@@ -160,6 +160,16 @@ func (e *Engine) Recover(ctx context.Context) error {
 		if activeID, known := active[c.App]; known && c.DeploymentID != activeID {
 			e.log.Warn("removing leftover container", "container", c.Name, "app", c.App, "deployment", c.DeploymentID)
 			leftovers = append(leftovers, c)
+			continue
+		}
+		// What each replica answers to on the services network is known to
+		// Docker alone. A replica created before that network existed answers
+		// to nothing, and the first SyncProxy gives it its names — before the
+		// proxy is told to look for them.
+		if in, err := e.rt.InspectContainer(ctx, c.ID); err == nil && len(in.ServiceNames) > 0 {
+			e.mu.Lock()
+			e.names[c.ID] = in.ServiceNames
+			e.mu.Unlock()
 		}
 	}
 	for i, err := range e.retireAll(ctx, leftovers) {

@@ -75,6 +75,10 @@ Failure — `details` is always an object:
 
 The body **is** the deploy.yaml document. JSON is accepted as well.
 
+The agent expects a complete document: `${NAME}` placeholders are a convention
+of the CLI, which fills them in before sending, and would be stored literally
+here.
+
 ```bash
 curl -X POST http://localhost:9000/api/v1/applications/my-api/deploy \
   -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" \

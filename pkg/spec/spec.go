@@ -19,8 +19,20 @@ const (
 
 // Deploy strategies.
 const (
+	// StrategyRolling replaces replicas one at a time; the application keeps
+	// serving throughout.
 	StrategyRolling = "rolling"
+	// StrategyRecreate stops the running version before it starts the new
+	// one, for applications whose two versions cannot run side by side —
+	// anything with a volume. The application is down while the new version
+	// starts; if it fails, the old one is started again.
+	StrategyRecreate = "recreate"
 )
+
+// ReservedNames cannot be application names: an application is reachable
+// under its name on the services network, and these belong to Shipwick's own
+// containers there.
+var ReservedNames = []string{"agent", "caddy", "dashboard", "localhost"}
 
 // Defaults applied by Parse when a field is omitted.
 const (
@@ -43,8 +55,17 @@ type App struct {
 	Env       map[string]string `json:"env,omitempty"`
 	Health    *Health           `json:"health,omitempty"`
 	Resources Resources         `json:"resources"`
+	Volumes   []Volume          `json:"volumes,omitempty"`
 	Restart   Restart           `json:"restart"`
 	Deploy    Deploy            `json:"deploy"`
+}
+
+// Volume is a named Docker volume mounted into every replica. It belongs to
+// the application, not to a deployment: the data outlives redeployments and
+// rollbacks, and is kept when the application is deleted.
+type Volume struct {
+	Name string `json:"name"`
+	Path string `json:"path"` // absolute path inside the container
 }
 
 // Health configures the HTTP health check run against every replica.

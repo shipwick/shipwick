@@ -65,6 +65,7 @@ services:
       - caddy-admin:/run/caddy
     networks:
       - shipwick
+      - shipwick-services
     restart: unless-stopped
 
   dashboard:
@@ -96,3 +97,7 @@ networks:
   # Applications, the agent (health checks) and Caddy (upstreams) share it.
   shipwick:
     name: shipwick
+  # Replicas carry their application's name here while they are ready; Caddy
+  # and other applications find them by it.
+  shipwick-services:
+    name: shipwick-services

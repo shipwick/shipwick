@@ -385,7 +385,7 @@ func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app st
 	}
 	if restartUnhealthy {
 		s.restart(ctx, now, app, r, func() error {
-			return s.e.rt.RestartContainer(ctx, r.ContainerID, s.e.opts.StopTimeout)
+			return s.e.restartNameless(ctx, r.ContainerID)
 		})
 	}
 }
@@ -477,7 +477,7 @@ func (s *supervisor) superviseDown(ctx context.Context, now time.Time, app store
 	due := !st.leaveStopped && !now.Before(st.nextRestart)
 	s.mu.Unlock()
 	if due {
-		s.restart(ctx, now, app, r, func() error { return s.e.rt.StartContainer(ctx, r.ContainerID) })
+		s.restart(ctx, now, app, r, func() error { return s.e.startNameless(ctx, r.ContainerID) })
 	}
 }
 

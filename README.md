@@ -235,18 +235,19 @@ Only `name` and `image` are required. Annotated example:
 
 | Field | Default | |
 |---|---|---|
-| `name` | — | Lowercase letters, digits, dashes; starts and ends with a letter or digit; max 63 |
+| `name` | — | Lowercase letters, digits, dashes; starts and ends with a letter or digit; max 63. Other applications reach this one at `http://<name>:<port>`. `agent`, `caddy`, `dashboard` and `localhost` are taken |
 | `image` | — | Any Docker image reference. Its tag becomes the deployment's version |
 | `port` | — | Port the app listens on. Required with `domain` or `health` |
 | `domain` | — | Public hostname, served over HTTPS by Caddy |
-| `replicas` | `1` | 1–50 |
-| `env` | — | Environment variables; values are never logged or returned by the API |
+| `replicas` | `1` | 1–50; must be 1 with `volumes` |
+| `env` | — | Environment variables; values are never logged or returned by the API. `${NAME}` is filled in by the CLI from its environment or `--env-file`, so secrets stay out of the file |
 | `health.path` | — | Must answer 2xx |
 | `health.interval` / `timeout` / `retries` | `10s` / `3s` / `3` | |
 | `resources.cpu` | unlimited | Cores; `0.5`, `2`, … |
 | `resources.memory` | unlimited | `128mb`, `512mb`, `1gb`, … |
+| `volumes[].name` / `path` | — | A named Docker volume and where it is mounted. Data outlives deployments, rollbacks and `delete`. Needs `deploy.strategy: recreate` |
 | `restart.policy` | `always` | `always` `on-failure` `never` |
-| `deploy.strategy` | `rolling` | |
+| `deploy.strategy` | `rolling` | `rolling` `recreate` — see [Deployment](#7-deployment) |
 
 Mistakes are reported all at once, by field:
 
@@ -293,6 +294,37 @@ replace (a first deployment, scaling up) start together; when scaling down, the
 surplus replicas are retired last. During a rollout, both versions serve side
 by side for a moment — as with any rolling update, the two must be able to
 coexist (database migrations, above all, must be backward compatible).
+
+**`recreate`, for what cannot run twice.** A database, or anything that holds a
+lock, cannot have two versions running at once. With `deploy.strategy:
+recreate` the running version is taken out of the proxy and stopped *first*,
+then the new one is started and verified; the application is down for as long
+as the new version takes to start. If the new version fails, the old
+containers — kept, stopped — are started again. Applications with `volumes`
+must use it.
+
+**Volumes.** `volumes` mounts named Docker volumes into the replica:
+
+```yaml
+name: postgres
+image: postgres:17
+port: 5432
+replicas: 1
+env:
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+volumes:
+  - name: data
+    path: /var/lib/postgresql/data
+deploy:
+  strategy: recreate
+```
+
+The volume is `shipwick_postgres_data` on the server. It belongs to the
+application, not to a deployment: a redeploy, a rollback and even
+`shipwick delete` leave it where it is (`docker volume rm` removes it when you
+mean it). Other applications reach the database at `postgres:5432` — see
+[Caddy](#11-caddy). Volumes are named volumes only; a path on the host cannot
+be mounted.
 
 **A deployment that fails is undone.** If a new replica crashes or never
 becomes healthy, its last log lines are saved with the deployment, the new
@@ -474,47 +506,54 @@ obtained and renewed automatically, and plain HTTP is redirected. Shipwick does
 not reimplement any of that — it only tells Caddy what to route where.
 
 ```text
-Internet ──▶ Caddy :443 ──▶ shipwick_my-api_7_1:8080
-                       └──▶ shipwick_my-api_7_2:8080
+Internet ──▶ Caddy :443 ──▶ my-api:8080 ──┬──▶ shipwick_my-api_7_1
+                                          └──▶ shipwick_my-api_7_2
 ```
 
-- **Only healthy replicas receive traffic.** A replica that crashes or fails
-  its health check leaves the rotation within a second and rejoins once it
-  passes again. Requests are spread round-robin.
-- **The application stays available through a deployment.** A new replica
-  joins the rotation only once it is healthy, and the old one it replaces
-  leaves the rotation *before* it is stopped: no request goes to a replica that
-  is not ready, and none that is being served is cut off. If the proxy cannot
-  be updated, the deployment fails and is undone.
+Caddy is told a *name*, not a list of containers. Every application has one on
+the server's `shipwick-services` network — its own name — and a replica answers
+to it exactly while it is ready for traffic: it takes the name once it passed
+its health check, and loses it the moment it stops. Docker's DNS returns one
+address per replica that carries the name, and Caddy asks it for every request.
+
+- **Only healthy replicas receive traffic.** A replica that fails its health
+  check is taken off the name within a second and put back once it passes
+  again; one that crashes disappears from it at once. Requests are spread
+  round-robin.
+- **A deployment does not touch the proxy.** A new replica takes the name only
+  once it is healthy; the old one it replaces keeps answering until it is
+  stopped, and taking it off the name is the same thing as stopping it. Caddy's
+  configuration changes only when a domain or a port does, so a rollout, a
+  crash and a restart never reload it — and a reload is the one thing that
+  costs requests: Caddy resets connections that are being established at that
+  instant. Measured with a new connection per request, 12 clients and 50 ms of
+  added latency, through 18 consecutive rolling redeploys: 15,774 of 15,774
+  requests answered, 0 reloads.
 - **No healthy replica, or `shipwick stop`:** the domain answers `503` rather
   than timing out, and keeps its certificate. An address no application serves
   answers `404`.
 - **One domain, one application.** A second application claiming a domain in
   use is refused as a config error before anything is started.
-- Application containers publish no host ports. Caddy reaches them over the
-  private `shipwick` network, by container name.
+- Application containers publish no host ports. The proxy is the only way in
+  from outside.
 
 What a crash costs: requests in flight on the replica that died are lost with
-it, and the one request that discovers it is gone may get a `502` within half a
-second; everything after it goes to the surviving replicas.
+it, and a request that arrives in the second before its name is dropped may
+get a `503`; everything after it goes to the surviving replicas.
 
-What a deployment costs: each replica that is replaced is one reload of Caddy's
-configuration, and Caddy resets connections that are being *established* at
-that instant — a TLS handshake in progress, a first request not yet read.
-Established connections are unaffected, so browsers and clients that reuse
-connections rarely notice; a client that opens a new connection for every
-request is the worst case. Measured that way, against a server 100 ms away,
-through two minutes of back-to-back rolling redeploys: 5 of 233 requests were
-lost, all at those instants, and none was answered with an error status. Over
-loopback, where a connection takes a millisecond to establish, the same test
-loses none. Rollouts that do not
-reload the proxy are at the top of the [roadmap](#14-roadmap).
+**Reaching one application from another.** The same names serve the
+applications themselves. A replica is on the `shipwick-services` network from
+its first second, so `orders` reaches `payments` at `http://payments:8080` —
+the port is the one in `payments`' `deploy.yaml` — and gets a healthy replica
+of whatever version is current, without a domain, a certificate or a trip
+through the proxy. A database run by Shipwick (see [Deployment](#7-deployment))
+is reached the same way, `postgres:5432`. Nothing outside the server can reach
+these names.
 
 **The agent owns Caddy's configuration entirely** — it regenerates and reloads
-the full config whenever routing changes, and restores it within seconds should
-Caddy ever come back without it.
-Do not edit it by hand: it would be overwritten. Custom Caddy directives are
-not supported yet.
+the full config whenever a domain or a port changes, and restores it within
+seconds should Caddy ever come back without it. Do not edit it by hand: it
+would be overwritten. Custom Caddy directives are not supported yet.
 
 **The agent's own API over HTTPS.** Set `SHIPWICK_AGENT_DOMAIN=agent.example.com`
 and the API is served there through Caddy — the way to reach it from a laptop
@@ -557,7 +596,10 @@ What Shipwick does:
   exists. The installer avoids this by generating the token itself and
   passing it in; do the same if you set things up by hand.
 - Tokens, `Authorization` headers, request bodies and env values are never
-  logged. Env values are masked in every API response.
+  logged. Env values are masked in every API response. `${NAME}` placeholders
+  keep secrets out of `deploy.yaml` and out of your repository; the CLI fills
+  them in from its environment or `--env-file` at deploy time and refuses to
+  deploy while one is unset.
 - `shipwick` never takes the token as a flag (arguments leak through `ps` and
   shell history), stores it `0600`, refuses to send a saved token to a
   different agent than the one it was saved for, and warns before a token
@@ -646,21 +688,14 @@ opening a pull request: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 14. Roadmap
 
-What 0.1.0 does is this document; what changed between versions is in the
+What the current version does is this document; what changed between versions is in the
 [changelog](CHANGELOG.md).
 
 Next, roughly in this order:
 
-- **Rollouts that do not reload the proxy.** Replacing a replica reloads Caddy's
-  configuration today, and a connection being established at that instant is
-  reset (see [Caddy](#11-caddy)).
-- **Encrypted secrets.** `env` values are stored in plain text in the agent's
-  SQLite file today.
-- **Volumes**, so that stateful applications can be deployed too.
-- A **`recreate` strategy** for applications that cannot run two versions side
-  by side.
+- **Encrypted secrets.** `${NAME}` keeps a secret out of `deploy.yaml`, but the
+  value is stored in plain text in the agent's SQLite file.
 - **Registry credential helpers** (`credsStore`), not only `auths` entries.
-- **Internal service discovery** between applications on the same server.
 - **Custom Caddy directives** per application: headers, redirects, basic auth.
 - **Several servers** from one CLI configuration and one dashboard.
 
