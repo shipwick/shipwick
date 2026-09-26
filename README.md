@@ -129,7 +129,7 @@ Everything the installer fetches comes from one
 [release](https://github.com/shipwick/shipwick/releases) and is verified against
 its checksums; the images are pinned to that release, so a server runs the
 version it installed until you run the installer again. A specific version:
-`curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.1.0 sh`.
+`curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.2.0 sh`.
 
 > **From source**, without a release: build the images on the server —
 > `docker build -t ghcr.io/shipwick/agent .` and

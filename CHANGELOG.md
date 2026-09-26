@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 Before 1.0 a minor version may change how things work under the hood. This one
 does: routing. Upgrading is still running the installer again, but this
 upgrade recreates the Caddy container once, because it joins a second network.
@@ -123,6 +125,7 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/shipwick/shipwick/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/shipwick/shipwick/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/shipwick/shipwick/releases/tag/v0.1.0
