@@ -8,6 +8,12 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- The installer's removal of earlier releases' images did nothing: it asked
+  `docker images` for two repositories at once, which it refuses. It now asks
+  for each in turn. Run the installer again to reclaim the space.
+
 ## [0.4.0] - 2026-09-27
 
 ### Added

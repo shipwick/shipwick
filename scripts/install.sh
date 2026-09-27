@@ -320,9 +320,12 @@ install_server() {
 prune_old_images() {
     keep="$(docker compose config --images 2>/dev/null)"
     removed=0
-    for image in $(docker images --format '{{.Repository}}:{{.Tag}}' 'ghcr.io/shipwick/agent' 'ghcr.io/shipwick/dashboard' 2>/dev/null); do
-        case " $keep " in *" $image "*) continue ;; esac
-        docker image rm "$image" >/dev/null 2>&1 && removed=$((removed + 1))
+    # `docker images` takes one repository at a time.
+    for repo in ghcr.io/shipwick/agent ghcr.io/shipwick/dashboard; do
+        for image in $(docker images --format '{{.Repository}}:{{.Tag}}' "$repo" 2>/dev/null); do
+            case " $keep " in *" $image "*) continue ;; esac
+            docker image rm "$image" >/dev/null 2>&1 && removed=$((removed + 1))
+        done
     done
     [ "$removed" -eq 0 ] || step "Removed $removed image(s) of earlier Shipwick releases"
 }
