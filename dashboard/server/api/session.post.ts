@@ -25,6 +25,12 @@ export default defineEventHandler(async (event) => {
     if (response.statusCode === 401) {
       throw new AgentProxyError(401, 'UNAUTHORIZED', 'The agent rejected this token')
     }
+    // The agent did not look at the token: too many failures from this address (the dashboard server's, as the agent sees it).
+    if (response.statusCode === 429) {
+      const retryAfter = Number(response.headers['retry-after'])
+      setResponseHeader(event, 'retry-after', Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 60)
+      throw new AgentProxyError(429, 'RATE_LIMITED', 'Too many failed attempts from this address; try again in a minute.')
+    }
     if (response.statusCode !== 200) {
       const base = agentBaseUrl()
       throw new AgentProxyError(502, 'AGENT_UNREACHABLE', `${base} answered with status ${response.statusCode}. Is it a Shipwick agent?`, { agent_url: base })

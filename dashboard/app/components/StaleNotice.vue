@@ -23,7 +23,7 @@ const age = computed(() => (props.updatedAt === null ? '' : formatRelativeTime(n
     <span>
       Showing data from <span class="mono">{{ age }}</span>, retrying.
       <span v-if="props.error.agentUrl" class="mono">{{ props.error.agentUrl }}</span>
-      <span v-else>{{ props.error.message }}</span>
+      <span v-else>{{ props.error.displayMessage }}</span>
     </span>
   </div>
 </template>

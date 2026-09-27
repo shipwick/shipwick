@@ -23,7 +23,8 @@ func (c *cli) tokenCommands() []*cobra.Command {
 
 A token has one of three roles. read sees everything: status, logs, history,
 metrics. deploy also changes what runs: deploy, redeploy, roll back, stop,
-start. admin also does the rest: delete applications, manage tokens. Give CI a
+start. admin also does the rest: delete applications, manage tokens and
+secrets. Give CI a
 deploy token and keep admin tokens for people. Managing tokens needs admin.
 
 The token the agent is configured with (SHIPWICK_AGENT_TOKEN, or the one it

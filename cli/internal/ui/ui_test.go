@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -123,6 +124,50 @@ func TestDuration(t *testing.T) {
 	for d, want := range tests {
 		if got := Duration(d); got != want {
 			t.Errorf("Duration(%s) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestPrefixedLinesNeverInterleave(t *testing.T) {
+	u, out, errOut := newTestUI()
+	api, web := u.Prefixed("api  "), u.Prefixed("web  ")
+
+	api.Success("Pulled image")
+	api.Println()                       // dropped: between other applications' lines it separates nothing
+	api.Printf("%d/%d replicas ", 1, 2) // a line written in two parts stays one line
+	api.Printf("healthy\n")
+	web.Warn("careful")
+	api.Progress("never shown")
+	u.Println("Skipped worker: api did not deploy")
+
+	if got := out.String(); got != "api  ✓ Pulled image\napi  1/2 replicas healthy\nSkipped worker: api did not deploy\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if got := errOut.String(); got != "web  ! careful\n" {
+		t.Errorf("stderr = %q", got)
+	}
+
+	// Two applications narrating at once: every line reaches the buffer whole
+	// and under its own prefix.
+	out.Reset()
+	var wg sync.WaitGroup
+	for _, p := range []*UI{api, web} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				p.Success("step %d of a fairly long line that is worth interleaving", i)
+			}
+		}()
+	}
+	wg.Wait()
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 400 {
+		t.Fatalf("got %d lines, want 400", len(lines))
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "api  ✓ step ") && !strings.HasPrefix(line, "web  ✓ step ") || !strings.HasSuffix(line, "interleaving") {
+			t.Fatalf("interleaved line: %q", line)
 		}
 	}
 }

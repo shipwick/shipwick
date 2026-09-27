@@ -17,6 +17,9 @@ type FieldError struct {
 // fix them all in one pass instead of one error per run.
 type ValidationError struct {
 	Fields []FieldError
+	// File names the file being judged in the report's first line; empty
+	// means deploy.yaml. ParseMany sets it to shipwick.yaml.
+	File string
 }
 
 func (e *ValidationError) add(field, message, expected string) {
@@ -32,7 +35,11 @@ func (e *ValidationError) add(field, message, expected string) {
 //	  expected: 128mb, 512mb, 1gb, ...
 func (e *ValidationError) Error() string {
 	var b strings.Builder
-	b.WriteString("invalid deploy.yaml\n")
+	file := e.File
+	if file == "" {
+		file = "deploy.yaml"
+	}
+	b.WriteString("invalid " + file + "\n")
 	for _, f := range e.Fields {
 		b.WriteString("\n")
 		b.WriteString(f.Field)

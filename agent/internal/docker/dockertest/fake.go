@@ -76,6 +76,14 @@ type Fake struct {
 	files          map[string]map[string][]byte
 	volumes        map[string]map[string][]byte
 	removedVolumes []string
+	// loaded are the references LoadImage was given, see fake_images.go.
+	loaded []string
+
+	// ProxyErr makes ProxyContainer fail: the proxy is not a container here.
+	// The proxy's directories and what was removed from it: see fake_proxy.go.
+	ProxyErr     error
+	proxyDirs    map[string]bool
+	proxyRemoved []string
 }
 
 func New() *Fake {
@@ -83,7 +91,7 @@ func New() *Fake {
 		CrashImages: map[string]bool{},
 		CrashNames:  map[string]bool{},
 		containers:  map[string]*docker.Container{},
-		specs:       map[string]docker.ContainerSpec{},
+		specs:       map[string]docker.ContainerSpec{ProxyID: {}}, // the proxy's own files, see fake_proxy.go
 		local:       map[string]bool{},
 		starts:      map[string]int{},
 		ips:         map[string]string{},
@@ -95,6 +103,7 @@ func New() *Fake {
 		volumes:     map[string]map[string][]byte{},
 		JobExits:    map[string]int{},
 		stopped:     map[string]chan struct{}{},
+		proxyDirs:   map[string]bool{},
 	}
 }
 
@@ -208,6 +217,12 @@ func (f *Fake) CreateContainer(_ context.Context, spec docker.ContainerSpec) (st
 		OnServicesNetwork: true,
 	}
 	f.specs[id] = spec
+	// Like the daemon: a volume exists once a container mounting it does.
+	for _, m := range spec.Mounts {
+		if name := docker.VolumeName(spec.App, m.Volume); f.volumes[name] == nil {
+			f.volumes[name] = map[string][]byte{}
+		}
+	}
 	f.ips[id] = fmt.Sprintf("172.18.0.%d", f.nextID+1)
 	f.peak = max(f.peak, len(f.containers))
 	return id, name, nil

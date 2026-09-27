@@ -8,7 +8,7 @@ import { rollbackCandidates } from '~/utils/deployments'
 import { METRICS_RANGES } from '~/utils/metricsHistory'
 import { roleHint } from '~/utils/roles'
 import { tidyDuration } from '~/utils/jobs'
-import { describeHealth, describeLogging, formatArgv, formatPublish, hostnamesOf, shippedLogDriver } from '~/utils/spec'
+import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatPublish, hostnamesOf, shippedLogDriver } from '~/utils/spec'
 import { applicationStatusDisplay, containerStateDisplay, replicaHealthDisplay } from '~/utils/status'
 
 const route = useRoute()
@@ -39,8 +39,10 @@ const events = usePolling<AgentEvent[]>(signal => agent.get<AgentEvent[]>(`${pat
 
 const gone = computed(() => app.error.value?.notFound === true)
 const hasActive = computed(() => Boolean(app.data.value?.active_deployment))
-const metrics = useLiveMetrics(name, () => hasActive.value && !gone.value)
-const history = useMetricsHistory(name, () => hasActive.value && !gone.value)
+// A folder served by the proxy: no containers, so the agent answers 409 STATIC_APPLICATION to logs, metrics, jobs and run. Do not ask.
+const isStatic = computed(() => app.data.value?.static === true)
+const metrics = useLiveMetrics(name, () => hasActive.value && !gone.value && !isStatic.value)
+const history = useMetricsHistory(name, () => hasActive.value && !gone.value && !isStatic.value)
 
 watch(name, () => {
   void app.reset()
@@ -140,8 +142,14 @@ const headline = computed(() => {
   if (a.status === 'FAILED') return 'No deployment has succeeded yet'
   if (a.status === 'DEPLOYING') return 'First deployment in progress'
   if (a.status === 'STOPPED') return 'Stopped on request'
+  if (a.static) return 'Served by the proxy'
   return `${a.replicas.healthy}/${a.replicas.desired} healthy`
 })
+
+/** "42 files, 3.1 MB, served by the proxy": what the active static deployment serves. */
+const servedFiles = computed(() => describeStatic(app.data.value?.active_deployment?.static))
+/** Where a `build` application's image comes from; "" for an image pulled from a registry. */
+const buildOrigin = computed(() => describeBuild(spec.value?.build))
 
 const cpuValues = computed(() => metrics.samples.value.map(s => s.cpu_percent))
 const memoryValues = computed(() => metrics.samples.value.map(s => s.memory_bytes))
@@ -293,12 +301,23 @@ const volumes = computed(() => spec.value?.volumes ?? [])
                   · <NuxtLink :to="`/deployments/${app.data.value.active_deployment.id}`" class="mono link">#{{ app.data.value.active_deployment.sequence }}</NuxtLink>
                 </span>
               </dd>
-              <dt class="label pt-0.5">
-                Image
-              </dt>
-              <dd class="mono break-all">
-                {{ app.data.value.image || '—' }}
-              </dd>
+              <template v-if="isStatic">
+                <dt class="label pt-0.5">
+                  Files
+                </dt>
+                <dd>
+                  {{ servedFiles || 'Nothing is served yet' }}
+                </dd>
+              </template>
+              <template v-else>
+                <dt class="label pt-0.5">
+                  Image
+                </dt>
+                <dd class="mono break-all">
+                  {{ app.data.value.image || '—' }}
+                  <span v-if="buildOrigin" class="block font-sans text-fg-muted" title="The agent never builds: a new image comes from running shipwick deploy in the project">{{ buildOrigin }}</span>
+                </dd>
+              </template>
               <dt class="label pt-0.5">
                 {{ hostnames.length > 1 ? 'Hostnames' : 'Domain' }}
               </dt>
@@ -330,7 +349,12 @@ const volumes = computed(() => spec.value?.volumes ?? [])
             </dl>
           </div>
 
-          <div class="min-w-0 self-start divide-y divide-line rounded-sm border border-line">
+          <!-- Where the live numbers would be: a static application has none to show. -->
+          <div v-if="isStatic" class="min-w-0 self-start rounded-sm border border-line px-4 py-3 text-fg-muted">
+            This application is a folder served by the proxy; it has no containers. There are no replicas, logs or metrics, and nothing to run a command in.
+            To serve other files, run <span class="mono text-fg">shipwick deploy</span> from the project.
+          </div>
+          <div v-else class="min-w-0 self-start divide-y divide-line rounded-sm border border-line">
             <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-4 px-4 py-2.5 sm:grid-cols-[4.5rem_11rem_minmax(0,1fr)]">
               <span class="label">CPU</span>
               <span class="mono">
@@ -383,7 +407,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         />
 
         <!-- The sampled history: per replica, average CPU and peak memory per step, refreshed every 30s -->
-        <UiPanel title="History" :meta="history.history.value ? `every ${history.history.value.step}` : null">
+        <UiPanel v-if="!isStatic" title="History" :meta="history.history.value ? `every ${history.history.value.step}` : null">
           <template #actions>
             <div role="group" aria-label="Range" class="inline-flex overflow-hidden rounded-sm border border-line-strong">
               <button
@@ -422,7 +446,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </div>
         </UiPanel>
 
-        <UiPanel title="Replicas" :meta="app.data.value.containers.length">
+        <UiPanel v-if="!isStatic" title="Replicas" :meta="app.data.value.containers.length">
           <EmptyState v-if="app.data.value.containers.length === 0" title="No containers">
             Nothing is running for this application.
           </EmptyState>
@@ -483,7 +507,21 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </div>
         </UiPanel>
 
-        <UiPanel v-if="spec" title="Configuration">
+        <!-- A static configuration is a folder and a hostname; the container settings do not exist for it. -->
+        <UiPanel v-if="spec && spec.static" title="Configuration">
+          <dl class="grid gap-px bg-line">
+            <div class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Folder
+              </dt>
+              <dd class="mono mt-0.5">
+                {{ spec.static.dir }}/ <span class="font-sans text-fg-muted">— served by the proxy, no container. Relative to deploy.yaml on the machine that deploys.</span>
+              </dd>
+            </div>
+          </dl>
+        </UiPanel>
+
+        <UiPanel v-else-if="spec" title="Configuration">
           <dl class="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-3">
             <div class="bg-bg px-4 py-2.5">
               <dt class="label">
@@ -580,7 +618,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         </UiPanel>
 
         <JobsSection
-          v-if="spec && hasActive && !gone"
+          v-if="spec && hasActive && !gone && !isStatic"
           :application="name"
           :spec="spec"
           :image="app.data.value.image"
@@ -638,7 +676,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </div>
         </UiPanel>
 
-        <UiPanel title="Logs" :bordered="false">
+        <UiPanel v-if="!isStatic" title="Logs" :bordered="false">
           <template #actions>
             <NuxtLink :to="{ path: '/logs', query: { application: name } }" class="link text-xs text-fg-muted">
               Open in Logs
@@ -674,9 +712,15 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         @close="closeDialog"
         @confirm="setRunning(false)"
       >
-        All replicas are stopped<template v-if="app.data.value.domain">
-          and <span class="mono text-fg">{{ app.data.value.domain }}</span> stops answering<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>
-        </template>. The application stays stopped, across agent restarts too, until you start it again. Nothing is deleted.
+        <template v-if="isStatic">
+          <span class="mono text-fg">{{ app.data.value.domain }}</span> answers 503 instead of the files<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>.
+        </template>
+        <template v-else>
+          All replicas are stopped<template v-if="app.data.value.domain">
+            and <span class="mono text-fg">{{ app.data.value.domain }}</span> stops answering<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>
+          </template>.
+        </template>
+        The application stays stopped, across agent restarts too, until you start it again. Nothing is deleted.
       </ConfirmDialog>
       <DeleteDialog :open="dialog === 'delete'" :name="name" @close="closeDialog" @deleted="router.replace('/applications')" />
       <RestoreDialog

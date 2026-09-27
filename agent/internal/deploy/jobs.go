@@ -303,6 +303,9 @@ func (e *Engine) startFromActive(ctx context.Context, name, kind string, resolve
 	if err != nil {
 		return store.JobRun{}, err
 	}
+	if d.StaticDigest != "" {
+		return store.JobRun{}, ErrStaticApplication
+	}
 	job, command, timeout, err := resolve(d)
 	if err != nil {
 		return store.JobRun{}, err
@@ -417,6 +420,9 @@ func (e *Engine) Jobs(ctx context.Context, name string) ([]api.Job, error) {
 	d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
 	if err != nil {
 		return nil, err
+	}
+	if d.StaticDigest != "" {
+		return nil, ErrStaticApplication
 	}
 	last, err := e.store.LastJobRuns(ctx, app.ID)
 	if err != nil {

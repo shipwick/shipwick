@@ -1,0 +1,11 @@
+.git
+bin
+obj
+.vs
+*.user
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+deploy.yaml

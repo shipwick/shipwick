@@ -3,7 +3,7 @@ import type { Deployment, DeploymentDetail } from '~/types/api'
 import { deriveProgress } from '~/utils/deploymentProgress'
 import { durationBetween, formatAbsoluteUtc, formatBytes, formatCores, formatDuration } from '~/utils/format'
 import { tidyDuration } from '~/utils/jobs'
-import { describeHealth, describeLogging, formatArgv, formatHostname, formatPublish, hostnamesOf } from '~/utils/spec'
+import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatHostname, formatPublish, hostnamesOf } from '~/utils/spec'
 import { deploymentStatusDisplay } from '~/utils/status'
 
 const route = useRoute()
@@ -41,6 +41,10 @@ const process = computed(() => {
 })
 const logging = computed(() => describeLogging(d.value?.spec))
 const loggingOptions = computed(() => Object.entries(d.value?.spec.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+/** A static deployment serves a folder: "42 files, 3.1 MB, served by the proxy" where a container deployment has an image. */
+const isStatic = computed(() => Boolean(d.value?.static))
+const servedFiles = computed(() => describeStatic(d.value?.static))
+const buildOrigin = computed(() => describeBuild(d.value?.spec.build))
 
 // A redeploy or rollback re-used another deployment's stored configuration.
 // Deployment records are immutable enough for this: fetch the source once to
@@ -70,7 +74,7 @@ const outcome = computed(() => {
   switch (dep.status) {
     case 'ACTIVE': return 'Currently serving'
     case 'SUPERSEDED': return 'Served successfully; replaced by a later deployment'
-    case 'FAILED': return 'Failed before any replica of the previous version was replaced; nothing was affected'
+    case 'FAILED': return dep.static ? 'Failed; the files served before are still served' : 'Failed before any replica of the previous version was replaced; nothing was affected'
     case 'ROLLED_BACK': return 'Failed part-way; the replicas already replaced were restored from the previous deployment'
     default: return ''
   }
@@ -157,6 +161,7 @@ const crumbs = computed(() => [
               </dt>
               <dd class="mono mt-0.5">
                 {{ d.version || '—' }}
+                <span v-if="isStatic" class="block font-sans text-fg-muted" :title="d.static?.digest">{{ servedFiles }}</span>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -190,8 +195,12 @@ const crumbs = computed(() => [
               <dt class="label">
                 Image
               </dt>
-              <dd class="mono mt-0.5 break-all">
+              <dd v-if="isStatic" class="mt-0.5 text-fg-muted">
+                None: a folder served by the proxy, uploaded by <span class="mono text-fg">shipwick deploy</span>
+              </dd>
+              <dd v-else class="mono mt-0.5 break-all">
                 {{ d.image }}
+                <span v-if="buildOrigin" class="block font-sans text-fg-muted">{{ buildOrigin }}</span>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -216,22 +225,33 @@ const crumbs = computed(() => [
         <!-- Spec -->
         <UiPanel title="Configuration deployed">
           <dl class="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-4">
-            <div class="bg-bg px-4 py-2.5">
+            <!-- A static configuration is a folder and a hostname; the container settings do not exist for it. -->
+            <div v-if="d.spec.static" class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
-                Replicas
+                Folder
               </dt>
               <dd class="mono mt-0.5">
-                {{ d.spec.replicas }}
+                {{ d.spec.static.dir }}/ <span class="font-sans text-fg-muted">— served by the proxy, no container</span>
               </dd>
             </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Port
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ d.spec.port ?? '—' }}
-              </dd>
-            </div>
+            <template v-else>
+              <div class="bg-bg px-4 py-2.5">
+                <dt class="label">
+                  Replicas
+                </dt>
+                <dd class="mono mt-0.5">
+                  {{ d.spec.replicas }}
+                </dd>
+              </div>
+              <div class="bg-bg px-4 py-2.5">
+                <dt class="label">
+                  Port
+                </dt>
+                <dd class="mono mt-0.5">
+                  {{ d.spec.port ?? '—' }}
+                </dd>
+              </div>
+            </template>
             <div class="bg-bg px-4 py-2.5">
               <dt class="label">
                 {{ hostnames.length > 1 ? 'Hostnames' : 'Domain' }}
@@ -245,35 +265,37 @@ const crumbs = computed(() => [
                 </template>
               </dd>
             </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Restart · strategy
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ d.spec.restart.policy }} · {{ d.spec.deploy.strategy }}
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5 sm:col-span-2">
-              <dt class="label">
-                Health check
-              </dt>
-              <dd class="mono mt-0.5">
-                <template v-if="healthCheck">
-                  {{ healthCheck.check }} <span class="text-fg-muted">{{ healthCheck.schedule }}</span>
-                </template>
-                <template v-else>
-                  None
-                </template>
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5 sm:col-span-2">
-              <dt class="label">
-                Limits per replica
-              </dt>
-              <dd class="mono mt-0.5">
-                CPU {{ formatCores(d.spec.resources.cpu) }} · memory {{ d.spec.resources.memory_bytes ? formatBytes(d.spec.resources.memory_bytes) : 'unlimited' }}
-              </dd>
-            </div>
+            <template v-if="!d.spec.static">
+              <div class="bg-bg px-4 py-2.5">
+                <dt class="label">
+                  Restart · strategy
+                </dt>
+                <dd class="mono mt-0.5">
+                  {{ d.spec.restart.policy }} · {{ d.spec.deploy.strategy }}
+                </dd>
+              </div>
+              <div class="bg-bg px-4 py-2.5 sm:col-span-2">
+                <dt class="label">
+                  Health check
+                </dt>
+                <dd class="mono mt-0.5">
+                  <template v-if="healthCheck">
+                    {{ healthCheck.check }} <span class="text-fg-muted">{{ healthCheck.schedule }}</span>
+                  </template>
+                  <template v-else>
+                    None
+                  </template>
+                </dd>
+              </div>
+              <div class="bg-bg px-4 py-2.5 sm:col-span-2">
+                <dt class="label">
+                  Limits per replica
+                </dt>
+                <dd class="mono mt-0.5">
+                  CPU {{ formatCores(d.spec.resources.cpu) }} · memory {{ d.spec.resources.memory_bytes ? formatBytes(d.spec.resources.memory_bytes) : 'unlimited' }}
+                </dd>
+              </div>
+            </template>
             <div v-if="published.length > 0" class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
                 Published ports
@@ -338,7 +360,7 @@ const crumbs = computed(() => [
                 </details>
               </dd>
             </div>
-            <div class="bg-bg px-4 py-2.5 sm:col-span-2 lg:col-span-4">
+            <div v-if="!d.spec.static" class="bg-bg px-4 py-2.5 sm:col-span-2 lg:col-span-4">
               <dt class="label">
                 Environment <span class="normal-case tracking-normal text-fg-faint">values are never returned by the agent</span>
               </dt>

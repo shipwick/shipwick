@@ -79,6 +79,12 @@ func (c Config) DatabasePath() string {
 	return filepath.Join(c.DataDir, "shipwick.db")
 }
 
+// UploadDir holds the folders of static applications between their upload and
+// the deployment that serves them.
+func (c Config) UploadDir() string {
+	return filepath.Join(c.DataDir, "uploads")
+}
+
 // Load reads the configuration. getenv is os.Getenv in production.
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{

@@ -36,6 +36,8 @@ async function submit() {
 const errorTitle = computed(() => {
   const e = error.value
   if (!e) return ''
+  // Counted per address by the agent, without looking at the token: the token may well be right.
+  if (e.rateLimited) return 'Too many attempts'
   if (e.status === 401) return 'Token rejected'
   if (e.unreachable) return 'Agent unreachable'
   if (e.code === 'NETWORK') return 'Dashboard server unreachable'
@@ -84,7 +86,7 @@ const errorTitle = computed(() => {
           {{ errorTitle }}
         </p>
         <p class="mt-0.5">
-          {{ error.message }}
+          {{ error.displayMessage }}
         </p>
         <p v-if="error.unreachable" class="mt-1">
           Check that the agent is running and that <span class="mono">SHIPWICK_AGENT_URL</span> points to it.

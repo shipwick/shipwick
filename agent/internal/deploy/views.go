@@ -133,6 +133,11 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 		out.Image, out.Version, out.Domain = active.Image, active.Version, active.Spec.Domain
 		out.Aliases, out.Redirects = active.Spec.Aliases, active.Spec.Redirects
 		out.Replicas.Desired = active.Spec.Replicas
+		if active.StaticDigest != "" {
+			// The proxy serves it; there is nothing to count, and nothing
+			// missing: zero of zero is HEALTHY.
+			out.Static, out.Replicas.Desired = true, 0
+		}
 
 		// Normally the replicas that count are the active deployment's. While a
 		// rollout is replacing them, they are whoever the rollout has serving.
@@ -197,7 +202,12 @@ func (e *Engine) Events(ctx context.Context, name string, limit int) ([]api.Even
 
 // DeploymentView converts a stored deployment to its API representation.
 func DeploymentView(d store.Deployment) api.Deployment {
+	var static *api.StaticFiles
+	if d.StaticDigest != "" {
+		static = &api.StaticFiles{Digest: d.StaticDigest, SizeBytes: d.StaticBytes, Files: d.StaticFiles}
+	}
 	return api.Deployment{
+		Static:      static,
 		ID:          d.ID,
 		Application: d.Application,
 		Sequence:    d.Sequence,
@@ -329,7 +339,14 @@ func (e *Engine) activeReplicas(ctx context.Context, name string) ([]store.Repli
 	if app.ActiveDeploymentID == nil {
 		return nil, ErrNotDeployed
 	}
-	return e.store.ListReplicas(ctx, *app.ActiveDeploymentID)
+	d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
+	if err != nil {
+		return nil, err
+	}
+	if d.StaticDigest != "" {
+		return nil, ErrStaticApplication
+	}
+	return e.store.ListReplicas(ctx, d.ID)
 }
 
 func logLineView(r store.Replica, entry docker.LogEntry) api.LogLine {

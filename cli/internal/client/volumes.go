@@ -70,3 +70,15 @@ func (c *Client) Restore(ctx context.Context, name, volume string, archive io.Re
 func archivePath(name, volume string) string {
 	return "/applications/" + url.PathEscape(name) + "/volumes/" + url.PathEscape(volume) + "/archive"
 }
+
+// ManagedVolumes lists every volume Shipwick created on the server, whether
+// or not the application it belongs to still exists.
+func (c *Client) ManagedVolumes(ctx context.Context) ([]api.VolumeInfo, error) {
+	return get[[]api.VolumeInfo](ctx, c, "/volumes", nil)
+}
+
+// RemoveVolume removes a volume of a deleted application by its Docker name.
+func (c *Client) RemoveVolume(ctx context.Context, name string) error {
+	_, err := call[struct{}](ctx, c, http.MethodDelete, "/volumes/"+url.PathEscape(name), nil, nil)
+	return err
+}

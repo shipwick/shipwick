@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/spec"
 )
@@ -147,4 +148,38 @@ func (d *deadlineReader) Read(p []byte) (int, error) {
 		d.err = err
 	}
 	return n, err
+}
+
+func (s *Server) handleListManagedVolumes(w http.ResponseWriter, r *http.Request) {
+	volumes, err := s.engine.ManagedVolumes(r.Context())
+	if err != nil {
+		s.writeEngineError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, volumes)
+}
+
+// handleRemoveManagedVolume removes a volume by its Docker name. The name is
+// taken apart and both halves validated before anything is looked up: they
+// are an application name and a volume name, and end up in a Docker call.
+func (s *Server) handleRemoveManagedVolume(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	app, volume, err := docker.ParseVolumeName(name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	if err := spec.ValidateName(app); err != nil {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "volume "+name+": application "+err.Error(), nil)
+		return
+	}
+	if err := spec.ValidateName(volume); err != nil {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "volume "+name+": volume "+strings.TrimPrefix(err.Error(), "name "), nil)
+		return
+	}
+	if err := s.engine.RemoveManagedVolume(r.Context(), name); err != nil {
+		s.writeEngineError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

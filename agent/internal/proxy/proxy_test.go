@@ -30,12 +30,19 @@ type parsed struct {
 						StatusCode    int `json:"status_code"`
 						Upstreams     []struct{ Dial string }
 						FlushInterval *int `json:"flush_interval"`
+						Encodings     map[string]any
+						Prefer        []string
+						MinimumLength int `json:"minimum_length"`
 					}
 				}
 			}
 		}
 	}
 }
+
+// last is the handler that answers: the proxy or a static response, after
+// whatever middleware the route puts in front of it.
+func last[T any](handle []T) T { return handle[len(handle)-1] }
 
 func build(t *testing.T, routes []Route) (parsed, string, []byte) {
 	t.Helper()
@@ -71,13 +78,13 @@ func TestBuild(t *testing.T) {
 	if api.Match[0].Host[0] != "api.example.com" || web.Match[0].Host[0] != "web.example.com" {
 		t.Errorf("routes should be ordered by domain, got %v then %v", api.Match[0].Host, web.Match[0].Host)
 	}
-	if !api.Terminal || api.Handle[0].Handler != "reverse_proxy" || api.Handle[0].Upstreams[0].Dial != "shipwick_api_7_1:8080" {
+	if !api.Terminal || last(api.Handle).Handler != "reverse_proxy" || last(api.Handle).Upstreams[0].Dial != "shipwick_api_7_1:8080" {
 		t.Errorf("unexpected api route: %+v", api)
 	}
-	if got := web.Handle[0].Upstreams; len(got) != 2 || got[0].Dial != "shipwick_web_3_1:80" {
+	if got := last(web.Handle).Upstreams; len(got) != 2 || got[0].Dial != "shipwick_web_3_1:80" {
 		t.Errorf("upstreams should be sorted: %+v", got)
 	}
-	if web.Handle[0].FlushInterval != nil {
+	if last(web.Handle).FlushInterval != nil {
 		t.Error("ordinary routes must keep Caddy's default buffering")
 	}
 
@@ -120,9 +127,47 @@ func TestBuildWithoutUpstreamsServes503(t *testing.T) {
 
 func TestBuildStreamingRoute(t *testing.T) {
 	p, _, _ := build(t, []Route{{Domain: "agent.example.com", Upstreams: []string{"agent:9000"}, Streaming: true}})
-	h := p.Apps.HTTP.Servers["shipwick"].Routes[0].Handle[0]
-	if h.FlushInterval == nil || *h.FlushInterval != -1 {
+	handle := p.Apps.HTTP.Servers["shipwick"].Routes[0].Handle
+	if h := last(handle); h.FlushInterval == nil || *h.FlushInterval != -1 {
 		t.Error("streaming routes need flush_interval -1, or log following would arrive in bursts")
+	}
+	if len(handle) != 1 {
+		t.Errorf("a streaming route has %d handlers, want the proxy alone: the encoder holds back the first bytes of a response", len(handle))
+	}
+}
+
+func TestBuildCompressesApplicationRoutes(t *testing.T) {
+	p, _, _ := build(t, []Route{
+		{Domain: "web.example.com", Backends: []Backend{{Name: "web_8080", Port: 8080}}, Redirects: []string{"www.example.com"}},
+		{Domain: "down.example.com"},
+	})
+	routes := p.Apps.HTTP.Servers["shipwick"].Routes
+	down, web, redirect := routes[0], routes[1], routes[2]
+
+	if len(web.Handle) != 2 || web.Handle[0].Handler != "encode" || web.Handle[1].Handler != "reverse_proxy" {
+		t.Fatalf("handlers = %+v, want encode in front of reverse_proxy", web.Handle)
+	}
+	enc := web.Handle[0]
+	if _, zstd := enc.Encodings["zstd"]; !zstd || len(enc.Encodings) != 2 {
+		t.Errorf("encodings = %v, want zstd and gzip", enc.Encodings)
+	}
+	if _, gzip := enc.Encodings["gzip"]; !gzip {
+		t.Errorf("encodings = %v, want zstd and gzip", enc.Encodings)
+	}
+	if strings.Join(enc.Prefer, ",") != "zstd,gzip" {
+		t.Errorf("prefer = %v, want zstd first", enc.Prefer)
+	}
+	if enc.MinimumLength != 1024 {
+		t.Errorf("minimum_length = %d, want 1024: a response smaller than a kilobyte does not get smaller", enc.MinimumLength)
+	}
+
+	// Nothing to compress where nothing is served: a 503 and a redirect have
+	// no body worth the handler.
+	if len(down.Handle) != 1 || down.Handle[0].StatusCode != 503 {
+		t.Errorf("unserved route = %+v, want the 503 alone", down.Handle)
+	}
+	if len(redirect.Handle) != 1 || redirect.Handle[0].StatusCode != 308 {
+		t.Errorf("redirect route = %+v, want the 308 alone", redirect.Handle)
 	}
 }
 
@@ -134,7 +179,7 @@ func TestBuildTreatsInputAsData(t *testing.T) {
 	p, _, raw := build(t, []Route{{Domain: evil, Upstreams: []string{`x:1"},{"dial":"evil:1`}}})
 
 	routes := p.Apps.HTTP.Servers["shipwick"].Routes
-	if len(routes) != 2 || routes[0].Match[0].Host[0] != evil || len(routes[0].Handle[0].Upstreams) != 1 {
+	if len(routes) != 2 || routes[0].Match[0].Host[0] != evil || len(last(routes[0].Handle).Upstreams) != 1 {
 		t.Errorf("input altered the config structure: %s", raw)
 	}
 	if strings.Contains(string(raw), `"handler":"file_server"`) {

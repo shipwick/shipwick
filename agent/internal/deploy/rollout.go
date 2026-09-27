@@ -44,6 +44,10 @@ type rollout struct {
 	// until the new version is in service.
 	recreate bool
 	stopped  []store.Replica
+
+	// staticPart is the directory a static rollout is extracting into, until
+	// it is checked and renamed; removed if the rollout fails (see static.go).
+	staticPart string
 }
 
 func (e *Engine) run(d store.Deployment) {
@@ -74,6 +78,9 @@ func (e *Engine) run(d store.Deployment) {
 
 func (r *rollout) execute(ctx context.Context) error {
 	e, d := r.e, r.d
+	if d.Spec.Static != nil {
+		return r.executeStatic(ctx)
+	}
 
 	if err := e.transition(ctx, d, api.StatusBuilding); err != nil {
 		return err
@@ -133,7 +140,7 @@ func (r *rollout) execute(ctx context.Context) error {
 	if !CanTransition(d.Status, api.StatusActive) {
 		return fmt.Errorf("illegal state transition %s → %s", d.Status, api.StatusActive)
 	}
-	r.announceRouting(ctx)
+	r.announceRouting(ctx, plural(len(r.serving), "replica"))
 
 	previous, err := e.store.ActivateDeployment(ctx, d.ID, time.Now())
 	if err != nil {
@@ -188,7 +195,13 @@ func (r *rollout) loadPrevious(ctx context.Context) error {
 	if app.DesiredState != api.DesiredRunning {
 		r.serving = nil
 	}
-	e.routeVia(d.Application, routeOverride{hosts: hostnamesOf(prev.Spec), members: r.serving, desired: r.desired()})
+	override := routeOverride{hosts: hostnamesOf(prev.Spec), members: r.serving, desired: r.desired()}
+	if prev.StaticDigest != "" && app.DesiredState == api.DesiredRunning {
+		// A folder is becoming a container application: its files keep
+		// serving until the first replica is ready.
+		override.staticRoot = staticDir(prev.Application, prev.StaticDigest)
+	}
+	e.routeVia(d.Application, override)
 	return nil
 }
 
@@ -323,8 +336,9 @@ func (r *rollout) swap(ctx context.Context, ready []store.Replica) error {
 
 // announceRouting tells the user where their application is reachable — or
 // why it is not yet: a hostname whose DNS does not point here is kept out of
-// the proxy until it does (see dns.go), and "Routed" would be a lie.
-func (r *rollout) announceRouting(ctx context.Context) {
+// the proxy until it does (see dns.go), and "Routed" would be a lie. to says
+// what the domain is routed to: "2 replicas", "the uploaded files".
+func (r *rollout) announceRouting(ctx context.Context, to string) {
 	e, d := r.e, r.d
 	switch {
 	case d.Spec.Domain == "":
@@ -335,9 +349,9 @@ func (r *rollout) announceRouting(ctx context.Context) {
 		hosts := hostnamesOf(d.Spec)
 		e.refreshHostnames(ctx, hosts.list())
 		if ready, why := e.hostnameReady(hosts.domain); ready {
-			e.step(ctx, d, "Routed https://%s to %s", d.Spec.Domain, plural(len(r.serving), "replica"))
+			e.step(ctx, d, "Routed https://%s to %s", d.Spec.Domain, to)
 		} else {
-			e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Routing https://%s is waiting for DNS: %s; it is served, and its certificate obtained, once the record points at this server", d.Spec.Domain, why))
+			e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Routing https://%s is waiting for DNS: %s. It is served, and its certificate obtained, once the record points at this server", d.Spec.Domain, why))
 		}
 		for _, h := range hosts.all() {
 			if h.host == hosts.domain {
@@ -345,7 +359,7 @@ func (r *rollout) announceRouting(ctx context.Context) {
 			}
 			if ready, why := e.hostnameReady(h.host); !ready {
 				e.event(ctx, d, api.LevelWarn, api.EventStep,
-					fmt.Sprintf("%s %s; it is served, and its certificate obtained, once its DNS points at this server", h.host, why))
+					fmt.Sprintf("%s %s. It is served, and its certificate obtained, once its DNS points at this server", h.host, why))
 			}
 		}
 	}
@@ -609,6 +623,10 @@ func (e *Engine) createReplicas(ctx context.Context, d store.Deployment, indexes
 		if err != nil {
 			// The image may have been pruned since it was deployed.
 			if exists, ierr := e.rt.ImageExists(ctx, d.Spec.Image); ierr == nil && !exists {
+				if spec.IsLocalImage(d.Spec.Image) {
+					// Nowhere to pull it from: it came from a developer's machine.
+					return created, fmt.Errorf("replica %d: image %w", i, localImageMissing(d.Spec.Image))
+				}
 				if perr := e.rt.PullImage(ctx, d.Spec.Image); perr != nil {
 					return created, fmt.Errorf("replica %d: image %s is gone and could not be pulled again: %w", i, d.Spec.Image, perr)
 				}

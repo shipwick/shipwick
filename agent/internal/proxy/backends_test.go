@@ -38,7 +38,7 @@ func handlerOf(t *testing.T, raw []byte, domain string) (dynamic *resolver, stat
 	}
 	for _, r := range cfg.Apps.HTTP.Servers[serverName].Routes {
 		if len(r.Match) == 1 && len(r.Match[0].Host) == 1 && r.Match[0].Host[0] == domain {
-			h := r.Handle[0]
+			h := r.Handle[len(r.Handle)-1]
 			for _, u := range h.Upstreams {
 				static = append(static, u.Dial)
 			}

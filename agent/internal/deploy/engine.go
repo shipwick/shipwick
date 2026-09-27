@@ -62,6 +62,16 @@ type Runtime interface {
 	// ImportPath extracts one into it. Volume backups use them.
 	ExportPath(ctx context.Context, id, path string) (io.ReadCloser, error)
 	ImportPath(ctx context.Context, id, path string, archive io.Reader) error
+	// LoadImage loads an image archive (the `docker save` format) and returns
+	// the references it carried.
+	LoadImage(ctx context.Context, archive io.Reader) ([]string, error)
+	// ListVolumes lists the volumes Shipwick created, with the application
+	// each belongs to; RemoveVolume removes one of them.
+	ListVolumes(ctx context.Context) ([]docker.Volume, error)
+	RemoveVolume(ctx context.Context, app, volume string) error
+	// ProxyContainer is the reverse proxy's own container, for the files it
+	// serves itself.
+	ProxyContainer(ctx context.Context) (string, error)
 }
 
 type Options struct {
@@ -135,6 +145,11 @@ type Options struct {
 	// long those samples are kept.
 	SampleInterval   time.Duration
 	MetricsRetention time.Duration
+
+	// UploadDir is where the folders of static applications wait for the
+	// deployment that serves them, one archive per application. Empty means
+	// static applications cannot be uploaded to this agent.
+	UploadDir string
 }
 
 // ProbeFunc checks one replica once. A nil error means healthy.
@@ -346,7 +361,13 @@ func (e *Engine) release(app string) {
 // as soon as the PENDING record exists; progress is observable through the
 // deployment's status and events.
 func (e *Engine) Deploy(ctx context.Context, app spec.App) (store.Deployment, error) {
-	return e.start(ctx, app.Name, func(context.Context) (origin, error) {
+	return e.start(ctx, app.Name, func(ctx context.Context) (origin, error) {
+		// The one place a spec arrives from outside: whatever the CLI left
+		// for the server to fill in is filled in here, and stored filled in.
+		app, err := e.resolveSecrets(ctx, app)
+		if err != nil {
+			return origin{}, err
+		}
 		return origin{spec: app, kind: api.KindDeploy}, nil
 	})
 }
@@ -356,6 +377,9 @@ type origin struct {
 	spec     spec.App
 	kind     string
 	sourceID *int64 // the deployment whose stored spec this is, if any
+	// static is the uploaded folder a static application serves; nil for an
+	// application that runs containers.
+	static *store.StaticFiles
 }
 
 // start is the one way a deployment begins, whatever its origin. resolve runs
@@ -372,6 +396,10 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 	}
 	app := o.spec
 	// Refused up front, as a config error: nothing is recorded, pulled or started.
+	if app.Build != nil && app.Image == "" {
+		e.unlock(name)
+		return store.Deployment{}, ErrImageNotBuilt
+	}
 	if err := e.checkDomain(ctx, app); err != nil {
 		e.unlock(name)
 		return store.Deployment{}, err
@@ -380,7 +408,12 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 		e.unlock(name)
 		return store.Deployment{}, err
 	}
-	d, err := e.store.CreateDeploymentFrom(ctx, app, o.kind, o.sourceID, actorFrom(ctx), time.Now())
+	var d store.Deployment
+	if o.static != nil {
+		d, err = e.store.CreateStaticDeployment(ctx, app, o.kind, o.sourceID, actorFrom(ctx), *o.static, time.Now())
+	} else {
+		d, err = e.store.CreateDeploymentFrom(ctx, app, o.kind, o.sourceID, actorFrom(ctx), time.Now())
+	}
 	if err != nil {
 		e.unlock(name)
 		return store.Deployment{}, err
@@ -439,8 +472,21 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 
 // pullImage refreshes the image from its registry. If the pull fails but the
 // image is available locally (built on the server, registry briefly down), the
-// local copy is used and the fallback is recorded.
+// local copy is used and the fallback is recorded. An image built on a
+// developer's machine has no registry (see localimages.go): it is either here
+// already or the deployment cannot go on.
 func (e *Engine) pullImage(ctx context.Context, d *store.Deployment) error {
+	if spec.IsLocalImage(d.Image) {
+		exists, err := e.rt.ImageExists(ctx, d.Image)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return localImageMissing(d.Image)
+		}
+		e.step(ctx, d, "Using image %s, sent from a developer's machine", d.Image)
+		return nil
+	}
 	pullErr := e.rt.PullImage(ctx, d.Image)
 	if pullErr == nil {
 		e.step(ctx, d, "Pulled image %s", d.Image)
@@ -492,10 +538,13 @@ func (e *Engine) awaitStable(ctx context.Context, d *store.Deployment, replicas 
 }
 
 // StartupBudget is how long a freshly started replica has to pass its first
-// health check: interval × retries, 30s with the defaults. Slow starters
-// (JVMs, apps that migrate a database on boot) raise retries.
+// health check: start_period + interval × retries, 30s with the defaults.
+// Slow starters (JVMs, apps that migrate a database on boot) set a
+// start_period, which buys them time at startup without making a running
+// replica's failures take longer to notice. The supervisor grants the same
+// budget to a replica it restarted.
 func StartupBudget(h *spec.Health) time.Duration {
-	return h.Interval.Std() * time.Duration(h.Retries)
+	return h.StartPeriod.Std() + h.Interval.Std()*time.Duration(h.Retries)
 }
 
 // awaitHealthy waits until every new replica has answered its health check

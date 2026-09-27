@@ -98,8 +98,27 @@ func TestParseHealthDefaults(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	h := app.Health
-	if h.Interval.Std() != DefaultHealthInterval || h.Timeout.Std() != DefaultHealthTimeout || h.Retries != DefaultHealthRetries {
+	if h.Interval.Std() != DefaultHealthInterval || h.Timeout.Std() != DefaultHealthTimeout || h.Retries != DefaultHealthRetries || h.StartPeriod != 0 {
 		t.Errorf("unexpected defaults: %+v", h)
+	}
+}
+
+func TestParseHealthStartPeriod(t *testing.T) {
+	app, err := Parse([]byte("name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  start_period: 1m\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if app.Health.StartPeriod.Std() != time.Minute {
+		t.Errorf("start_period = %s, want 1m", app.Health.StartPeriod.Std())
+	}
+	// The agent stores the spec as JSON and reads it back for every probe.
+	data, _ := json.Marshal(app)
+	var back App
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Health.StartPeriod != app.Health.StartPeriod {
+		t.Errorf("start_period after a JSON round trip: %+v", back.Health)
 	}
 }
 
@@ -195,6 +214,9 @@ func TestParseValidationErrors(t *testing.T) {
 		{"bad interval", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  interval: soon\n", "health.interval", `invalid value "soon"`},
 		{"interval out of range", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  interval: 1ms\n", "health.interval", "out of range"},
 		{"bad retries", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  retries: 0\n", "health.retries", "invalid value 0"},
+		{"bad start period", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  start_period: a while\n", "health.start_period", `invalid value "a while"`},
+		{"start period too long", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  start_period: 31m\n", "health.start_period", "out of range"},
+		{"negative start period", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  start_period: -1s\n", "health.start_period", "out of range"},
 		{"bad env key", "name: a\nimage: nginx\nenv:\n  \"MY-VAR\": x\n", "env.MY-VAR", "invalid variable name"},
 		{"unknown field", "name: a\nimage: nginx\nreplicsa: 2\n", "line 3", `unknown field "replicsa"`},
 		{"wrong type", "name: a\nimage: nginx\nport: abc\n", "line 3", "a number"},

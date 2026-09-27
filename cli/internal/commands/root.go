@@ -54,6 +54,16 @@ type cli struct {
 	// upgrade is where `shipwick upgrade` looks and what it replaces; tests
 	// point it at a fake GitHub and a file of their own.
 	upgrade upgradeOptions
+	// local is what reaches beyond the agent API from this machine: ssh, the
+	// browser, DNS, TCP; see small.go. Tests replace it.
+	local localOptions
+	// deployFollowsInit is set while deploy runs init for a directory without
+	// a deploy.yaml, so that init's closing line does not send the user to a
+	// command that is already running.
+	deployFollowsInit bool
+	// build is how `shipwick deploy` builds and saves an image on this
+	// machine for an application with `build:`; tests substitute fakes.
+	build buildTools
 }
 
 // NewRootCommand builds the shipwick command tree.
@@ -120,6 +130,8 @@ context use" changes the current one.`,
 	root.AddCommand(c.volumeCommands()...)
 	root.AddCommand(c.tokenCommands()...)
 	root.AddCommand(c.upgradeCommands()...)
+	root.AddCommand(c.secretCommands()...)
+	root.AddCommand(c.smallCommands()...)
 	return c, root
 }
 
@@ -270,6 +282,15 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 			return "The application is running, and a restore replaces the files under it.\n\nStop it first with: shipwick stop"
 		case api.CodeJobAlreadyRunning:
 			return "This job is still running from an earlier start.\n\nSee it with: shipwick jobs <app>"
+		case api.CodeStaticApplication:
+			return "This application is a folder served by the proxy: it has no containers, so there are no logs, metrics or commands to run.\n\nSee what it serves with: shipwick status"
+		case api.CodeVolumeInUse:
+			if app, _ := apiErr.Details["application"].(string); app != "" {
+				return "Error: " + apiErr.Message + "\n\nDelete it with: shipwick delete " + app
+			}
+			return "Error: " + apiErr.Message
+		case api.CodeRateLimited:
+			return "Too many failed attempts from this address; try again in a minute."
 		}
 		return "Error: " + apiErr.Message
 	}

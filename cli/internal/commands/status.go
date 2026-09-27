@@ -70,16 +70,26 @@ func (c *cli) status(ctx context.Context, name string) error {
 	if app.Domain != "" {
 		fields = append(fields, [2]string{"URL", "https://" + app.Domain})
 	}
-	fields = append(fields, [2]string{"Replicas", fmt.Sprintf("%d/%d healthy", app.Replicas.Healthy, app.Replicas.Desired)})
-	// Usage is a nicety here: an agent too old to report it, or an application
-	// with nothing running, simply has no such lines.
-	if m, err := cl.Metrics(ctx, name); err == nil && app.Replicas.Running > 0 {
-		fields = append(fields,
-			[2]string{"CPU", formatCPUUsage(m.CPUPercent, m.CPULimitPercent)},
-			[2]string{"Memory", formatMemoryUsage(m.MemoryBytes, m.MemoryLimitBytes)},
-		)
+	if app.Static {
+		var files *api.StaticFiles
+		if app.ActiveDeployment != nil {
+			files = app.ActiveDeployment.Static
+		}
+		fields = append(fields, [2]string{"Files", describeStaticFiles(files)})
+	} else {
+		fields = append(fields, [2]string{"Replicas", fmt.Sprintf("%d/%d healthy", app.Replicas.Healthy, app.Replicas.Desired)})
 	}
-	if app.Spec != nil {
+	// Usage is a nicety here: an agent too old to report it, or an application
+	// with nothing running, simply has no such lines. A folder has none to ask for.
+	if !app.Static {
+		if m, err := cl.Metrics(ctx, name); err == nil && app.Replicas.Running > 0 {
+			fields = append(fields,
+				[2]string{"CPU", formatCPUUsage(m.CPUPercent, m.CPULimitPercent)},
+				[2]string{"Memory", formatMemoryUsage(m.MemoryBytes, m.MemoryLimitBytes)},
+			)
+		}
+	}
+	if app.Spec != nil && !app.Static {
 		if h := app.Spec.Health; h != nil {
 			fields = append(fields, [2]string{"Health", fmt.Sprintf("%s every %s", describeHealthCheck(*h), h.Interval)})
 		}
@@ -199,11 +209,15 @@ func (c *cli) psCommand() *cobra.Command {
 				if app.Deploying {
 					status += " (deploying)"
 				}
+				replicas := fmt.Sprintf("%d/%d", app.Replicas.Healthy, app.Replicas.Desired)
+				if app.Static {
+					replicas = "static"
+				}
 				rows = append(rows, []ui.Cell{
 					ui.C(app.Name),
 					{Text: status, Style: appStyle(app.Status)},
 					ui.C(app.Version),
-					ui.C(fmt.Sprintf("%d/%d", app.Replicas.Healthy, app.Replicas.Desired)),
+					ui.C(replicas),
 					ui.C(app.Domain),
 					ui.C(ui.RelativeTime(app.UpdatedAt, now)),
 				})

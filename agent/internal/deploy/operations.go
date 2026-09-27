@@ -113,6 +113,7 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 	// Its images go too, unless another application keeps them. Listed
 	// before the records are deleted; the volumes stay, on purpose.
 	images, _ := e.deployedImages(ctx, name)
+	e.removeStaticFiles(ctx, name)
 	if err := e.store.DeleteApplication(ctx, app.ID); err != nil {
 		return err
 	}
@@ -241,8 +242,16 @@ func (e *Engine) Redeploy(ctx context.Context, name, image string) (store.Deploy
 		if err != nil {
 			return origin{}, err
 		}
-		o := origin{spec: active.Spec, kind: api.KindRedeploy, sourceID: &active.ID}
+		o := origin{spec: active.Spec, kind: api.KindRedeploy, sourceID: &active.ID, static: staticOf(active)}
 		if image != "" {
+			if active.Spec.Static != nil {
+				return origin{}, &InvalidImageError{Reason: "a static application has no image; to serve other files, deploy the folder again"}
+			}
+			// The same rule deploy.yaml validation applies: next to build,
+			// only an image the server was sent.
+			if active.Spec.Build != nil && !spec.IsLocalImage(image) {
+				return origin{}, &InvalidImageError{Reason: "this application is built by shipwick deploy; run it from the project to deploy a new image, or remove build from deploy.yaml"}
+			}
 			o.spec.Image = image
 		}
 		return o, nil
@@ -291,6 +300,6 @@ func (e *Engine) Rollback(ctx context.Context, name string, targetID int64) (sto
 			}
 			target = previous[0]
 		}
-		return origin{spec: target.Spec, kind: api.KindRollback, sourceID: &target.ID}, nil
+		return origin{spec: target.Spec, kind: api.KindRollback, sourceID: &target.ID, static: staticOf(target)}, nil
 	})
 }

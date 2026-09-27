@@ -46,6 +46,9 @@ func (f *Fake) Exec(ctx context.Context, id string, cmd []string, timeout time.D
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if id == ProxyID {
+		return f.execProxy(cmd)
+	}
 	c, ok := f.containers[id]
 	if !ok {
 		return 0, "", docker.ErrNotFound

@@ -4,6 +4,13 @@ import type { ApiErrorCode } from '~/types/api'
 export type ClientErrorCode = 'NETWORK' | 'BAD_RESPONSE'
 
 /**
+ * What a 429 means to the person in front of the screen. The agent counts
+ * failed authentications per address, so this is about the address, not the
+ * token that was just entered: it is never reported as a wrong token.
+ */
+export const RATE_LIMITED_MESSAGE = 'Too many failed attempts from this address; try again in a minute.'
+
+/**
  * Every failure of a call to the agent, normalized: an error envelope from the
  * agent, one from the dashboard's proxy, or a failure to reach the dashboard.
  */
@@ -27,6 +34,16 @@ export class AgentError extends Error {
 
   get notFound(): boolean {
     return this.status === 404
+  }
+
+  /** The agent refused to look at the token: too many failures from this address within a minute. */
+  get rateLimited(): boolean {
+    return this.status === 429 || this.code === 'RATE_LIMITED'
+  }
+
+  /** The message to show: the agent's, except for a rate limit, which is worded for the person instead of the client. */
+  get displayMessage(): string {
+    return this.rateLimited ? RATE_LIMITED_MESSAGE : this.message
   }
 
   /** The URL the proxy tried, when it told us. */

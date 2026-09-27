@@ -1,4 +1,5 @@
-import type { Application, AppSpec, SpecHealth, SpecPublish } from '~/types/api'
+import type { Application, AppSpec, SpecBuild, SpecHealth, SpecPublish, StaticFiles } from '~/types/api'
+import { formatBytes, pluralize } from '~/utils/format'
 
 /**
  * Display helpers for the parts of a deploy.yaml the agent hands back. Pure,
@@ -24,7 +25,7 @@ export function formatArgv(argv: readonly string[] | undefined | null): string {
 export interface HealthDescription {
   /** The check itself: "GET /health", "TCP :5432", "command pg_isready -U postgres". */
   check: string
-  /** Its schedule: "every 10s (timeout 3s, 3 retries)". */
+  /** Its schedule: "every 10s (timeout 3s, 3 retries)", with "after a 1m start period" when a replica gets one. */
   schedule: string
 }
 
@@ -36,7 +37,32 @@ export function describeHealth(health: SpecHealth | null | undefined): HealthDes
   else if (health.tcp) check = `TCP :${health.tcp}`
   else check = `GET ${health.path ?? '/'}`
   const retries = `${health.retries} ${health.retries === 1 ? 'retry' : 'retries'}`
-  return { check, schedule: `every ${health.interval} (timeout ${health.timeout}, ${retries})` }
+  // Failed checks only count once the start period is over: a slow starter is not restarted for being slow.
+  const start = health.start_period ? `, after a ${tidyGoDuration(health.start_period)} start period` : ''
+  return { check, schedule: `every ${health.interval} (timeout ${health.timeout}, ${retries})${start}` }
+}
+
+/** "2m0s" → "2m", "1h0m0s" → "1h", "1m30s" stays; what Go prints, with the zero parts dropped. */
+function tidyGoDuration(duration: string): string {
+  const tidy = duration.replace(/(?<=\d[hm])0[ms](?=\d*[ms]?)/g, '').replace(/(?<=\d[hm])0s$/, '').replace(/(?<=\dh)0m$/, '')
+  return tidy || duration
+}
+
+/** "42 files, 3.1 MB, served by the proxy": what a static deployment serves, in the CLI's words. */
+export function describeStatic(files: StaticFiles | null | undefined): string {
+  if (!files) return ''
+  return `${pluralize(files.files, 'file')}, ${formatBytes(files.size_bytes)}, served by the proxy`
+}
+
+/** "built by shipwick deploy from . (Dockerfile)": where a `build` application's image comes from. */
+export function describeBuild(build: SpecBuild | null | undefined): string {
+  if (!build) return ''
+  return `built by shipwick deploy from ${build.context} (${build.dockerfile})`
+}
+
+/** Whether an image was built by the CLI and sent to the server: nothing to link to, nothing the agent pulls. */
+export function isLocalImage(image: string): boolean {
+  return image.startsWith('shipwick.local/')
 }
 
 /** "5432/tcp → server port 15432 on 10.0.0.5"; without `address` the port is bound on every address. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AgentError, errorFromResponse } from '../app/utils/agentError'
+import { AgentError, RATE_LIMITED_MESSAGE, errorFromResponse } from '../app/utils/agentError'
 
 function response(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -23,6 +23,25 @@ describe('errorFromResponse', () => {
     const error = await errorFromResponse(new Response('<html>', { status: 502 }))
     expect(error.code).toBe('BAD_RESPONSE')
     expect(error.message).toBe('Request failed with status 502')
+  })
+})
+
+describe('rate limiting', () => {
+  it('is recognized by status or code and worded for the person, not as a wrong token', async () => {
+    const error = await errorFromResponse(response(429, { error: { code: 'RATE_LIMITED', message: 'too many failed authentications from this address; try again in a minute', details: {} } }))
+    expect(error.rateLimited).toBe(true)
+    expect(error.status).not.toBe(401)
+    expect(error.displayMessage).toBe(RATE_LIMITED_MESSAGE)
+    expect(new AgentError(429, 'BAD_RESPONSE', 'Request failed with status 429').rateLimited).toBe(true)
+  })
+
+  it('leaves every other message alone', () => {
+    const error = new AgentError(409, 'STATIC_APPLICATION', 'this application is a folder served by the proxy; it has no containers')
+    expect(error.rateLimited).toBe(false)
+    expect(error.displayMessage).toBe(error.message)
+    const inUse = new AgentError(409, 'VOLUME_IN_USE', 'the volume belongs to application postgres; delete the application first — its data stays until the volume is removed', { application: 'postgres' })
+    expect(inUse.displayMessage).toBe(inUse.message)
+    expect(inUse.details.application).toBe('postgres')
   })
 })
 

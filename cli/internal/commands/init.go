@@ -22,20 +22,31 @@ type initAnswers struct {
 	Image  string
 	Port   int
 	Domain string
+	// Project is what was recognised in the directory; nil with --image, or
+	// when nothing was. It replaces Image with `build: .` or `static: <dir>`.
+	Project *project
 }
 
 func (c *cli) initCommand() *cobra.Command {
 	var file string
 	var force bool
+	var static string
 	var answers initAnswers
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Create a deploy.yaml in the current directory",
+		Short: "Create a deploy.yaml, and a Dockerfile for a recognised project",
 		Long: `Create a deploy.yaml in the current directory.
 
-Run in a terminal, init asks for what it needs. With --image it never prompts,
-which suits scripts:
+A Node (Nuxt, Next, a server), .NET, Go or Python project is recognised from
+its files: init writes a Dockerfile and a .dockerignore for it, and a
+deploy.yaml with "build: ." so that "shipwick deploy" builds the image here and
+sends it to the server. A folder of static files (an index.html at the root, or
+in dist/, build/, out/, public/) gets "static: <dir>": the proxy serves it, no
+container. Existing Dockerfile and .dockerignore files are kept.
+
+Run in a terminal, init asks for what it cannot tell (name, domain). With
+--image it never prompts and writes no Dockerfile, which suits scripts:
 
   shipwick init --name my-api --image ghcr.io/company/my-api:1.0.0 --port 8080`,
 		Args: cobra.NoArgs,
@@ -43,14 +54,40 @@ which suits scripts:
 			if _, err := os.Stat(file); err == nil && !force {
 				return fmt.Errorf("%s already exists\n\nEdit it, or overwrite it with: shipwick init --force", file)
 			}
-
+			if answers.Image != "" && static != "" {
+				return errors.New("--image and --static exclude each other: an image runs in a container, a static folder is served by the proxy without one")
+			}
 			if answers.Name == "" {
 				answers.Name = defaultAppName()
 			}
-			if answers.Image == "" {
-				if !isTerminal(c.in) {
-					return errors.New("--image is required when not running in a terminal")
+
+			dir := filepath.Dir(file)
+			switch {
+			case answers.Image != "":
+			case static != "":
+				if answers.Port != 0 {
+					return errors.New("--port does not apply to a static folder: the proxy serves its files, nothing listens")
 				}
+				answers.Project = &project{Kind: kindStatic, Label: "a static site (" + static + ")",
+					Static: staticProject{Dir: filepath.ToSlash(filepath.Clean(static))}}
+			default:
+				p, err := detectProject(dir)
+				if err != nil {
+					return err
+				}
+				if p.Kind != "" {
+					answers.Project = &p
+				}
+			}
+
+			switch {
+			case answers.Project != nil:
+				if err := c.completeProject(&answers, isTerminal(c.in)); err != nil {
+					return err
+				}
+			case answers.Image == "" && !isTerminal(c.in):
+				return errors.New("--image is required when not running in a terminal")
+			case answers.Image == "":
 				if err := c.promptInit(&answers); err != nil {
 					return err
 				}
@@ -60,19 +97,37 @@ which suits scripts:
 			if _, err := spec.Parse([]byte(content)); err != nil {
 				return err
 			}
+			written, kept, err := writeProjectFiles(dir, answers.Project)
+			if err != nil {
+				return err
+			}
 			if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
 				return err
 			}
-			c.ui.Success("Created %s", file)
+			written = append(written, filepath.Base(file))
+
+			p := answers.Project
+			if p == nil {
+				c.ui.Success("Created %s", file)
+				c.ui.Println()
+				c.ui.Println(c.initClosing(1))
+				return nil
+			}
+			c.ui.Success("Recognised %s", p.Label)
+			if len(kept) > 0 {
+				c.ui.Success("Kept the existing %s; build: . will use %s", joinFiles(kept), itOrThem(len(kept)))
+			}
+			c.ui.Success("Wrote %s", joinFiles(written))
 			c.ui.Println()
-			c.ui.Println("Review it, then run: shipwick deploy")
+			c.ui.Println(c.initClosing(len(written)))
 			return nil
 		},
 	}
 	fileFlag(cmd, &file)
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing file")
 	cmd.Flags().StringVar(&answers.Name, "name", "", "application name (default: the directory name)")
-	cmd.Flags().StringVar(&answers.Image, "image", "", "container image, e.g. ghcr.io/company/my-api:1.0.0")
+	cmd.Flags().StringVar(&answers.Image, "image", "", "container image, e.g. ghcr.io/company/my-api:1.0.0; skips project detection")
+	cmd.Flags().StringVar(&static, "static", "", "serve this folder of files as it is, e.g. dist/; skips project detection")
 	cmd.Flags().IntVar(&answers.Port, "port", 0, "port the application listens on")
 	cmd.Flags().StringVar(&answers.Domain, "domain", "", "public domain, e.g. api.example.com")
 	return cmd
@@ -83,63 +138,206 @@ func isTerminal(r io.Reader) bool {
 	return ok && term.IsTerminal(int(f.Fd()))
 }
 
-func (c *cli) promptInit(a *initAnswers) error {
-	in := bufio.NewReader(c.in)
-	ask := func(label, fallback string) (string, error) {
-		if fallback != "" {
-			c.ui.Printf("%s [%s]: ", label, fallback)
-		} else {
-			c.ui.Printf("%s: ", label)
-		}
-		line, err := in.ReadString('\n')
-		if err != nil && (err != io.EOF || line == "") {
-			return "", errors.New("cancelled")
-		}
-		if line = strings.TrimSpace(line); line == "" {
-			return fallback, nil
-		}
-		return line, nil
-	}
+// prompter asks one question at a time on the terminal, taking the fallback
+// on an empty answer.
+type prompter struct {
+	c  *cli
+	in *bufio.Reader
+}
 
-	var err error
+func (p prompter) ask(label, fallback string) (string, error) {
+	if fallback != "" {
+		p.c.ui.Printf("%s [%s]: ", label, fallback)
+	} else {
+		p.c.ui.Printf("%s: ", label)
+	}
+	line, err := p.in.ReadString('\n')
+	if err != nil && (err != io.EOF || line == "") {
+		return "", errors.New("cancelled")
+	}
+	if line = strings.TrimSpace(line); line == "" {
+		return fallback, nil
+	}
+	return line, nil
+}
+
+func (p prompter) askName(a *initAnswers) error {
 	for {
-		if a.Name, err = ask("Application name", a.Name); err != nil {
+		name, err := p.ask("Application name", a.Name)
+		if err != nil {
 			return err
 		}
-		if verr := spec.ValidateName(a.Name); verr == nil {
-			break
+		if verr := spec.ValidateName(name); verr == nil {
+			a.Name = name
+			return nil
 		}
-		c.ui.Println("  Use lowercase letters, digits and dashes, e.g. my-api.")
+		p.c.ui.Println("  Use lowercase letters, digits and dashes, e.g. my-api.")
 		a.Name = defaultAppName()
 	}
+}
+
+func (p prompter) askPort(a *initAnswers) error {
+	for {
+		raw, err := p.ask("Port the app listens on (empty for none)", "")
+		if err != nil {
+			return err
+		}
+		if raw == "" {
+			return nil
+		}
+		if n, convErr := strconv.Atoi(raw); convErr == nil && n >= 1 && n <= 65535 {
+			a.Port = n
+			return nil
+		}
+		p.c.ui.Println("  Enter a number between 1 and 65535.")
+	}
+}
+
+func (c *cli) promptInit(a *initAnswers) error {
+	p := prompter{c, bufio.NewReader(c.in)}
+	if err := p.askName(a); err != nil {
+		return err
+	}
+	var err error
 	for a.Image == "" {
-		if a.Image, err = ask("Image (e.g. ghcr.io/company/"+a.Name+":1.0.0)", ""); err != nil {
+		if a.Image, err = p.ask("Image (e.g. ghcr.io/company/"+a.Name+":1.0.0)", ""); err != nil {
 			return err
 		}
 	}
 	if a.Port == 0 {
-		for {
-			raw, err := ask("Port the app listens on (empty for none)", "")
-			if err != nil {
-				return err
-			}
-			if raw == "" {
-				break
-			}
-			if n, convErr := strconv.Atoi(raw); convErr == nil && n >= 1 && n <= 65535 {
-				a.Port = n
-				break
-			}
-			c.ui.Println("  Enter a number between 1 and 65535.")
+		if err := p.askPort(a); err != nil {
+			return err
 		}
 	}
 	if a.Domain == "" && a.Port != 0 {
-		if a.Domain, err = ask("Public domain (empty for none)", ""); err != nil {
+		if a.Domain, err = p.ask("Public domain (empty for none)", ""); err != nil {
 			return err
 		}
 	}
 	c.ui.Println()
 	return nil
+}
+
+// completeProject fills in what detection cannot know about a recognised
+// project. In a terminal it asks; otherwise the defaults stand, since a
+// recognised project needs nothing more to deploy.
+func (c *cli) completeProject(a *initAnswers, terminal bool) error {
+	p := a.Project
+	if a.Port != 0 && p.Kind != kindStatic {
+		p.Port = a.Port
+	}
+	if !terminal {
+		if len(p.Go.Mains) > 1 {
+			return fmt.Errorf("several programs to choose from: %s\n\nRun shipwick init in a terminal to pick one", strings.Join(p.Go.Mains, ", "))
+		}
+		if p.Kind == kindStatic && a.Domain == "" {
+			return errStaticNeedsDomain
+		}
+		a.Port = p.Port
+		return nil
+	}
+
+	pr := prompter{c, bufio.NewReader(c.in)}
+	if err := pr.askName(a); err != nil {
+		return err
+	}
+	if len(p.Go.Mains) > 1 {
+		if err := pr.askMain(p); err != nil {
+			return err
+		}
+	}
+	if p.Kind != kindStatic {
+		if p.Port == 0 {
+			if err := pr.askPort(a); err != nil {
+				return err
+			}
+			p.Port = a.Port
+		}
+		a.Port = p.Port
+	}
+	switch {
+	case a.Domain == "" && p.Kind == kindStatic:
+		// The proxy serves the folder at its domain; without one there is
+		// nothing to serve.
+		var err error
+		if a.Domain, err = pr.ask("Public domain", ""); err != nil {
+			return err
+		}
+		if a.Domain == "" {
+			return errStaticNeedsDomain
+		}
+	case a.Domain == "" && a.Port != 0:
+		var err error
+		if a.Domain, err = pr.ask("Public domain (empty for none)", ""); err != nil {
+			return err
+		}
+	}
+	c.ui.Println()
+	return nil
+}
+
+var errStaticNeedsDomain = errors.New("a static site needs a domain: the proxy serves the files at it\n\nPass one with: shipwick init --domain example.com")
+
+// askMain has the user pick which of several Go main packages to build.
+func (p prompter) askMain(proj *project) error {
+	p.c.ui.Println("Several programs found:")
+	for i, m := range proj.Go.Mains {
+		p.c.ui.Printf("  %d. %s\n", i+1, m)
+	}
+	for {
+		raw, err := p.ask("Which one to deploy", "1")
+		if err != nil {
+			return err
+		}
+		if n, convErr := strconv.Atoi(raw); convErr == nil && n >= 1 && n <= len(proj.Go.Mains) {
+			proj.Go.Package = proj.Go.Mains[n-1]
+			proj.Label = goLabel(proj.Go.Package)
+			return nil
+		}
+		p.c.ui.Printf("  Enter a number between 1 and %d.\n", len(proj.Go.Mains))
+	}
+}
+
+// writeProjectFiles writes the Dockerfile and .dockerignore of a recognised
+// project, unless they exist: a hand-written Dockerfile is the developer's
+// and `build: .` uses it as it is; --force is about deploy.yaml only.
+func writeProjectFiles(dir string, p *project) (written, kept []string, err error) {
+	if p == nil || p.Kind == kindStatic {
+		return nil, nil, nil
+	}
+	dockerfile, err := renderDockerfile(*p)
+	if err != nil {
+		return nil, nil, err
+	}
+	dockerignore, err := renderDockerignore(*p)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, f := range []struct{ name, content string }{{"Dockerfile", dockerfile}, {".dockerignore", dockerignore}} {
+		if exists(dir, f.name) {
+			kept = append(kept, f.name)
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, f.name), []byte(f.content), 0o644); err != nil {
+			return nil, nil, err
+		}
+		written = append(written, f.name)
+	}
+	return written, kept, nil
+}
+
+func itOrThem(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+func joinFiles(names []string) string {
+	if len(names) <= 1 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 var invalidNameChars = regexp.MustCompile(`[^a-z0-9]+`)
@@ -171,8 +369,18 @@ func renderConfig(a initAnswers) string {
 
 	line("name: %s", a.Name)
 	line("")
-	line("# Pin a version tag: deployments are recorded (and rolled back) by it.")
-	line("image: %s", a.Image)
+	if p := a.Project; p != nil && p.Kind == kindStatic {
+		return renderStaticConfig(&b, a)
+	}
+
+	if a.Project != nil {
+		line("# The image is built on your machine by `shipwick deploy`, from the")
+		line("# Dockerfile next to this file, and sent to the server. No registry needed.")
+		line("build: .")
+	} else {
+		line("# Pin a version tag: deployments are recorded (and rolled back) by it.")
+		line("image: %s", a.Image)
+	}
 	line("")
 	line("# Run something other than the image's default. A string is one argument;")
 	line("# use a list for several: nothing is split on spaces.")
@@ -203,16 +411,7 @@ func renderConfig(a initAnswers) string {
 	line("# env:")
 	line("#   DATABASE_URL: postgres://app:${DATABASE_PASSWORD}@postgres:5432/app")
 	line("")
-	line("# A replica receives traffic only once this endpoint answers 2xx.")
-	line("# health:")
-	line("#   path: /health")
-	line("#   interval: 10s")
-	line("#   timeout: 3s")
-	line("#   retries: 3")
-	line("# Not an HTTP application? Instead of path, check that a port accepts")
-	line("# connections, or run a command inside the replica (exit 0 is healthy):")
-	line("#   tcp: 5432")
-	line("#   command: [\"pg_isready\", \"-U\", \"postgres\"]")
+	renderHealth(line, a)
 	line("")
 	line("# Per-replica limits. Unlimited when omitted.")
 	line("# resources:")
@@ -242,5 +441,68 @@ func renderConfig(a initAnswers) string {
 	line("")
 	line("restart:")
 	line("  policy: always # always | on-failure | never")
+	return b.String()
+}
+
+// renderHealth writes the health block: live for a framework known to answer
+// its own root, otherwise a commented example at the endpoint the kind's
+// community uses, with a hint on adding it.
+func renderHealth(line func(string, ...any), a initAnswers) {
+	p := a.Project
+	if p != nil && p.HealthLive && a.Port != 0 {
+		line("# A replica receives traffic only once this endpoint answers 2xx.")
+		line("health:")
+		line("  path: %s", p.HealthPath)
+		return
+	}
+
+	path, hint := "/health", ""
+	if p != nil {
+		path = p.HealthPath
+		switch p.Kind {
+		case kindNode:
+			hint = "Add a route that answers 200 on " + path + ", then uncomment."
+		case kindDotnet:
+			hint = "app.MapHealthChecks(\"" + path + "\") in Program.cs, then uncomment."
+		case kindGo:
+			hint = "Add a handler that answers 200 on " + path + ", then uncomment."
+		case kindPython:
+			hint = "Add a route that answers 200 on " + path + ", then uncomment."
+		}
+	}
+	line("# A replica receives traffic only once this endpoint answers 2xx.")
+	if hint != "" {
+		line("# %s", hint)
+	}
+	line("# health:")
+	line("#   path: %s", path)
+	line("#   interval: 10s")
+	line("#   timeout: 3s")
+	line("#   retries: 3")
+	if p != nil && p.Kind == kindDotnet {
+		line("# A slow starter: failed checks do not count during this period.")
+		line("#   start_period: 60s")
+	}
+	if p == nil {
+		line("# Not an HTTP application? Instead of path, check that a port accepts")
+		line("# connections, or run a command inside the replica (exit 0 is healthy):")
+		line("#   tcp: 5432")
+		line("#   command: [\"pg_isready\", \"-U\", \"postgres\"]")
+	}
+}
+
+// renderStaticConfig is the short file of a folder served by the proxy: there
+// is no container, so nothing about ports, replicas, env or restarts applies.
+func renderStaticConfig(b *strings.Builder, a initAnswers) string {
+	line := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+	s := a.Project.Static
+	line("# A folder served by the proxy as it is: no image, no container, no port.")
+	if s.Build != "" {
+		line("# It is what `%s` produces; run that before `shipwick deploy`.", s.Build)
+	}
+	line("static: %s", s.Dir)
+	line("")
+	line("# Served over HTTPS automatically.")
+	line("domain: %s", a.Domain)
 	return b.String()
 }

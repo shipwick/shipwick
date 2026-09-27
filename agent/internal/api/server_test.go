@@ -39,7 +39,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	rt := dockertest.New()
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := deploy.New(st, rt, deploy.Options{StabilizeWindow: 20 * time.Millisecond, NameSettle: time.Millisecond, Logger: quiet})
+	engine := deploy.New(st, rt, deploy.Options{StabilizeWindow: 20 * time.Millisecond, NameSettle: time.Millisecond, Logger: quiet, UploadDir: t.TempDir()})
 
 	logs := &bytes.Buffer{}
 	apiServer := New(engine, st, sha256.Sum256([]byte(testToken)), slog.New(slog.NewTextHandler(logs, nil)))
@@ -130,8 +130,13 @@ func TestAuthentication(t *testing.T) {
 		"prefix of it":  "Bearer " + testToken[:10],
 		"with a suffix": "Bearer " + testToken + "x",
 	}
+	// Every case fails on purpose, and together they would trip the rate
+	// limit; a fresh minute for each keeps that out of this test.
+	clock := time.Now()
+	f.api.now = func() time.Time { return clock }
 	for name, auth := range tests {
 		t.Run(name, func(t *testing.T) {
+			clock = clock.Add(2 * time.Minute)
 			for _, path := range []string{"/api/v1/applications", "/api/v1/server", "/api/v1/deployments", "/api/v1/applications/x/logs"} {
 				status, body := f.doWithAuth("GET", path, "", auth)
 				if status != http.StatusUnauthorized {

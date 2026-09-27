@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shipwick/shipwick/cli/internal/client"
 	"github.com/shipwick/shipwick/pkg/api"
 )
 
@@ -23,10 +24,12 @@ type volumeAgent struct {
 	*fakeAgent
 	volumes  []api.Volume
 	archives map[string][]byte // by volume: what a backup streams
+	managed  []api.VolumeInfo  // every volume on the server, for `shipwick volumes`
 
 	mu       sync.Mutex
 	restored map[string][]byte // by volume: what a restore uploaded
 	types    []string          // Content-Type of each upload
+	removed  []string          // Docker names `volumes rm` asked to remove
 }
 
 func newVolumeAgent(t *testing.T, volumes ...api.Volume) *volumeAgent {
@@ -41,6 +44,24 @@ func newVolumeAgent(t *testing.T, volumes ...api.Volume) *volumeAgent {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/applications/{name}/volumes", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, v.volumes)
+	})
+	mux.HandleFunc("GET /api/v1/volumes", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, 200, v.managed)
+	})
+	mux.HandleFunc("DELETE /api/v1/volumes/{name}", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		v.mu.Lock()
+		v.removed = append(v.removed, name)
+		v.mu.Unlock()
+		for _, m := range v.managed {
+			if m.Name == name && !m.Orphan {
+				respondError(w, 409, api.Error{Code: api.CodeVolumeInUse,
+					Message: "the volume belongs to application " + m.Application + "; delete the application first — its data stays until the volume is removed",
+					Details: map[string]any{"application": m.Application}})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /api/v1/applications/{name}/volumes/{volume}/archive", func(w http.ResponseWriter, r *http.Request) {
 		archive, ok := v.archives[r.PathValue("volume")]
@@ -209,5 +230,77 @@ func TestRestoreOfARunningApplicationSaysToStopIt(t *testing.T) {
 	_, _, err := f.run(t.TempDir(), "restore", "my-api", path, "--yes")
 	if msg := Render(err); !strings.Contains(msg, "shipwick stop") {
 		t.Errorf("Render(%v) = %q", err, msg)
+	}
+}
+
+func TestVolumesListsEveryVolumeWithItsOwnerAndSize(t *testing.T) {
+	v := newVolumeAgent(t)
+	v.managed = []api.VolumeInfo{
+		{Name: "shipwick_pgtest_data", Application: "pgtest", Volume: "data", SizeBytes: 13 << 20, Orphan: true},
+		{Name: "shipwick_postgres_data", Application: "postgres", Volume: "data", SizeBytes: 2<<30 + 1<<29},
+		{Name: "shipwick_redis_data", Application: "redis", Volume: "data", SizeBytes: -1},
+	}
+	out, _, err := v.run(t.TempDir(), "volumes")
+	if err != nil {
+		t.Fatalf("volumes: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 4 || !strings.HasPrefix(lines[0], "NAME") {
+		t.Fatalf("unexpected table:\n%s", out)
+	}
+	assertInOrder(t, lines[0], []string{"NAME", "APPLICATION", "SIZE", "STATUS"})
+	assertInOrder(t, lines[1], []string{"shipwick_pgtest_data", "pgtest", "13 MB", "application deleted"})
+	assertInOrder(t, lines[2], []string{"shipwick_postgres_data", "postgres", "2.5 GB", "in use"})
+	assertInOrder(t, lines[3], []string{"shipwick_redis_data", "redis", "unknown size", "in use"})
+
+	v.managed = nil
+	if out, _, err := v.run(t.TempDir(), "volumes"); err != nil || !strings.Contains(out, "No volumes") {
+		t.Errorf("without volumes: %v\n%s", err, out)
+	}
+}
+
+func TestVolumesRmConfirmsWithTheSizeAndRefusesVolumesInUse(t *testing.T) {
+	v := newVolumeAgent(t)
+	v.managed = []api.VolumeInfo{
+		{Name: "shipwick_pgtest_data", Application: "pgtest", Volume: "data", SizeBytes: 13 << 20, Orphan: true},
+		{Name: "shipwick_postgres_data", Application: "postgres", Volume: "data", SizeBytes: 1 << 30},
+	}
+
+	if _, _, err := v.run(t.TempDir(), "volumes", "rm", "shipwick_pgtest_data"); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("err = %v, want a refusal pointing at --yes when stdin is not a terminal", err)
+	}
+	if _, _, err := v.run(t.TempDir(), "volumes", "rm", "shipwick_postgres_data", "--yes"); err == nil || !strings.Contains(err.Error(), "belongs to application postgres") {
+		t.Errorf("err = %v, want a refusal naming the application that still exists", err)
+	}
+	if _, _, err := v.run(t.TempDir(), "volumes", "rm", "shipwick_nope_data", "--yes"); err == nil || !strings.Contains(err.Error(), "no volume shipwick_nope_data") {
+		t.Errorf("err = %v, want 'no volume'", err)
+	}
+	v.mu.Lock()
+	if len(v.removed) != 0 {
+		t.Errorf("nothing may be removed before confirmation or for a volume in use, saw %v", v.removed)
+	}
+	v.mu.Unlock()
+
+	out, _, err := v.run(t.TempDir(), "volumes", "rm", "shipwick_pgtest_data", "--yes")
+	if err != nil || !strings.Contains(out, "Removed volume shipwick_pgtest_data (13 MB)") {
+		t.Errorf("rm --yes: %v\n%s", err, out)
+	}
+	v.mu.Lock()
+	if len(v.removed) != 1 || v.removed[0] != "shipwick_pgtest_data" {
+		t.Errorf("removed = %v", v.removed)
+	}
+	v.mu.Unlock()
+}
+
+func TestRenderVolumeInUseAndRateLimited(t *testing.T) {
+	inUse := &client.APIError{Status: 409, Code: api.CodeVolumeInUse,
+		Message: "the volume belongs to application pgtest; delete the application first — its data stays until the volume is removed",
+		Details: map[string]any{"application": "pgtest"}}
+	if got := Render(inUse); !strings.Contains(got, "shipwick delete pgtest") {
+		t.Errorf("Render(VOLUME_IN_USE) = %q, want the delete command", got)
+	}
+	limited := &client.APIError{Status: 429, Code: api.CodeRateLimited, Message: "too many failed authentications from this address; try again in a minute"}
+	if got := Render(limited); got != "Too many failed attempts from this address; try again in a minute." {
+		t.Errorf("Render(RATE_LIMITED) = %q", got)
 	}
 }

@@ -142,7 +142,7 @@ func run() error {
 			"applications with a health check will fail to deploy. Run the agent in a container (docker compose up)")
 	}
 
-	opts := deploy.Options{Logger: log, ReservedHostPorts: reservedHostPorts(cfg.ListenAddr)}
+	opts := deploy.Options{Logger: log, ReservedHostPorts: reservedHostPorts(cfg.ListenAddr), UploadDir: cfg.UploadDir()}
 	if cfg.CaddyAdmin != "" {
 		caddy, err := proxy.NewCaddy(cfg.CaddyAdmin)
 		if err != nil {

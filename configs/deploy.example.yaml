@@ -1,5 +1,12 @@
 # deploy.yaml — everything Shipwick needs to run your application.
-# Only `name` and `image` are required.
+# Only `name` and `image` (or `build` in its place) are required.
+#
+# A built frontend needs no container: name the folder instead of an image and
+# Caddy serves it as it is. Only `name`, `static` and `domain` then apply, with
+# `aliases` and `redirects`; run the build before `shipwick deploy`.
+#   name: web
+#   static: dist/
+#   domain: example.com
 
 # Lowercase letters, digits and dashes. Identifies the application on the server.
 name: my-api
@@ -8,6 +15,14 @@ name: my-api
 # `docker login <registry>` once on the server; Shipwick uses those credentials.
 # Pin a version tag: deployments are recorded by it (1.4.2 here).
 image: ghcr.io/company/my-api:1.4.2
+
+# No registry? Build the image on your machine instead: `shipwick deploy` runs
+# docker build here, for the server's architecture, and sends the image to the
+# server. Paths are relative to this file. Replaces `image`.
+# build: .
+# build:
+#   context: .
+#   dockerfile: Dockerfile   # default
 
 # Run something other than the image's default: these replace its ENTRYPOINT,
 # CMD and USER. A string is one argument; use a list for several. Nothing is
@@ -33,8 +48,10 @@ domain: api.example.com
 replicas: 2
 
 # Environment variables. Values are stored on the server, never logged, and
-# masked in API responses. ${NAME} is filled in by the CLI from its environment
-# or --env-file when you deploy, so that secrets never have to be in this file.
+# masked in API responses. ${NAME} is filled in when you deploy, so that secrets
+# never have to be in this file: by the CLI from its environment or --env-file,
+# else by the agent from the secrets stored with `shipwick secret set NAME`.
+# $${NAME} is a literal ${NAME}.
 # Other applications on the server are reached by name: postgres:5432.
 env:
   DATABASE_URL: postgres://app:${DATABASE_PASSWORD}@postgres:5432/app
@@ -42,11 +59,12 @@ env:
 
 # HTTP health check. A replica is healthy when `path` answers 2xx.
 #
-# Deploying: new replicas get interval × retries (30s here) to answer once;
-# if they never do, the deployment fails and the old version keeps running.
-# Slow starter? Raise retries.
+# Deploying: new replicas get start_period + interval × retries (30s here) to
+# answer once; if they never do, the deployment fails and the old version
+# keeps running. Slow starter — a JVM, a migration on boot? Set start_period.
 #
-# Running: a replica that fails `retries` checks in a row is restarted.
+# Running: a replica that fails `retries` checks in a row is restarted, and
+# gets the same time to come up again.
 #
 # Not HTTP? Use exactly one of path, tcp or command:
 #   tcp: 5432                                  # the port accepts a connection
@@ -56,6 +74,7 @@ health:
   interval: 10s # default 10s
   timeout: 3s   # default 3s
   retries: 3    # default 3
+  # start_period: 1m   # extra time to come up before failed checks count (up to 30m)
 
 # Per-replica limits. Omit for unlimited.
 resources:

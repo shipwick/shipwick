@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +35,9 @@ type UI struct {
 	color bool
 	tty   bool
 
+	// mu serialises writes: several deployments narrating at once (see
+	// Prefixed) must not interleave inside a line.
+	mu        sync.Mutex
 	transient bool // a progress line is currently displayed
 }
 
@@ -61,13 +65,20 @@ func (u *UI) Styled(s Style, text string) string {
 
 // Println writes a line to standard output.
 func (u *UI) Println(args ...any) {
-	u.clearTransient()
-	fmt.Fprintln(u.out, args...)
+	u.write(u.out, fmt.Sprintln(args...))
 }
 
 func (u *UI) Printf(format string, args ...any) {
+	u.write(u.out, fmt.Sprintf(format, args...))
+}
+
+// write is the one place output leaves through: it takes the lock, clears
+// the progress line and writes s in one call.
+func (u *UI) write(w io.Writer, s string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	u.clearTransient()
-	fmt.Fprintf(u.out, format, args...)
+	io.WriteString(w, s)
 }
 
 // Success prints a completed step: "✓ Pulled image".
@@ -83,8 +94,7 @@ func (u *UI) Failure(format string, args ...any) {
 // Warn prints a warning to standard error, keeping standard output clean for
 // scripts.
 func (u *UI) Warn(format string, args ...any) {
-	u.clearTransient()
-	fmt.Fprintln(u.err, u.Styled(Yellow, "!")+" "+fmt.Sprintf(format, args...))
+	u.write(u.err, u.Styled(Yellow, "!")+" "+fmt.Sprintf(format, args...)+"\n")
 }
 
 // Progress shows what is happening right now on a line that the next output
@@ -94,11 +104,14 @@ func (u *UI) Progress(format string, args ...any) {
 	if !u.tty {
 		return
 	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	u.clearTransient()
 	fmt.Fprint(u.out, u.Styled(Dim, "… "+fmt.Sprintf(format, args...)))
 	u.transient = true
 }
 
+// clearTransient is called with mu held.
 func (u *UI) clearTransient() {
 	if u.transient {
 		fmt.Fprint(u.out, "\r\x1b[K")
@@ -107,7 +120,58 @@ func (u *UI) clearTransient() {
 }
 
 // Done clears any progress line. Call it before handing the terminal back.
-func (u *UI) Done() { u.clearTransient() }
+func (u *UI) Done() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.clearTransient()
+}
+
+// Prefixed returns a UI that starts every line with prefix, so that several
+// operations narrating at once — one deployment per application — can share
+// a terminal. Lines from different prefixed UIs never interleave, because
+// each reaches the terminal as one write under the parent's lock. Empty lines
+// are dropped: between other applications' lines they would separate nothing.
+// The progress line is off: several spinners cannot share one line.
+func (u *UI) Prefixed(prefix string) *UI {
+	return &UI{
+		out:   &prefixWriter{ui: u, w: u.out, prefix: prefix},
+		err:   &prefixWriter{ui: u, w: u.err, prefix: prefix},
+		color: u.color,
+	}
+}
+
+// prefixWriter belongs to one prefixed UI and hence to one goroutine; only
+// the write to the parent is shared.
+type prefixWriter struct {
+	ui     *UI
+	w      io.Writer
+	prefix string
+	mid    bool // the previous write ended inside a line
+}
+
+func (p *prefixWriter) Write(b []byte) (int, error) {
+	var out strings.Builder
+	rest := string(b)
+	for rest != "" {
+		line, tail, nl := strings.Cut(rest, "\n")
+		rest = tail
+		if !p.mid {
+			if line == "" && nl {
+				continue
+			}
+			out.WriteString(p.prefix)
+		}
+		out.WriteString(line)
+		if nl {
+			out.WriteString("\n")
+		}
+		p.mid = !nl
+	}
+	if out.Len() > 0 {
+		p.ui.write(p.w, out.String())
+	}
+	return len(b), nil
+}
 
 // Cell is one table cell with an optional style.
 type Cell struct {

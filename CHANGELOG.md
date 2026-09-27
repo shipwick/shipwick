@@ -8,6 +8,91 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- `build: .` in deploy.yaml, in place of `image`: `shipwick deploy` builds the
+  image on your machine with `docker build`, for the server's architecture,
+  and sends it to the agent, which loads it — no registry, no `docker login`.
+  The image is tagged `shipwick.local/<name>:<stamp>`; the agent never pulls
+  from that host and never builds. `POST /applications/:name/images` takes
+  the archive.
+- `static: dist/` in deploy.yaml: a built frontend served by Caddy itself, with
+  no container. `shipwick deploy` uploads the folder (`PUT …/static`, up to
+  512 MB) and deploys it by its digest; the agent copies it into the proxy,
+  checks for `index.html` and routes the domain to it. Rollback and redeploy
+  re-use the kept folder. New error code `STATIC_APPLICATION` for logs, metrics
+  and commands, which such an application does not have. The compose files
+  give Caddy a `caddy-static` volume for the folders.
+- `shipwick init` recognises the project in the current directory — a Nuxt,
+  Next or Node application, a .NET project, a Go program, a Python application
+  — and writes a multi-stage `Dockerfile` (small runtime image, non-root user,
+  port exposed), a `.dockerignore` and a `deploy.yaml` with `build: .`. A
+  folder of static files, or a Vite or Astro project that builds one, gets
+  `static: <dir>` and no Dockerfile. Existing `Dockerfile` and `.dockerignore`
+  files are kept; `--image` keeps the old behaviour; `--static <dir>` forces
+  the static kind.
+- `shipwick server install user@host` installs or upgrades the server over
+  SSH from your machine: Docker when it is missing, then the installer with
+  `--agent-domain` and `--dashboard-domain`. The token is saved as a context
+  and the DNS records to create are printed.
+- `shipwick doctor` checks the setup in one screen — CLI and agent versions
+  against the latest release, token, Docker, proxy, ports 80 and 443, and for
+  every domain whether DNS points at the server and HTTPS answers — and exits
+  non-zero when something is broken.
+- `shipwick open [app]` opens the application's address in the browser.
+- `shipwick deploy` in a directory without a `deploy.yaml` writes one first,
+  the way `init` does, when a terminal is attached.
+- A first deployment ends with the two commands to run next: `logs -f` and
+  `status`.
+- **Several applications in one file.** `shipwick.yaml` holds an `apps` list
+  in which every entry is a complete `deploy.yaml`; `after: [postgres]` names
+  the entries one must wait for. `shipwick deploy` uses it when there is no
+  `deploy.yaml`, `shipwick validate` checks it and prints the order.
+  Annotated example: `configs/shipwick.example.yaml`.
+- **Faster deployments.** The applications of a `shipwick.yaml` deploy at the
+  same time, in dependency order, up to four at once (`--parallel N`); every
+  line of output carries its application's name. An application whose
+  dependency did not deploy is skipped, the rest finishes, and the command
+  exits non-zero if any failed or was skipped. Several `deploy.yaml` files
+  given with `-f` still deploy one after the other.
+- Secrets kept on the server. `shipwick secret set DATABASE_PASSWORD` stores a
+  value, encrypted like `env` values are, and `${DATABASE_PASSWORD}` in an
+  `env` value of `deploy.yaml` is filled in by the agent when you deploy;
+  `--env-file` becomes optional. `shipwick secret ls` lists names and dates,
+  `shipwick secret rm` removes one. A name that is set neither where `shipwick`
+  runs nor on the server is refused before anything is recorded, with the
+  command to run. `$${NAME}` in an `env` value reaches the agent as written
+  and becomes the literal `${NAME}` there. API: `GET /secrets`,
+  `PUT /secrets/:name`, `DELETE /secrets/:name`.
+- `health.start_period`: extra time, up to 30 minutes, that a replica gets to
+  come up before failed health checks count — during a deployment and after a
+  restart by the supervisor — so a slow starter no longer has to raise
+  `retries`.
+- `shipwick volumes` lists every volume on the server with the application it
+  belongs to, how much it holds and whether that application still exists;
+  `shipwick volumes rm <name>` removes a volume of a deleted application. The
+  API gained `GET /volumes` and `DELETE /volumes/:name` (`409 VOLUME_IN_USE`
+  while the application exists).
+- The proxy compresses application responses with zstd or gzip when the
+  client asks for it, for compressible content types from a kilobyte up.
+- A deployment whose hostname is not ready spells out the record to create:
+  `add an A record: api.example.com → 62.238.109.115 (DNS only, not proxied)`,
+  with an AAAA record when the server has an IPv6 address; a hostname behind
+  Cloudflare's proxy is told to turn the proxy off for the record instead.
+- The API limits failed authentications: after 20 within a minute from one
+  address it answers `429 RATE_LIMITED` with `Retry-After` for the next minute,
+  without checking the token. Valid tokens are never limited.
+- Dashboard: a **Secrets** page lists the secrets kept on the server, and an
+  admin adds, replaces or removes one there; values are never shown.
+- Dashboard: a **Volumes** page lists every volume on the server with its
+  application and size, and an admin removes the volume of a deleted
+  application there.
+- Dashboard: a static application shows what it serves (`42 files, 3.1 MB,
+  served by the proxy`) in place of replicas, logs and metrics; an application
+  with `build` says its image is built by `shipwick deploy`, and the deploy
+  dialog offers no image field for either. `health.start_period` is shown with
+  the health check.
+
 ### Changed
 
 - The installer removes the agent and dashboard images of earlier releases

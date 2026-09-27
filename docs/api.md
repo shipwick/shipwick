@@ -17,7 +17,7 @@ ones below it:
 |---|---|
 | `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics |
 | `deploy` | And change what runs: `deploy`, `redeploy`, `rollback`, `stop`, `start` |
-| `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints |
+| `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints, setting and removing `/secrets` |
 
 There are two kinds of token. The **root token** is the one the agent is
 configured with — `SHIPWICK_AGENT_TOKEN`, or the one generated on first start.
@@ -26,7 +26,11 @@ cannot be revoked through the API. Every other token is created with
 [`POST /tokens`](#tokens), named, given a role, and shown exactly once.
 
 The agent holds only the SHA-256 of each token and compares in constant time.
-A wrong or revoked token is `401 UNAUTHORIZED`; a valid token whose role does
+A wrong or revoked token is `401 UNAUTHORIZED`. After 20 failed
+authentications within a minute from one client address, every request from
+it is `429 RATE_LIMITED` for the next minute, with a `Retry-After` header in
+seconds, before its token is looked at; successful authentications never
+count, and `GET /health` is not limited. A valid token whose role does
 not cover the endpoint is `403 FORBIDDEN`, and `details` says which role it has
 and which the endpoint wants:
 
@@ -64,11 +68,11 @@ Failure — `details` is always an object:
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 400 | `INVALID_REQUEST` | Malformed path or query parameter; body/URL name mismatch; invalid JSON, an unknown field or an invalid `image` in a redeploy or rollback body; such a body larger than 4 KB; a missing or invalid `command` in a run body |
-| 400 | `INVALID_CONFIG` | deploy.yaml failed validation; `details.fields` lists **every** problem. Also returned when a hostname is already served by another application (as its domain, an alias or a redirect) or by the agent: one entry whose `field` names the offending line — `domain`, `aliases[0]`, `redirects[1]` — and whose `message` names the owner; and with field `publish[i].host` when a server port the configuration publishes is already published by another application, or is one the agent or the proxy listens on. By `redeploy` and `rollback` too, since a stored configuration's hostnames and ports may have been taken since |
+| 400 | `INVALID_REQUEST` | Malformed path or query parameter; body/URL name mismatch; invalid JSON, an unknown field or an invalid `image` in a redeploy or rollback body; such a body larger than 4 KB; a missing or invalid `command` in a run body; an image archive that is not sent as `application/x-tar`, or that does not carry exactly one image tagged `shipwick.local/<name>:<tag>`; a deploy.yaml with `build` but no `image`, or a redeploy of such an application with an image from elsewhere; a static upload that is not `application/x-tar`, holds no files, or holds anything but files and directories; a static `deploy` without `?static=`, or `?static=` on a container application |
+| 400 | `INVALID_CONFIG` | deploy.yaml failed validation; `details.fields` lists **every** problem. Also returned when a hostname is already served by another application (as its domain, an alias or a redirect) or by the agent: one entry whose `field` names the offending line — `domain`, `aliases[0]`, `redirects[1]` — and whose `message` names the owner; and with field `publish[i].host` when a server port the configuration publishes is already published by another application, or is one the agent or the proxy listens on. By `redeploy` and `rollback` too, since a stored configuration's hostnames and ports may have been taken since. Also when an `env` value refers to a `${NAME}` that is not among the stored [secrets](#secrets): one entry per reference, `field` `env.<VARIABLE>`, `expected` the command that stores it |
 | 401 | `UNAUTHORIZED` | Missing, wrong or revoked token |
 | 403 | `FORBIDDEN` | The token's role does not cover this endpoint; `details: {role, required}` |
-| 404 | `NOT_FOUND` | Unknown application, deployment or token, including a rollback's `deployment_id` that does not exist |
+| 404 | `NOT_FOUND` | Unknown application, deployment or token, including a rollback's `deployment_id` that does not exist; a `deploy` whose `?static=` digest names no upload the agent has |
 | 404 | `ENDPOINT_NOT_FOUND` | This agent has no such operation — an older agent, a typo in the path, or a method the path does not support (there is no `405`). Answered without checking the token |
 | 409 | `DEPLOYMENT_IN_PROGRESS` | Another operation holds this application |
 | 409 | `NOT_DEPLOYED` | The application has no active deployment to act on |
@@ -76,7 +80,10 @@ Failure — `details` is always an object:
 | 409 | `TOKEN_EXISTS` | A token with that name exists |
 | 409 | `APPLICATION_RUNNING` | A volume restore was asked of an application that is not stopped |
 | 409 | `JOB_ALREADY_RUNNING` | A run of this job has not finished yet; a job runs one at a time |
-| 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB; a volume archive larger than 10 GB |
+| 409 | `STATIC_APPLICATION` | Logs, metrics, jobs or a one-off command were asked of an application the proxy serves from a folder; it has no containers |
+| 409 | `VOLUME_IN_USE` | The volume belongs to an application that still exists; `details: {application}`. Delete the application first, or replace the data with a restore |
+| 429 | `RATE_LIMITED` | 20 authentications from this address failed within a minute; `Retry-After` says in how many seconds to try again. Answered without checking the token |
+| 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB; a volume archive larger than 10 GB; an image archive larger than 4 GB; a static folder larger than 512 MB |
 | 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down |
 | 500 | `INTERNAL_ERROR` | Anything else; `message` carries the cause |
 
@@ -88,7 +95,7 @@ Failure — `details` is always an object:
 | `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `proxy: {enabled, reachable, error, routes}`, `notifications: {webhook}` and `token: {name, role}` — the caller's own |
 | `GET` | `/applications` | read | Summaries of all applications |
 | `GET` | `/applications/:name` | read | Detail: status, active spec (env masked), containers |
-| `POST` | `/applications/:name/deploy` | deploy | Start a deployment → `202` |
+| `POST` | `/applications/:name/deploy` | deploy | Start a deployment → `202`. A static application adds `?static=<digest>`, see [Static folders](#static-folders) |
 | `POST` | `/applications/:name/redeploy` | deploy | Deploy the active configuration again; optional body `{"image": "…"}` → `202` |
 | `POST` | `/applications/:name/rollback` | deploy | Deploy the configuration of an earlier successful deployment; optional body `{"deployment_id": 12}`, default: the most recent one → `202` |
 | `POST` | `/applications/:name/stop` | deploy | Stop all replicas; the app stays stopped |
@@ -104,22 +111,32 @@ Failure — `details` is always an object:
 | `GET` | `/tokens` | admin | The stored tokens, without their values, see [Tokens](#tokens) |
 | `POST` | `/tokens` | admin | Create a token; the value is in this response and nowhere else → `201` |
 | `DELETE` | `/tokens/:name` | admin | Revoke a token → `204` |
+| `GET` | `/secrets` | read | The secrets stored on the server, names and dates only, see [Secrets](#secrets) |
+| `PUT` | `/secrets/:name` | admin | Store a secret, creating or replacing it; body `{"value": "…"}` → `204` |
+| `DELETE` | `/secrets/:name` | admin | Remove a secret → `204` |
 | `GET` | `/applications/:name/volumes` | read | The volumes of the active deployment: `[{name, path}]` |
 | `GET` | `/applications/:name/volumes/:volume/archive` | admin | The volume's contents as a tar archive, see [Volume backups](#volume-backups) |
 | `PUT` | `/applications/:name/volumes/:volume/archive` | admin | Replace the volume's contents with the tar archive in the body → `204` |
+| `POST` | `/applications/:name/images` | deploy | Load an image archive (`docker save` format) for the application, see [Images built by the CLI](#images-built-by-the-cli) → `201` |
+| `GET` | `/volumes` | read | Every volume Shipwick created, with its application and size, see [Volumes of deleted applications](#volumes-of-deleted-applications) |
+| `DELETE` | `/volumes/:name` | admin | Remove a volume whose application was deleted → `204`; `409 VOLUME_IN_USE` while the application exists |
 | `GET` | `/applications/:name/jobs` | read | The scheduled jobs of the active deployment, each with its last and next run, see [Jobs and one-off commands](#jobs-and-one-off-commands) |
 | `GET` | `/applications/:name/runs?job=&limit=50` | read | Runs of jobs, hooks and one-off commands, newest first (max 500), without output |
 | `GET` | `/applications/:name/runs/:id` | read | One run with its output |
 | `POST` | `/applications/:name/jobs/:job/run` | deploy | Start a scheduled job now → `202` |
 | `POST` | `/applications/:name/run` | deploy | Run a one-off command; body `{"command": ["…"]}` → `202` |
+| `PUT` | `/applications/:name/static` | deploy | Upload the folder of a static application as a tar archive → `{digest, size_bytes, files}`, see [Static folders](#static-folders) |
 
 ### Deploying
 
 The body **is** the deploy.yaml document. JSON is accepted as well.
 
-The agent expects a complete document: `${NAME}` placeholders are a convention
-of the CLI, which fills them in before sending, and would be stored literally
-here.
+`${NAME}` placeholders in `env` values are filled in by the agent from the
+[secrets](#secrets) stored on the server, before the deployment is recorded;
+the record holds the values, so a later change of a secret does not reach a
+redeploy or rollback of it. `$${NAME}` there is a literal `${NAME}`. A
+placeholder anywhere else is a convention of the CLI, which fills it in before
+sending, and is stored literally here.
 
 ```bash
 curl -X POST http://localhost:9000/api/v1/applications/my-api/deploy \
@@ -255,6 +272,112 @@ curl -X PUT -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" -H "Content-Type: a
 Listing volumes needs the `read` role; both archive endpoints need `admin`: a
 backup carries the application's data, a restore replaces it.
 
+### Images built by the CLI
+
+An application with `build:` in its deploy.yaml has its image built where
+`shipwick deploy` runs and sent here; the agent never builds. The CLI does
+three things, and any client may do the same:
+
+1. `docker build --platform <the server's> -t shipwick.local/<name>:<tag> …`,
+   where `<tag>` is `<UTC yyyymmdd-hhmmss>-<4 hex>` and the platform follows
+   `architecture` from `GET /server`.
+2. `POST /applications/:name/images` with the output of `docker save` as the
+   body, `Content-Type: application/x-tar`, up to 4 GB, chunked or with a
+   `Content-Length`. The archive must carry exactly one image, tagged
+   `shipwick.local/<name>:<tag>` for this application; anything else is `400
+   INVALID_REQUEST` and what was loaded is removed again. Loading takes no
+   application lock. `201`:
+
+   ```json
+   {"data": {"image": "shipwick.local/my-api:20260927-153000-a1b2", "size_bytes": 267078442}}
+   ```
+
+3. `POST /applications/:name/deploy` with `image` set to that reference. A
+   `build` document without an `image` is `400 INVALID_REQUEST`.
+
+`shipwick.local` is a host that does not exist: the agent never pulls such an
+image, and a deployment whose local image is not on the server — pruned, or a
+rollback to a version this server was never sent — fails with `… is not on
+this server; it was built on a developer's machine — run shipwick deploy from
+the project again`. Local images are pruned like any other. A redeploy of
+such an application with an `image` from elsewhere is `400 INVALID_REQUEST`;
+without one, it keeps the image it has.
+
+```bash
+docker save shipwick.local/my-api:20260927-153000-a1b2 \
+  | curl -X POST -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" -H "Content-Type: application/x-tar" \
+      --data-binary @- http://localhost:9000/api/v1/applications/my-api/images
+```
+
+### Static folders
+
+A static application (`static: dist/` in deploy.yaml) is a folder the proxy
+serves itself; the agent creates no container for it. Deploying one is two
+requests.
+
+`PUT /applications/:name/static` takes the folder as a tar archive with
+`Content-Type: application/x-tar`, up to 512 MB: files and directories only,
+paths relative to the folder, nothing outside it — a symbolic link is refused,
+since the proxy's file server would follow it. The agent keeps the archive
+under its digest, one per application (a new upload replaces the last), and
+answers:
+
+```json
+{ "data": { "digest": "sha256:3f2a…", "size_bytes": 3250000, "files": 42 } }
+```
+
+`POST /applications/:name/deploy?static=sha256:3f2a…` then deploys the
+deploy.yaml in the body for that upload, and answers like any deployment. The
+`Deployment` has no `image`; its `version` is the digest's first twelve hex
+characters, and it carries `static: {digest, size_bytes, files}`. Its events
+read `Received 42 files (3.1 MB)`, `Copied 42 files into the proxy`, `Found
+index.html`, `Routed https://example.com to the uploaded files`. A folder
+without an `index.html` fails the deployment: `FAILED: the folder has no
+index.html…`. A digest the agent has no upload for is `404 NOT_FOUND` before
+anything is recorded; a static deploy.yaml without `?static=` is `400
+INVALID_REQUEST`.
+
+Redeploy and rollback need no upload: the proxy keeps the folder of the
+serving version and of the one before it, and both re-route to a kept folder.
+A rollback to a version whose folder is gone fails with `the files of <version>
+are no longer on the server: deploy the folder again`.
+
+```bash
+tar -C dist -cf - . | curl -X PUT -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" \
+  -H "Content-Type: application/x-tar" --data-binary @- \
+  http://localhost:9000/api/v1/applications/web/static
+curl -X POST -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" --data-binary @deploy.yaml \
+  "http://localhost:9000/api/v1/applications/web/deploy?static=sha256:3f2a…"
+```
+
+In the application views `static` is `true` and `replicas` is all zeros; the
+status is `HEALTHY` while the deployment is active and `STOPPED` after `stop`,
+which makes the domain answer `503` until `start`. Logs, metrics, jobs,
+`run` and metrics history answer `409 STATIC_APPLICATION`; `volumes` is an
+empty list.
+### Volumes of deleted applications
+
+`DELETE /applications/:name` keeps the application's volumes. `GET /volumes`
+lists every volume Shipwick created on the server, by its Docker name, with
+the application it was created for and whether that application still exists:
+
+```json
+{ "data": [
+  { "name": "shipwick_pgtest_data", "application": "pgtest", "volume": "data",
+    "size_bytes": 13631488, "orphan": true },
+  { "name": "shipwick_postgres_data", "application": "postgres", "volume": "data",
+    "size_bytes": 2684354560, "orphan": false }
+] }
+```
+
+`size_bytes` is what the daemon's disk-usage report says, `-1` when it reports
+nothing for the volume. `DELETE /volumes/:name` removes a volume of a deleted
+application with everything in it → `204`. While the application exists the
+answer is `409 VOLUME_IN_USE` with `details.application`: its data belongs to
+it, and a restore is the way to replace it. A name that is not
+`shipwick_<application>_<volume>` is `400 INVALID_REQUEST`; a well-formed name
+that no volume carries is `404 NOT_FOUND`.
+
 ### Application status
 
 | `status` | Meaning |
@@ -273,7 +396,8 @@ backup carries the application's data, a restore replaces it.
 
 `replicas` is `{desired, running, healthy}`. A replica is **healthy** when it
 runs and is not failing its health check; without a `health` block, `healthy`
-equals `running`. **During a rollout** the numbers describe the replicas that
+equals `running`. For a static application (`static: true`) all three are
+zero: the proxy serves it, and there is nothing to count. **During a rollout** the numbers describe the replicas that
 are serving right now — a mix of the old and the new version — and `desired` is
 the capacity the rollout maintains (the smaller of the two replica counts), so
 an application being upgraded reads `HEALTHY`, not `DEGRADED`. `containers`
@@ -346,6 +470,44 @@ The root token is not listed: it is configured on the agent, not stored.
 
 `DELETE /tokens/ci` → `204`; requests with the token are `401` from then on.
 `DELETE /tokens/root` is `400`. A token may revoke itself.
+
+### Secrets
+
+A secret is a value for `${NAME}` in the `env` values of a deploy.yaml, kept
+on the server so that no client has to hold it.
+
+```bash
+curl -X PUT …/secrets/DATABASE_PASSWORD -d '{"value": "hunter2"}'
+```
+
+`204 No Content`, whether the secret was created or replaced. Names match
+`^[A-Za-z_][A-Za-z0-9_]*$` (at most 64 characters: they are environment
+variable names). The value is at most 64 KB, not empty, without NUL bytes; the
+body is at most 260 KB; unknown fields are rejected. At most 500 secrets are
+stored; the 501st is `400 INVALID_REQUEST`. The value is written encrypted
+(AES-256-GCM, the name as additional data, like an `env` value) and is never
+returned, logged or repeated in an error.
+
+`GET /secrets` lists them by name, without values:
+
+```json
+{ "data": [
+  { "name": "DATABASE_PASSWORD", "created_at": "2026-03-01T10:00:00Z",
+    "updated_at": "2026-03-01T10:42:00Z" }
+] }
+```
+
+`DELETE /secrets/DATABASE_PASSWORD` → `204`; `404 NOT_FOUND` for a name that
+is not stored. Deployments already made keep the value they were started
+with; the next `deploy` whose `env` refers to the name is refused:
+
+```json
+{ "error": { "code": "INVALID_CONFIG", "message": "invalid deploy.yaml",
+             "details": { "fields": [ {
+               "field": "env.DATABASE_URL",
+               "message": "refers to ${DATABASE_PASSWORD}, which is not set where shipwick runs and not stored on the server",
+               "expected": "shipwick secret set DATABASE_PASSWORD" } ] } } }
+```
 
 ### Metrics
 

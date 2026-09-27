@@ -71,6 +71,9 @@ services:
     volumes:
       - caddy-data:/data # certificates — back this volume up, never delete it casually
       - caddy-config:/config
+      # The folders of static applications: the agent puts them here and Caddy
+      # serves them itself, with no container in between.
+      - caddy-static:/srv/shipwick
       # Caddy's admin API, on a unix socket only the agent shares. Never give
       # it a TCP port on this network: application containers could reach it,
       # and whoever reaches it controls all routing and the certificate store.
@@ -103,6 +106,7 @@ volumes:
   caddy-data:
   caddy-config:
   caddy-admin:
+  caddy-static:
 
 networks:
   shipwick:

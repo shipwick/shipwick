@@ -1,0 +1,17 @@
+.git
+node_modules
+.nuxt
+.output
+.nitro
+.next
+.cache
+.data
+dist
+logs
+*.log
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+deploy.yaml

@@ -513,6 +513,82 @@ func TestSupervisorGivesRestartedReplicaItsStartupBudget(t *testing.T) {
 	}
 }
 
+// slowStarter is a probe that fails until after has passed since its first
+// call, the way an application that boots slowly refuses connections and
+// then answers.
+func slowStarter(after time.Duration) ProbeFunc {
+	var mu sync.Mutex
+	var first time.Time
+	return func(context.Context, string, int, string, time.Duration) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if first.IsZero() {
+			first = time.Now()
+		}
+		if time.Since(first) < after {
+			return errors.New("connection refused")
+		}
+		return nil
+	}
+}
+
+func TestStartPeriodGivesASlowStarterItsTime(t *testing.T) {
+	// Scaled down a thousandfold: interval × retries is 60ms, the app needs
+	// about 150ms, and start_period adds 300ms.
+	slow := func() spec.App {
+		a := withHealth(app("my-api", "my-api:1.0", 1))
+		a.Health.Interval, a.Health.Retries = spec.Duration(20*time.Millisecond), 3
+		return a
+	}
+
+	s := newSupervised(t)
+	s.engine.opts.StartupPollInterval = 5 * time.Millisecond
+	s.engine.opts.Probe = slowStarter(150 * time.Millisecond)
+	if d := s.deploy(slow()); d.Status != api.StatusFailed || !strings.Contains(d.Error, "did not become healthy within 60ms") {
+		t.Fatalf("without a start_period: %s %q; interval × retries alone is the budget", d.Status, d.Error)
+	}
+
+	s = newSupervised(t)
+	s.engine.opts.StartupPollInterval = 5 * time.Millisecond
+	s.engine.opts.Probe = slowStarter(150 * time.Millisecond)
+	a := slow()
+	a.Health.StartPeriod = spec.Duration(300 * time.Millisecond)
+	if d := s.deploy(a); d.Status != api.StatusActive {
+		t.Fatalf("with start_period: %s (%s); the grace period is added to the budget", d.Status, d.Error)
+	}
+}
+
+func TestSupervisorGivesRestartedReplicaItsStartPeriodToo(t *testing.T) {
+	s := newSupervised(t)
+	a := withHealth(app("my-api", "my-api:1.0", 1))
+	a.Health.StartPeriod = spec.Duration(time.Minute) // budget: 1m + 10s × 3 = 90s
+	s.deploy(a)
+	c := s.container(t, 1)
+	s.advance(time.Second)
+
+	s.rt.Crash(c.ID, 1)
+	s.advance(time.Second)
+	s.advance(time.Second) // restarted; from here on it boots slowly
+	s.probes.setFailing(s.container(t, 1).IP, errors.New("connection refused"))
+
+	for range 80 {
+		s.advance(time.Second)
+	}
+	if h, _ := s.engine.sup.snapshot(c.ID); h != api.HealthStarting {
+		t.Errorf("health = %q after 80s; within start_period + interval × retries a replica is still 'starting'", h)
+	}
+	if s.rt.Starts(c.ID) != 2 {
+		t.Errorf("starts = %d; a replica within its start period must not be restarted for failing probes", s.rt.Starts(c.ID))
+	}
+
+	for range 20 {
+		s.advance(time.Second)
+	}
+	if s.rt.Starts(c.ID) < 3 {
+		t.Error("once start_period and the retries are spent, a replica that never came up should be restarted")
+	}
+}
+
 func TestNeverHealthyReplicaEndsInCrashLoop(t *testing.T) {
 	s := newSupervised(t)
 	a := withHealth(app("my-api", "my-api:1.0", 1))

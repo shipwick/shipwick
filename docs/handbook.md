@@ -106,6 +106,43 @@ themselves. Running the installer again upgrades; it never touches an existing
 `.env`, and so never changes your token. What it does, step by step, and how to
 test it: [scripts/README.md](../scripts/README.md).
 
+**From your laptop.** The same installation, without logging in to the server
+yourself:
+
+```bash
+shipwick server install root@203.0.113.10 --agent-domain agent.example.com --dashboard-domain dashboard.example.com
+```
+
+It connects with your `ssh` (a key that logs in without a password), installs
+Docker when it is missing, runs the installer with those hostnames, saves the
+token it prints as a context named after the host (`--context prod` names it
+otherwise) and makes it current, and ends with the DNS records to create:
+
+```text
+✓ Connected to root@203.0.113.10 (x86_64)
+✓ Docker 29.8.0
+Running the Shipwick installer...
+  ✓ Installed /opt/shipwick/compose.yml
+  ✓ Wrote /opt/shipwick/.env
+  ✓ Started the Shipwick services
+  ✓ The agent is healthy
+  ...
+✓ Shipwick is running on root@203.0.113.10
+✓ Saved the API token as context 203.0.113.10 (https://agent.example.com), now current
+
+Create these DNS records, DNS only (not proxied):
+  A     agent.example.com  →  203.0.113.10
+  A     dashboard.example.com  →  203.0.113.10
+
+Next: in your project, run: shipwick init
+      once the records exist, check the setup with: shipwick doctor
+```
+
+Running it again upgrades the server; the token is unchanged then, is not
+printed again, and the context keeps the one it has. `--version v0.4.0`
+installs that release. Without `--agent-domain` the API is not exposed and the
+context points at `http://127.0.0.1:9000`, for the tunnel described below.
+
 On your laptop or in CI, only the CLI:
 
 ```bash
@@ -160,7 +197,7 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 |---|---|---|
 | `SHIPWICK_AGENT_TOKEN` | generated | API bearer token, min. 16 characters |
 | `SHIPWICK_LISTEN_ADDR` | `127.0.0.1:9000` | Loopback by default, on purpose. The container image sets `0.0.0.0:9000`, reachable on the Docker network only: the compose file publishes no port |
-| `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database, token hash and encryption key. Off Linux, the default is `shipwick` in the user's configuration directory |
+| `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database, token hash, encryption key, and the uploaded folders of static applications (`uploads/`) until they are deployed. Off Linux, the default is `shipwick` in the user's configuration directory |
 | `SHIPWICK_ENCRYPTION_KEY` | generated | Key that encrypts `env` values in the database, 64 hex characters. Unset: `encryption.key` in the data directory, created on first start (§12) |
 | `SHIPWICK_DOCKER_NETWORK` | `shipwick` | Network application containers join |
 | `SHIPWICK_CADDY_ADMIN` | — | Caddy's admin endpoint: `unix//run/caddy/admin.sock` (recommended) or `http://127.0.0.1:2019`. Unset: domains are recorded but not served |
@@ -181,9 +218,25 @@ application's repository:
 
 ```bash
 shipwick login     # once: agent URL + token
-shipwick init      # writes deploy.yaml
+shipwick init      # writes Dockerfile, .dockerignore and deploy.yaml
 shipwick deploy
 ```
+
+`shipwick init` looks at the directory first. A Nuxt or Next application, a
+Node server (Express, Fastify, Koa, Hono, or a `start` script), a .NET project
+(`*.csproj`), a Go program (`go.mod` with a `main` package at the root or under
+`cmd/`) or a Python application (`pyproject.toml` or `requirements.txt`;
+uvicorn or gunicorn when they are listed) gets a multi-stage `Dockerfile` on a
+small runtime image with a non-root user and the port exposed, a
+`.dockerignore`, and a `deploy.yaml` with `build: .`, so that `shipwick deploy`
+builds the image on your machine and sends it to the server. An `index.html` at
+the root or in `dist/`, `build/`, `out/` or `public/`, and a Vite or Astro
+project that builds one, gets `static: <dir>` instead: the proxy serves the
+files, there is no container. Nothing recognised: it asks for a name, an image,
+a port and a domain. An existing `Dockerfile` or `.dockerignore` is kept as it
+is; `--image` skips detection and `--static <dir>` forces the static kind.
+Review what it wrote — a health check other than `/` is left commented until
+your application answers it — then deploy.
 
 ```text
 Deploying my-api...
@@ -207,6 +260,35 @@ Then `shipwick status`, `shipwick logs -f`, `shipwick ps`. The full command
 reference, and how the CLI finds the agent (SSH tunnel, CI variables), is in
 [cli/README.md](../cli/README.md).
 
+A first deployment ends with the two commands to run next, `shipwick logs -f
+my-api` and `shipwick status my-api`. `shipwick open` opens the application's
+address in the browser. Run in a directory without a `deploy.yaml`,
+`shipwick deploy` writes one first, the way `init` does, when a terminal is
+attached.
+
+When something is not right — no certificate arrives, a domain shows someone
+else's page — `shipwick doctor` checks the whole path in one screen, each line
+with what to do about it, and exits non-zero when something is broken:
+
+```text
+! shipwick v0.3.1; v0.4.0 is available. Upgrade with: shipwick upgrade
+✓ Agent https://agent.example.com runs v0.4.0, the latest release
+✓ Token laptop (admin)
+✓ Docker 29.8.0 on the server
+✓ Proxy serving 2 domains
+✓ agent.example.com → 203.0.113.10
+✓ Port 80 open on 203.0.113.10
+✗ Port 443 is not reachable on 203.0.113.10: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443
+✗ api.example.com → 104.16.0.1, which is not the server (203.0.113.10). Point the record at the server; if it is proxied through a CDN, turn the proxy off (DNS only)
+✓ https://api.example.com/ answers HTTP 200
+
+2 problems found.
+```
+
+The hostnames are resolved through public resolvers, as the agent does (§11);
+the server's address is the one the agent's own hostname resolves to, so
+through an SSH tunnel the ports and the records' targets are not checked.
+
 **Several servers.** Each `shipwick login` saves a server under a name, a
 context; `shipwick login --context staging --url https://staging.example.com`
 adds a second one and makes it current. Commands talk to the current context,
@@ -221,6 +303,64 @@ shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA
 ```
 
 It exits non-zero if the deployment fails, so it works as a pipeline gate.
+
+**Several applications.** A project with more than one service — a database,
+an API, a front end — describes them all in one `shipwick.yaml`: an `apps` list
+in which every entry is a complete `deploy.yaml` plus `after`, the names of the
+entries it must wait for (annotated example:
+[configs/shipwick.example.yaml](../configs/shipwick.example.yaml)).
+
+```yaml
+apps:
+  - name: postgres
+    image: postgres:17
+    port: 5432
+    volumes: [{ name: data, path: /var/lib/postgresql/data }]
+    health: { tcp: 5432 }
+    deploy: { strategy: recreate }
+  - name: api
+    image: ghcr.io/company/api:2.3.0
+    port: 8080
+    domain: api.example.com
+    after: [postgres]
+  - name: web
+    image: ghcr.io/company/web:2.3.0
+    port: 3000
+    domain: example.com
+```
+
+`shipwick deploy` uses it when there is no `deploy.yaml` in the directory
+(`-f shipwick.yaml` names it explicitly; it cannot be combined with other `-f`
+files). Applications whose dependencies are done start at once, up to four at
+a time (`--parallel N`): `postgres` and `web` above start together, `api` when
+`postgres` has deployed. Every line of output carries the name of the
+application it belongs to. An application whose dependency did not deploy is
+skipped, the others finish, and the command exits non-zero if any failed or
+was skipped. `${NAME}` placeholders work in every entry, and `shipwick
+validate` checks the file and prints the order. Several `deploy.yaml` files —
+`shipwick deploy -f api/deploy.yaml -f web/deploy.yaml` — still deploy one
+after the other, in the order given, stopping at the first failure.
+
+**Secrets.** A value that must not be in the file — a password, an API key —
+is written as `${DATABASE_PASSWORD}` and filled in when you deploy. Two places
+can fill it in. Your own machine: the CLI takes the value from its environment
+or from `--env-file`. Or the server: store the value there once, and every
+deploy from every laptop and pipeline gets it, with no env file anywhere:
+
+```bash
+shipwick secret set DATABASE_PASSWORD     # asks for the value without echo; or pipe it in
+shipwick secret ls                        # NAME  CREATED  UPDATED — never values
+shipwick secret rm DATABASE_PASSWORD
+```
+
+The CLI fills in what it can and leaves the rest of the `env` values to the
+agent; `shipwick validate` lists what it left. A name that neither side has
+stops the deployment before anything is recorded, naming the variable and the
+command to run. Only `env` values work this way: a `${TAG}` in `image` must be
+set where `shipwick` runs. A changed secret applies from the next deployment
+on; running containers keep the value they were started with, and a rollback
+restores the value that deployment used. Secrets are encrypted at rest like
+env values are ([Security](#12-security)).
 
 ### Dashboard
 
@@ -241,13 +381,16 @@ Details: [dashboard/README.md](../dashboard/README.md).
 
 ## 6. deploy.yaml
 
-Only `name` and `image` are required. Annotated example:
+Only `name` and `image` — or `build` in its place — are required; a folder the
+proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 [configs/deploy.example.yaml](../configs/deploy.example.yaml).
 
 | Field | Default | |
 |---|---|---|
 | `name` | — | Lowercase letters, digits, dashes; starts and ends with a letter or digit; max 63. Other applications reach this one at `http://<name>:<port>`. `agent`, `caddy`, `dashboard` and `localhost` are taken |
 | `image` | — | Any Docker image reference. Its tag becomes the deployment's version |
+| `build` | — | Build the image on your machine instead of naming one: `build: .`, or `{context, dockerfile}` (default `Dockerfile`, relative to the context); paths are relative to deploy.yaml and stay inside its directory. `shipwick deploy` runs `docker build` and sends the image to the server; no `image` and no registry — see [Deployment](#7-deployment) |
+| `static` | — | A folder, relative to deploy.yaml, served by Caddy as it is: a built frontend. No container: `image`, `port`, `replicas`, `env`, `health`, `resources`, `volumes`, `publish`, `entrypoint`, `command`, `user`, `logging`, `pre_deploy` and `jobs` do not apply. Needs `domain` — see [Deployment](#7-deployment) |
 | `entrypoint` / `command` | the image's | Replace the image's `ENTRYPOINT` / `CMD`. A list of arguments; a string is one argument and is never split — see below |
 | `user` | the image's | User the process runs as: `app`, `1000`, `1000:1000` |
 | `port` | — | Port the app listens on. Required with `domain` or `health` |
@@ -255,11 +398,12 @@ Only `name` and `image` are required. Annotated example:
 | `aliases` | — | Up to 20 more hostnames served exactly like `domain`. Needs `domain` |
 | `redirects` | — | Up to 20 hostnames redirected (308) to `https://<domain>`, path and query kept: `www.example.com`, an old domain. Needs `domain` |
 | `replicas` | `1` | 1–50; must be 1 with `volumes` or `publish` |
-| `env` | — | Environment variables; values are never logged or returned by the API. `${NAME}` is filled in by the CLI from its environment or `--env-file`, so secrets stay out of the file |
+| `env` | — | Environment variables; values are never logged or returned by the API. `${NAME}` is filled in when you deploy — by the CLI from its environment or `--env-file`, else by the agent from the secrets stored with `shipwick secret set` — so secrets stay out of the file. `$${NAME}` is a literal `${NAME}` |
 | `health.path` | — | Must answer 2xx. One of `path`, `tcp`, `command` |
 | `health.tcp` | — | A container port that must accept a TCP connection; `port` is not needed |
 | `health.command` | — | A command run inside the replica, as a list; exit 0 is healthy |
 | `health.interval` / `timeout` / `retries` | `10s` / `3s` / `3` | |
+| `health.start_period` | `0s` | Extra time a replica gets to come up before failed checks count, on top of `interval × retries`; up to `30m` — see [Health checks](#9-health-checks) |
 | `resources.cpu` | unlimited | Cores; `0.5`, `2`, … |
 | `resources.memory` | unlimited | `128mb`, `512mb`, `1gb`, … |
 | `volumes[].name` / `path` | — | A named Docker volume and where it is mounted. Data outlives deployments, rollbacks and `delete`. Needs `deploy.strategy: recreate` |
@@ -270,6 +414,7 @@ Only `name` and `image` are required. Annotated example:
 | `jobs[].name` / `schedule` / `command` / `timeout` | — / — / — / `1h` | A command run on a cron schedule (five fields, **UTC**) in a one-off container from the image. Name: lowercase, digits, dashes, max 40. Timeout 1s–24h |
 | `restart.policy` | `always` | `always` `on-failure` `never` |
 | `deploy.strategy` | `rolling` | `rolling` `recreate` — see [Deployment](#7-deployment) |
+| `after` | — | `shipwick.yaml` only: names of the applications in the same file that must have deployed before this one starts — see [Quick start](#5-quick-start) |
 
 Mistakes are reported all at once, by field:
 
@@ -371,6 +516,25 @@ of the most recent earlier version — the rollback target, so a rollback never
 waits for a pull. Images another application uses, or a container started
 outside Shipwick, are never touched.
 
+**Images built where you are.** With `build: .` in place of `image`, there is
+no registry in the picture. `shipwick deploy` runs `docker build` on your
+machine — the project and Docker are already there — for the server's
+architecture (`--platform`, asked of the agent, so a laptop of one kind builds
+for a server of another), tags the result `shipwick.local/<name>:<UTC
+stamp>-<4 hex>`, saves it and streams the archive to the agent, which loads it
+and deploys it like any other image. The build's output is shown as it runs.
+`shipwick.local` is a host that does not exist, on purpose: nothing can pull
+from it, so such an image is either on the server or it is not, and a
+deployment whose image is gone (pruned, or a rollback to a version that was
+never sent to this server) says so and asks for another `shipwick deploy` from
+the project. Old local images are pruned like any other; the two that matter
+stay. The whole image is sent each time; sending only the layers the server
+lacks is on the roadmap. The server never builds: a Dockerfile runs whatever
+it likes, with the network and CPU of the machine it runs on, and that machine
+should be yours. `docker` must be installed where `shipwick deploy` runs.
+`shipwick validate` describes the build and does not run it; `--image` does
+not apply to an application with `build:`.
+
 **Volumes.** `volumes` mounts named Docker volumes into the replica:
 
 ```yaml
@@ -389,10 +553,26 @@ deploy:
 
 The volume is `shipwick_postgres_data` on the server. It belongs to the
 application, not to a deployment: a redeploy, a rollback and even
-`shipwick delete` leave it where it is (`docker volume rm` removes it when you
-mean it). Other applications reach the database at `postgres:5432` — see
-[Caddy](#11-caddy). Volumes are named volumes only; a path on the host cannot
-be mounted.
+`shipwick delete` leave it where it is. `shipwick volumes` lists every volume
+on the server with the application it belongs to, how much it holds, and
+whether that application still exists; `shipwick volumes rm
+shipwick_postgres_data` removes one whose application was deleted, after
+asking, and refuses one whose application still exists — that data is the
+application's, and `shipwick restore` is the way to replace it. Other
+applications reach the database at `postgres:5432` — see [Caddy](#11-caddy).
+Volumes are named volumes only; a path on the host cannot be mounted.
+
+**Several applications at once.** A `shipwick.yaml` (see [Quick
+start](#5-quick-start)) is deployed as several ordinary deployments, one per
+application, each with its own record, lock, health checks and rollback; the
+agent never sees the file. The CLI holds the order: an application starts when
+every name in its `after` has completed an `ACTIVE` deployment in this run, at
+most four run at a time (`--parallel`), and one that waits for an application
+that failed, or was itself skipped, is skipped — a failure is reported, never
+propagated by timing. `after` is about readiness, not reachability: names on
+the services network resolve whatever the order, so `after: [postgres]`
+belongs on an application that would exit without its database, not on every
+consumer of another service.
 
 **Ports that are not HTTP.** The proxy speaks HTTP. A service that does not —
 a database a laptop connects to, a game server — is published on the server's
@@ -452,6 +632,44 @@ in the volume with the archive's contents, so it requires the application to be
 stopped and leaves it stopped.
 The archives are plain tar files holding the volume's contents, relative to
 the mount point; anything that can write such a tar can be restored.
+
+**A folder instead of a container.** A built frontend — the `dist/` of a Vite
+or Nuxt site, the `out/` of a Next export, any folder of HTML, CSS and
+JavaScript — needs no container of its own; Caddy serves files. `static` names
+the folder, relative to `deploy.yaml`:
+
+```yaml
+name: web
+static: dist/
+domain: example.com
+redirects: [www.example.com]
+```
+
+`shipwick deploy` sends the folder as it is — run the build first — and the
+agent puts it in front of Caddy and routes the domain to it:
+
+```text
+✓ Validated deploy.yaml
+✓ Uploaded dist/: 42 files, 3.1 MB
+✓ Received 42 files (3.1 MB)
+✓ Copied 42 files into the proxy
+✓ Found index.html
+✓ Routed https://example.com to the uploaded files
+✓ Deployment successful
+```
+
+The folder must hold an `index.html`; a request for a directory gets it, a
+request for a path that names no file gets a `404` — the fallback route of a
+single-page application is not assumed. A folder may be up to 512 MB. Nothing
+that describes a container applies — there is none: no `image`, `port`,
+`replicas`, `env`, `health`, `resources`, `volumes`, `jobs`; `domain`,
+`aliases` and `redirects` work as for any application, and so do `stop`
+(the domain answers `503`), `start`, `rollback` and `delete`. `shipwick logs`,
+`metrics` and `run` have nothing to show and say so. The version of a static
+deployment is the first twelve characters of the folder's digest: the same
+files make the same version, on any machine. The agent keeps the folder that
+serves and the one before it — the rollback target — and removes older ones;
+`shipwick rollback` needs no upload.
 
 **A deployment that fails is undone.** If a new replica crashes or never
 becomes healthy, its last log lines are saved with the deployment, the new
@@ -650,11 +868,14 @@ health:
 ```
 
 **During a deployment**, every new replica must answer `GET path` with a 2xx
-before the deployment may go live. It has `interval × retries` to do so (30s by
-default) and is probed every second meanwhile, so a fast application is
-confirmed in about a second, while a slow starter gets its time — raise
-`retries` for a JVM or an app that migrates its database on boot. A replica
-that never answers fails the deployment, and tells you why:
+before the deployment may go live. It has `start_period + interval × retries`
+to do so (30s by default) and is probed every second meanwhile, so a fast
+application is confirmed in about a second, while a slow starter gets its
+time — set `start_period: 1m` for a JVM or an app that migrates its database
+on boot, rather than raising `retries`, which would also make a running
+replica's failures take longer to notice. A replica the supervisor restarts
+gets the same time to come up again. A replica that never answers fails the
+deployment, and tells you why:
 
 ```text
 ✗ Deployment failed
@@ -811,6 +1032,11 @@ address per replica that carries the name, and Caddy asks it for every request.
 - Application containers publish no host ports, unless `publish` asks for
   some (see [Deployment](#7-deployment)). The proxy is the only other way in
   from outside.
+- **Responses are compressed** with zstd or gzip when the browser asks for
+  it, for text, JSON, JavaScript, SVG and the other types that shrink, from a
+  kilobyte up. What the application already compressed, or does not ask to
+  have compressed, leaves as it came. The agent's own API and the dashboard
+  stream logs, and are left uncompressed.
 
 What a crash costs: requests in flight on the replica that died are lost with
 it, and a request that arrives in the second before its name is dropped may
@@ -818,13 +1044,19 @@ get a `503`; everything after it goes to the surviving replicas.
 
 **DNS first.** A hostname is handed to Caddy only once it resolves to this
 server. Deploying before the DNS record exists is fine: the deployment
-succeeds, and instead of `Routed https://…` it prints a warning — `Routing
-https://api.example.com is waiting for DNS: does not resolve yet; it is served,
-and its certificate obtained, once the record points at this server` (or
-`resolves to 104.21.5.6, not to this server (62.238.109.115)` when the record
-points elsewhere). The agent checks again every 10 seconds, and as soon as the
-record is right the hostname is served, the certificate is obtained, and the
-application's events say so.
+succeeds, and instead of `Routed https://…` it prints a warning that names the
+record to create — `Routing https://api.example.com is waiting for DNS: does
+not resolve yet; add an A record: api.example.com → 62.238.109.115 (DNS only,
+not proxied). It is served, and its certificate obtained, once the record
+points at this server` — with an AAAA line as well when the server has an IPv6
+address. A record that points at another server is told to change; one that
+points at Cloudflare's proxy is recognised — `resolves to Cloudflare's proxy
+(104.21.5.6), not to this server: turn the proxy off for this record (DNS
+only), or wait for Cloudflare support in a later release` — because the record
+itself is right there, and the orange cloud is what breaks the certificate.
+The agent checks again every 10 seconds, and as soon as the record is right
+the hostname is served, the certificate is obtained, and the application's
+events say so.
 The reason is Let's Encrypt's rate limit: five failed authorizations per
 hostname per hour. Caddy asks for a certificate the moment it hears of a
 hostname, and one that does not resolve fails within seconds — deployed before
@@ -860,6 +1092,15 @@ of whatever version is current, without a domain, a certificate or a trip
 through the proxy. A database run by Shipwick (see [Deployment](#7-deployment))
 is reached the same way, `postgres:5432`. Nothing outside the server can reach
 these names.
+
+**A folder served by Caddy itself.** A static application
+(`static: dist/`, see [Deployment](#7-deployment)) has no replica and no name
+on the network: its route is a Caddy `file_server` whose root is the folder
+the agent copied into Caddy's own container, `/srv/shipwick/<app>/<digest>`,
+on the `caddy-static` volume of the compose setup. Aliases and redirects work
+as above. Because the root changes with every new folder, deploying a static
+application reloads Caddy once — the one kind of change a rollout of
+containers never causes.
 
 **The agent owns Caddy's configuration entirely** — it regenerates and reloads
 the full config whenever a domain or a port changes, and restores it within
@@ -901,7 +1142,7 @@ container that mounts `/`. Consequently:
 **Tokens and roles.** The token the installer prints is the *root* token:
 `admin`, and the one to keep for yourself. Create more, each with the role it
 needs — `read` sees everything, `deploy` also deploys, rolls back, stops and
-starts, `admin` also deletes applications and manages tokens:
+starts, `admin` also deletes applications and manages tokens and secrets:
 
 ```bash
 shipwick token create ci --role deploy      # printed once; put it in the CI secret
@@ -926,12 +1167,23 @@ What Shipwick does:
 - Tokens, `Authorization` headers, request bodies and env values are never
   logged. Env values are masked in every API response. `${NAME}` placeholders
   keep secrets out of `deploy.yaml` and out of your repository; the CLI fills
-  them in from its environment or `--env-file` at deploy time and refuses to
-  deploy while one is unset.
+  them in from its environment or `--env-file` at deploy time, the agent fills
+  the remaining `env` values in from the secrets stored on the server, and a
+  name neither has stops the deployment.
+- A secret stored with `shipwick secret set` is read by nobody afterwards: the
+  API lists names and dates only, the value goes into containers and nowhere
+  else. Its value is never an argument (arguments leak through `ps` and shell
+  history): it is asked for without echo, piped in, or read from a file.
 - `shipwick` never takes the token as a flag (arguments leak through `ps` and
   shell history), stores it `0600`, refuses to send a saved token to a
   different agent than the one it was saved for, and warns before a token
   crosses the network over plain HTTP.
+- Guessing is slowed down: after 20 failed authentications within a minute
+  from one address, the agent answers `429` for the next minute without
+  looking at the token. Requests with a valid token are never limited, and
+  `GET /health` is not affected. Behind Caddy every client shares the proxy's
+  address, which is why only failures count, and why the limit is one that
+  a mistyped token does not reach.
 - No shell, anywhere. The agent talks to the Docker Engine API directly and
   nothing from `deploy.yaml` is ever executed or interpolated into a command.
 - Strict validation of names, images, domains and health paths — the inputs
@@ -947,9 +1199,10 @@ What Shipwick does:
 - The agent image is distroless: no shell, no package manager.
 
 
-**Secrets at rest.** The `env` values of every deployment are encrypted before
-they are written to the database (AES-256-GCM; everything else in the record,
-including the variable names, stays readable). The key is `encryption.key` in
+**Secrets at rest.** The `env` values of every deployment, and the secrets
+stored with `shipwick secret set`, are encrypted before they are written to
+the database (AES-256-GCM; everything else in the record, including the
+variable names, stays readable). The key is `encryption.key` in
 the data directory, created by the agent on its first start, or the value of
 `SHIPWICK_ENCRYPTION_KEY` (64 hex characters) if you prefer to manage it
 yourself. This protects a copy of the database file without the key: a backup,

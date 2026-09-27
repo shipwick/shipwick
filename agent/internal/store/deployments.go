@@ -42,6 +42,12 @@ type Deployment struct {
 	SourceID *int64
 	// Actor is the name of the token that started the deployment.
 	Actor string
+	// StaticDigest is set for a static application: the digest of the
+	// uploaded archive, "sha256:<hex>", which names the directory the proxy
+	// serves; StaticFiles and StaticBytes count what was in it.
+	StaticDigest string
+	StaticFiles  int
+	StaticBytes  int64
 }
 
 type Replica struct {
@@ -63,6 +69,21 @@ func (s *Store) CreateDeployment(ctx context.Context, app spec.App, now time.Tim
 // stored spec of an earlier one: a redeploy or a rollback. actor is the name
 // of the token the deployment is made with.
 func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind string, sourceID *int64, actor string, now time.Time) (Deployment, error) {
+	return s.insertDeployment(ctx, Deployment{
+		Application: app.Name,
+		Version:     app.Version(),
+		Image:       app.Image,
+		Spec:        app,
+		Kind:        kind,
+		SourceID:    sourceID,
+		Actor:       actor,
+	}, now)
+}
+
+// insertDeployment writes d as the application's next PENDING deployment,
+// registering the application if it is new.
+func (s *Store) insertDeployment(ctx context.Context, d Deployment, now time.Time) (Deployment, error) {
+	app := d.Spec
 	sealed, err := s.sealSpec(app)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("encrypt environment values: %w", err)
@@ -72,17 +93,8 @@ func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind str
 		return Deployment{}, fmt.Errorf("encode spec: %w", err)
 	}
 
-	d := Deployment{
-		Application: app.Name,
-		Version:     app.Version(),
-		Image:       app.Image,
-		Spec:        app,
-		Status:      api.StatusPending,
-		StartedAt:   now.UTC(),
-		Kind:        kind,
-		SourceID:    sourceID,
-		Actor:       actor,
-	}
+	d.Status = api.StatusPending
+	d.StartedAt = now.UTC()
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		ts := formatTime(now)
 		_, err := tx.ExecContext(ctx,
@@ -102,9 +114,11 @@ func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind str
 			return err
 		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO deployments (application_id, sequence, version, image, spec, status, started_at, kind, source_deployment_id, actor)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			d.ApplicationID, d.Sequence, d.Version, d.Image, string(specJSON), string(d.Status), ts, kind, sourceID, actor)
+			`INSERT INTO deployments (application_id, sequence, version, image, spec, status, started_at, kind, source_deployment_id, actor,
+			                          static_digest, static_files, static_bytes)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			d.ApplicationID, d.Sequence, d.Version, d.Image, string(specJSON), string(d.Status), ts, d.Kind, d.SourceID, d.Actor,
+			d.StaticDigest, d.StaticFiles, d.StaticBytes)
 		if err != nil {
 			return err
 		}
@@ -221,7 +235,8 @@ func (s *Store) ActivateDeployment(ctx context.Context, id int64, now time.Time)
 
 const deploymentSelect = `
 	SELECT d.id, d.application_id, a.name, d.sequence, d.version, d.image, d.spec,
-	       d.status, d.error, d.started_at, d.completed_at, d.kind, d.source_deployment_id, d.actor
+	       d.status, d.error, d.started_at, d.completed_at, d.kind, d.source_deployment_id, d.actor,
+	       d.static_digest, d.static_files, d.static_bytes
 	FROM deployments d JOIN applications a ON a.id = d.application_id`
 
 type rowScanner interface {
@@ -238,7 +253,8 @@ func (s *Store) scanDeployment(row rowScanner) (Deployment, error) {
 		source    sql.NullInt64
 	)
 	err := row.Scan(&d.ID, &d.ApplicationID, &d.Application, &d.Sequence, &d.Version, &d.Image,
-		&specJSON, &status, &d.Error, &started, &completed, &d.Kind, &source, &d.Actor)
+		&specJSON, &status, &d.Error, &started, &completed, &d.Kind, &source, &d.Actor,
+		&d.StaticDigest, &d.StaticFiles, &d.StaticBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Deployment{}, ErrNotFound
 	} else if err != nil {

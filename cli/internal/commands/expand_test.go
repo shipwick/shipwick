@@ -20,18 +20,49 @@ func TestExpand(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{"my-api:1.4.2", "postgres://app:s3cret@postgres", "LITERAL: ${NOT_A_PLACEHOLDER}", "DOLLAR: $HOME"} {
+	// $${X} in an env value travels as it is: the agent turns it into ${X}.
+	for _, want := range []string{"my-api:1.4.2", "postgres://app:s3cret@postgres", "LITERAL: $${NOT_A_PLACEHOLDER}", "DOLLAR: $HOME"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in:\n%s", want, s)
 		}
 	}
-	if strings.Join(used, ",") != "TAG,DB_PASSWORD" {
-		t.Errorf("used = %v", used)
+	if strings.Join(used.substituted, ",") != "TAG,DB_PASSWORD" || len(used.deferred) != 0 {
+		t.Errorf("used = %+v", used)
 	}
 
+	// An unset name outside env is an error; one in an env value is left for
+	// the server, and $${X} there is left for the agent to unescape.
 	_, _, err = expand([]byte(secretConfig), func(string) (string, bool) { return "", false })
-	if err == nil || !strings.Contains(err.Error(), "${DB_PASSWORD}, ${TAG}") || !strings.Contains(err.Error(), "--env-file") {
+	if err == nil || !strings.Contains(err.Error(), "${TAG}") || strings.Contains(err.Error(), "DB_PASSWORD") || !strings.Contains(err.Error(), "--env-file") {
 		t.Errorf("err = %v", err)
+	}
+	out, used, err = expand([]byte(secretConfig), func(n string) (string, bool) { return "1.4.2", n == "TAG" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(used.substituted, ",") != "TAG" || strings.Join(used.deferred, ",") != "DB_PASSWORD" {
+		t.Errorf("used = %+v", used)
+	}
+	for _, want := range []string{"postgres://app:${DB_PASSWORD}@postgres", "LITERAL: $${NOT_A_PLACEHOLDER}"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestExpandTellsEnvApartInEveryEntryOfAShipwickFile(t *testing.T) {
+	many := "apps:\n  - name: api\n    image: ghcr.io/company/api:${TAG}\n    port: 8080\n    env:\n      DATABASE_URL: postgres://app:${DB_PASSWORD}@postgres:5432/app\n  - name: web\n    image: ghcr.io/company/web:${TAG}\n    port: 3000\n    env:\n      API_KEY: ${API_KEY}\n"
+	out, used, err := expand([]byte(many), func(n string) (string, bool) { return "1.4.2", n == "TAG" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(used.substituted, ",") != "TAG" || strings.Join(used.deferred, ",") != "DB_PASSWORD,API_KEY" {
+		t.Errorf("used = %+v", used)
+	}
+	for _, want := range []string{"api:1.4.2", "web:1.4.2", "${DB_PASSWORD}", "${API_KEY}"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
 	}
 }
 
@@ -57,7 +88,7 @@ func TestDeploySubstitutesFromEnvironmentAndEnvFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sent.Image != "ghcr.io/company/my-api:1.4.2" || sent.Env["DATABASE_URL"] != "postgres://app:from-file@postgres:5432/app" || sent.Env["LITERAL"] != "${NOT_A_PLACEHOLDER}" {
+	if sent.Image != "ghcr.io/company/my-api:1.4.2" || sent.Env["DATABASE_URL"] != "postgres://app:from-file@postgres:5432/app" || sent.Env["LITERAL"] != "$${NOT_A_PLACEHOLDER}" {
 		t.Errorf("sent image=%s env=%v", sent.Image, sent.Env)
 	}
 	if strings.Contains(out, "from-file") || strings.Contains(out, "1.4.2@") {
@@ -68,7 +99,7 @@ func TestDeploySubstitutesFromEnvironmentAndEnvFile(t *testing.T) {
 func TestDeployRefusesUnsetPlaceholdersWithoutContactingTheAgent(t *testing.T) {
 	f := newFakeAgent(t)
 	_, _, err := f.run(writeConfig(t, secretConfig), "deploy")
-	if err == nil || !strings.Contains(Render(err), "${DB_PASSWORD}") || !strings.Contains(Render(err), "not set") {
+	if err == nil || !strings.Contains(Render(err), "${TAG}") || !strings.Contains(Render(err), "not set") {
 		t.Errorf("err = %v", err)
 	}
 	if len(f.deployBodies) != 0 {
@@ -123,8 +154,8 @@ func TestExpandTouchesValuesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(used, ",") != "PORT" {
-		t.Errorf("used = %v", used)
+	if strings.Join(used.substituted, ",") != "PORT" {
+		t.Errorf("used = %+v", used)
 	}
 	app, err := spec.Parse(out)
 	if err != nil {

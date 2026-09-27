@@ -2,9 +2,10 @@
 
 The web console for a [Shipwick](../README.md) agent: applications and their
 replicas, deployments, live CPU/memory and its seven-day history, events and
-logs, scheduled jobs and their runs, volume backups, API tokens, plus the
-everyday actions (deploy another image, roll back, stop/start, delete, run a
-job or a one-off command, restore a volume).
+logs, scheduled jobs and their runs, volume backups, the volumes on the
+server, secrets, API tokens, plus the everyday actions (deploy another image,
+roll back, stop/start, delete, run a job or a one-off command, restore a
+volume, store or remove a secret, remove a deleted application's volume).
 
 It is a client of the agent's HTTP API ([docs/api.md](../docs/api.md)) and
 nothing more: it has no database and keeps no state of its own. Anything it can
@@ -30,9 +31,10 @@ The browser never talks to the agent and never holds the token:
   pass through untouched; response bodies are piped, never buffered, so
   `logs?follow=true` (NDJSON) arrives line by line and a volume archive
   streams to the browser's download (the agent's `Content-Disposition` names
-  the file). A `PUT` body, the only one being a volume archive, is streamed to
-  the agent as it arrives; the agent's 10 GB limit applies, and the proxy waits
-  for the answer only once the last byte has been sent.
+  the file). A `PUT` body (a volume archive, or a secret's value) is streamed
+  to the agent as it arrives; the agent's limits apply, and the proxy waits for
+  the answer only once the last byte has been sent. The dashboard uploads
+  neither static folders nor images: `shipwick deploy` does that.
 
 Why a proxy rather than calling the agent from the browser: the agent token is
 root-equivalent on the server (see the main README, *Security*). Keeping it out
@@ -46,7 +48,8 @@ server. Nitro serves the static app, the session routes and the proxy.
 
 ```text
 app/
-  pages/            index (Overview), applications/, deployments/, servers/, logs/, tokens/ (admin), login
+  pages/            index (Overview), applications/, deployments/, servers/, logs/, volumes/, secrets/,
+                    tokens/ (admin), login
   components/       hand-rolled UI: UiButton, UiDialog (native <dialog>), StatusBadge,
                     Sparkline and MetricsHistoryChart (SVG), LogViewer, DeploymentProgressPanel,
                     VolumesPanel, JobsSection, dialogs (deploy, rollback, delete, restore,
@@ -55,7 +58,8 @@ app/
                     useMetricsHistory, useDeploymentProgress, useSession, useTheme, useNow,
                     useServerInfo (+ useAccess: the token's role)
   utils/            pure logic, unit-tested: format, ndjson, status, deploymentProgress,
-                    deployments, spec, metricsHistory, roles, jobs, agentError, redirect
+                    deployments, spec, metricsHistory, roles, jobs, agentError, redirect,
+                    secrets, volumes
   types/api.ts      wire types, mirroring pkg/api/types.go and pkg/spec/spec.go
   assets/css/       design tokens (light/dark), Tailwind v4 theme
 server/
@@ -137,6 +141,31 @@ internet access and makes no request to any third party.
   `gelf (2 options)` with the options collapsed. When the logging driver is
   not `json-file` or `local`, the log viewer says the logs are shipped and
   that it shows Docker's local copy.
+- **Static applications** (`Application.static`) are folders the proxy serves
+  itself: the list shows `static` in place of the replica count and the
+  version is the upload's digest, twelve hex characters. Their page has no
+  replicas table, history, jobs or logs — the agent would answer
+  `409 STATIC_APPLICATION`, so nothing asks — and says instead what is served
+  (`42 files, 3.1 MB, served by the proxy`, from `Deployment.static`). Stop,
+  start, rollback, redeploy and delete work; the deploy dialog offers no image
+  field (there is none), nor for an application with `spec.build`, whose image
+  is built and sent by `shipwick deploy` and shown as `built by shipwick
+  deploy from . (Dockerfile)`. A health check's `start_period` reads `after a
+  2m start period`.
+- **Secrets** (`/secrets`, every role) lists `GET /secrets`: names and dates,
+  never a value. An admin stores one with `PUT /secrets/:name` from a password
+  field — the form says when the name is already stored and the value will be
+  replaced — and the value is cleared from the page as soon as the request is
+  sent, whatever the answer. Removing one says that deployments already made
+  keep their value and that the next deploy referring to it is refused.
+- **Volumes** (`/volumes`, every role) lists `GET /volumes`: name, application,
+  size (`-1` reads `unknown`), `in use` or `application deleted`. Remove is
+  offered for `orphan` rows only, to admins, confirming with the size;
+  `409 VOLUME_IN_USE` is shown with the agent's message.
+- **`429 RATE_LIMITED`** (too many failed authentications from the dashboard
+  server's address) reads "Too many failed attempts from this address; try
+  again in a minute", on the login page and wherever an error is shown, and is
+  never presented as a rejected token.
 - **`ENDPOINT_NOT_FOUND`** (the agent has no such operation) is told apart from
   `NOT_FOUND` (no such application or deployment) by its code.
 - **Log tail** follows the agent: per replica when following, merged total
@@ -185,8 +214,17 @@ application holds with the agent's `INVALID_CONFIG` shape (`aliases[1]`,
 the metrics history, and jobs (`GET …/jobs` with the next firing computed from
 the cron expression in UTC, `GET …/runs`, `GET …/runs/:id` with output, both
 `POST`s answering `202` with a run that finishes by itself a few seconds
-later, `409 JOB_ALREADY_RUNNING` while one is going). Its fixtures cover every
-application status:
+later, `409 JOB_ALREADY_RUNNING` while one is going), secrets (`GET /secrets`,
+`PUT`/`DELETE /secrets/:name`; a deploy whose env refers to an unknown
+`${NAME}` is refused with the agent's `INVALID_CONFIG` fields), the server's
+volumes (`GET /volumes`; `DELETE /volumes/:name` answers `204` for an orphan,
+`409 VOLUME_IN_USE` otherwise; deleting an application turns its volumes into
+orphans), static uploads (`PUT …/static` reads a real tar archive and answers
+its digest and file count; `POST …/deploy?static=<digest>` deploys a `static`
+spec, `400` without the digest, `404` for an unknown one), image archives
+(`POST …/images` → `201`), and `429 RATE_LIMITED` with `Retry-After` after 20
+failed authentications within a minute from one address. Its fixtures cover
+every application status:
 
 | Application | Status | Notable |
 |---|---|---|
@@ -195,11 +233,16 @@ application status:
 | `worker` | `CRASH_LOOP` | replica 2 unhealthy, restart counter grows, registry with a port in the image name; `entrypoint`, `command` (one argument with a space), `user`, `logging: gelf` |
 | `postgres` | `HEALTHY` | 1 replica, `recreate`, a `data` volume (backup and restore work: stop it first), `health: {tcp: 5432}`, `5432/tcp` published on `10.0.0.5:15432` |
 | `docs` | `STOPPED` | start it to see logs and metrics |
-| `billing` | `DEPLOYING` | first deployment stuck in `HEALTH_CHECKING`; fails after 15 minutes |
+| `landing` | `HEALTHY` | static: a `dist` folder served by the proxy (`static: true`, zero replicas, no image, version = digest); two static deployments in its history; logs, metrics, jobs and run answer `409 STATIC_APPLICATION` |
+| `shop` | `HEALTHY` | `build: .` — image `shipwick.local/shop:<stamp>` sent by the CLI; redeploy with an image from elsewhere is refused |
+| `billing` | `DEPLOYING` | first deployment stuck in `HEALTH_CHECKING`; `health.start_period: 2m0s`; fails after 15 minutes |
 | `legacy-cron` | `FAILED` | never deployed successfully |
 
 Tokens `ci` (deploy) and `viewer` (read) exist; a token created on the Tokens
-page signs in with its role (the value is kept in memory for that). The
+page signs in with its role (the value is kept in memory for that). Secrets
+`POSTGRES_PASSWORD` (rotated once) and `STRIPE_KEY` are stored; the volumes
+are `postgres`'s `data` and an orphan `shipwick_pgtest_data` of a deleted
+application. The
 archive download is a small real tar; the restore accepts any tar body and
 records the agent's event. The history is generated per bucket, deterministic
 across refreshes, with one gap shared by every series (an outage of the
@@ -287,8 +330,8 @@ it does not buffer responses, or followed logs will arrive in bursts.
   `[A-Za-z0-9._~-]` (no `..`, no encoded slashes). Only `Accept`,
   `Content-Type` and, for an upload, `Content-Length` are forwarded to the
   agent: the browser's cookies never are. `POST` bodies over 128 KB are
-  refused; a `PUT` body (a volume archive) is streamed through and bounded by
-  the agent's own 10 GB limit.
+  refused; a `PUT` body (a volume archive, a secret's value) is streamed
+  through and bounded by the agent's own limits.
 - **The token is never logged**, by the proxy or the session routes; upstream
   errors are reported by their error code, never by serializing the request.
 - **A 401 from the agent ends the session**: the proxy clears the cookie and

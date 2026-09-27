@@ -47,7 +47,7 @@ func TestAliasesShareTheDomainsRoute(t *testing.T) {
 	if got := strings.Join(routes[0].Match[0].Host, ","); got != "example.com,api.example.com,www2.example.com" {
 		t.Errorf("hosts = %q, want the domain and the aliases in a stable order", got)
 	}
-	if h := routes[0].Handle[0]; h.Handler != "reverse_proxy" || h.Dynamic == nil || h.Dynamic.Name != "web_8080" {
+	if h := routes[0].Handle[len(routes[0].Handle)-1]; h.Handler != "reverse_proxy" || h.Dynamic == nil || h.Dynamic.Name != "web_8080" {
 		t.Errorf("handler = %+v, want the same backend for every host", h)
 	}
 }

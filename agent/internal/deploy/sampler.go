@@ -130,6 +130,9 @@ func (e *Engine) MetricsHistory(ctx context.Context, name string, window, step t
 	if err != nil {
 		return api.MetricsHistory{}, err
 	}
+	if d.StaticDigest != "" {
+		return api.MetricsHistory{}, ErrStaticApplication
+	}
 	since := time.Now().Add(-window).UTC().Truncate(time.Second)
 	buckets, err := e.store.MetricHistory(ctx, app.ID, since, step)
 	if err != nil {

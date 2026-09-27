@@ -39,6 +39,12 @@ export type ApiErrorCode =
   | 'APPLICATION_RUNNING'
   /** A run of this job has not finished yet; a job runs one at a time. */
   | 'JOB_ALREADY_RUNNING'
+  /** Logs, metrics, jobs or a command were asked of a folder the proxy serves; it has no containers. */
+  | 'STATIC_APPLICATION'
+  /** The volume belongs to an application that still exists; details: {application}. */
+  | 'VOLUME_IN_USE'
+  /** 20 authentications from this address failed within a minute; answered without checking the token. */
+  | 'RATE_LIMITED'
   | 'RUNTIME_UNAVAILABLE'
   | 'INTERNAL_ERROR'
   // Added by the dashboard's server-side proxy, never by the agent:
@@ -101,6 +107,8 @@ export interface Application {
   in_flight_deployment_id: number | null
   created_at: string
   updated_at: string
+  /** A folder the proxy serves itself: no containers, `replicas` all zero, `image` empty. */
+  static: boolean
 }
 
 /**
@@ -116,6 +124,8 @@ export interface SpecHealth {
   interval: string
   timeout: string
   retries: number
+  /** Time a replica gets to come up before failed checks count; absent when zero. */
+  start_period?: string
 }
 
 export interface SpecResources {
@@ -143,9 +153,26 @@ export interface SpecLogging {
   options?: Record<string, string>
 }
 
+/** The image is built where `shipwick deploy` runs and sent to the server; the agent never builds. */
+export interface SpecBuild {
+  /** Relative to deploy.yaml. */
+  context: string
+  /** Relative to the context. */
+  dockerfile: string
+}
+
+/** A folder served by the proxy as it is, with no container. */
+export interface SpecStatic {
+  /** Relative to deploy.yaml, on the developer's machine. */
+  dir: string
+}
+
 export interface AppSpec {
   name: string
+  /** Empty for a static application. `shipwick.local/<name>:<tag>` for one with `build`. */
   image: string
+  build?: SpecBuild
+  static?: SpecStatic
   port?: number
   domain?: string
   aliases?: string[]
@@ -226,6 +253,25 @@ export interface Deployment {
   source_deployment_id: number | null
   /** Name of the token that started it ("root" for the agent's own); absent on deployments made before tokens had names. */
   by?: string
+  /** The folder a static deployment serves; absent for a deployment that runs containers. */
+  static?: StaticFiles
+}
+
+/** What PUT /applications/:name/static received; the same numbers reappear as `Deployment.static`. */
+export interface StaticUpload {
+  /** sha256:<64 hex characters> of the archive; the deployment's version is its first twelve. */
+  digest: string
+  /** The files' sizes added up. */
+  size_bytes: number
+  files: number
+}
+
+export type StaticFiles = StaticUpload
+
+/** The answer to POST /applications/:name/images: the image the archive carried, now on the server. */
+export interface LoadedImage {
+  image: string
+  size_bytes: number
 }
 
 /**
@@ -367,6 +413,31 @@ export interface MetricsHistory {
 export interface Volume {
   name: string
   path: string
+}
+
+/** A volume Shipwick created, whether or not its application still exists, as GET /volumes lists it. */
+export interface VolumeInfo {
+  /** Docker's name: shipwick_<application>_<volume>. */
+  name: string
+  application: string
+  /** The name in its deploy.yaml. */
+  volume: string
+  /** -1 when the daemon does not report a size. */
+  size_bytes: number
+  /** The application has been deleted; the volume was kept on purpose and removing it is the operator's call. */
+  orphan: boolean
+}
+
+/** A secret kept on the server as GET /secrets lists it: its name and dates, never its value. */
+export interface Secret {
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+/** Body of PUT /secrets/:name, for creating and replacing alike. */
+export interface SetSecretRequest {
+  value: string
 }
 
 /** A stored API token as GET /tokens lists it: never its value or hash. */

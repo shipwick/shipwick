@@ -50,6 +50,11 @@ type fakeAgent struct {
 	stdin        string            // what the CLI under test reads from standard input
 	upgrade      upgradeOptions    // where `shipwick upgrade` looks, see upgrade_test.go
 	jobs         fakeJobs          // see jobs_test.go
+	local        localOptions      // ssh, browser, DNS and TCP stand-ins, see small_test.go
+	many         fakeMany          // see multi_test.go
+	build        buildTools        // a fake docker for `deploy` with build:, see build_test.go
+	images       fakeImages        // what POST …/images received, see build_test.go
+	static       fakeStatic        // see static_test.go
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
@@ -57,6 +62,9 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 	f := &fakeAgent{t: t, actionBodies: map[string]string{}}
 	mux := http.NewServeMux()
 	f.jobs.register(mux)
+	f.many.register(mux)
+	f.images.register(mux)
+	f.static.register(mux)
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		health := f.health
@@ -85,6 +93,10 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 		f.mu.Unlock()
 		if f.deployStatus != 0 {
 			respondError(w, f.deployStatus, f.deployError)
+			return
+		}
+		if f.many.enabled() {
+			f.many.deploy(w, r)
 			return
 		}
 		respond(w, 202, api.Deployment{ID: 1, Application: r.PathValue("name"), Sequence: 3, Status: api.StatusPending})
@@ -133,7 +145,7 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		f.requests = append(f.requests, r.Method+" "+r.URL.Path)
+		f.requests = append(f.requests, r.Method+" "+r.URL.RequestURI())
 		f.mu.Unlock()
 		// Health is the one unauthenticated endpoint, as on the real agent.
 		if r.URL.Path != "/api/v1/health" && r.Header.Get("Authorization") != "Bearer "+testToken {
@@ -184,6 +196,8 @@ func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 	c.pollInterval = time.Millisecond
 	c.now = func() time.Time { return fixedNow }
 	c.upgrade = f.upgrade
+	c.local = f.local
+	c.build = f.build
 	root.SetArgs(args)
 	err := root.ExecuteContext(context.Background())
 	return out.String(), errOut.String(), err

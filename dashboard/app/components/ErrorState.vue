@@ -23,7 +23,7 @@ const explanation = computed(() => {
     return 'The dashboard server could not connect to the Shipwick agent. Check that the agent is running and that SHIPWICK_AGENT_URL points to it.'
   }
   if (props.error.code === 'NETWORK') return 'The browser could not reach the dashboard server. Check your connection.'
-  return props.error.message
+  return props.error.displayMessage
 })
 
 const cause = computed(() => {

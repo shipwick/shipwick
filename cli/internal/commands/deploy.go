@@ -24,6 +24,7 @@ func (c *cli) deployCommand() *cobra.Command {
 	var files, envFiles []string
 	var image string
 	var noWait bool
+	var parallel int
 
 	cmd := &cobra.Command{
 		Use:   "deploy",
@@ -41,15 +42,28 @@ In CI, keep deploy.yaml in the repository and supply the freshly built image:
 
 Values that must not be in the file — passwords, API keys — are written as
 ${NAME} and filled in from the environment or from --env-file before the file
-is sent. A name that is set nowhere is an error.
+is sent. An env value whose name is set nowhere here is left to the server,
+which fills it in from its secrets (shipwick secret set); anywhere else such a
+name is an error.
 
-Several applications deploy in the order given, one after the other:
+Several applications in one shipwick.yaml (an "apps" list; "after" names the
+ones an entry waits for) deploy at the same time, in dependency order; it is
+used when there is no deploy.yaml. Several deploy.yaml files deploy in the
+order given, one after the other:
 
   shipwick deploy -f api/deploy.yaml -f worker/deploy.yaml -f web/deploy.yaml`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if handled, err := c.deployMany(cmd.Context(), cmd, files, envFiles, image, noWait, parallel); handled {
+				return err
+			}
 			if image != "" && len(files) > 1 {
 				return errors.New("--image applies to one application; deploy several with one deploy.yaml each and no --image")
+			}
+			if !cmd.Flags().Changed("file") {
+				if err := c.initIfMissing(cmd.Context()); err != nil {
+					return err
+				}
 			}
 			return c.deploy(cmd.Context(), files, envFiles, image, noWait)
 		},
@@ -57,13 +71,14 @@ Several applications deploy in the order given, one after the other:
 	filesFlag(cmd, &files, &envFiles)
 	cmd.Flags().StringVar(&image, "image", "", "deploy this image instead of the one in the config")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "start the deployment and return immediately")
+	cmd.Flags().IntVar(&parallel, "parallel", DefaultParallel, "how many applications of a shipwick.yaml deploy at the same time")
 	return cmd
 }
 
 // filesFlag is fileFlag for commands that take several configs.
 func filesFlag(cmd *cobra.Command, files, envFiles *[]string) {
 	cmd.Flags().StringArrayVarP(files, "file", "f", []string{DefaultFile}, "path to a deployment config; repeat for several applications")
-	cmd.Flags().StringArrayVar(envFiles, "env-file", nil, "NAME=value file for ${NAME} placeholders; repeat for several")
+	cmd.Flags().StringArrayVar(envFiles, "env-file", nil, "NAME=value file for ${NAME} placeholders; repeat for several (env values may also come from the server's secrets)")
 }
 
 // deploy deploys every file in order and stops at the first failure: what
@@ -75,10 +90,15 @@ func (c *cli) deploy(ctx context.Context, files, envFiles []string, image string
 		file string
 		data []byte
 		app  spec.App
-		vars []string
+		vars placeholders
 	}
 	configs := make([]loaded, 0, len(files))
 	for _, file := range files {
+		if image != "" {
+			if err := refuseImageOverride(file); err != nil {
+				return err
+			}
+		}
 		data, app, vars, err := c.loadConfig(file, envFiles, image)
 		if err != nil {
 			return err
@@ -98,9 +118,14 @@ func (c *cli) deploy(ctx context.Context, files, envFiles []string, image string
 		c.ui.Println("Deploying " + c.ui.Styled(ui.Bold, cfg.app.Name) + "...")
 		c.ui.Println()
 		c.ui.Success("Validated %s%s", cfg.file, substitutedNote(cfg.vars))
+		if cfg.app.Build != nil {
+			if cfg.data, err = c.buildImage(ctx, cl, cfg.file, cfg.data, cfg.app); err != nil {
+				return err
+			}
+		}
 
 		started := c.now()
-		d, err := cl.Deploy(ctx, cfg.app.Name, cfg.data)
+		d, err := c.startDeployment(ctx, cl, cfg.file, cfg.app, cfg.data)
 		if err != nil {
 			return err
 		}
@@ -119,11 +144,8 @@ func (c *cli) deploy(ctx context.Context, files, envFiles []string, image string
 	return nil
 }
 
-func substitutedNote(vars []string) string {
-	if len(vars) == 0 {
-		return ""
-	}
-	return fmt.Sprintf(" (%s substituted)", plural(len(vars), "variable"))
+func substitutedNote(vars placeholders) string {
+	return vars.note()
 }
 
 func plural(n int, noun string) string {
@@ -145,7 +167,7 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 		return nil
 	}
 
-	final, err := c.awaitDeployment(ctx, cl, d.ID)
+	final, err := c.awaitDeployment(ctx, cl, d.ID, d.Static != nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			c.ui.Println()
@@ -164,18 +186,22 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 	c.ui.Println()
 	c.ui.Println(c.ui.Styled(ui.Bold, name) + " " + final.Version + c.ui.Styled(ui.Dim, "  deployed in "+ui.Duration(c.now().Sub(started))))
 	if detail, err := cl.Application(ctx, name); err == nil {
-		c.ui.Printf("%d/%d replicas healthy\n", detail.Replicas.Healthy, detail.Replicas.Desired)
+		c.ui.Println(describeServing(detail))
 	}
 	if final.Spec.Domain != "" {
 		c.ui.Println("https://" + final.Spec.Domain)
+	}
+	if final.Sequence == 1 {
+		c.printNextSteps(name)
 	}
 	return nil
 }
 
 // awaitDeployment polls until the agent is done with the deployment, echoing
 // its events as they appear. "Done" is completed_at, not the first settled
-// status: until then the application still refuses new operations.
-func (c *cli) awaitDeployment(ctx context.Context, cl *client.Client, id int64) (api.DeploymentDetail, error) {
+// status: until then the application still refuses new operations. static
+// picks the progress labels of a folder deployment.
+func (c *cli) awaitDeployment(ctx context.Context, cl *client.Client, id int64, static bool) (api.DeploymentDetail, error) {
 	defer c.ui.Done()
 
 	var lastEvent int64
@@ -205,7 +231,7 @@ func (c *cli) awaitDeployment(ctx context.Context, cl *client.Client, id int64) 
 					continue
 				}
 				lastEvent = e.ID
-				c.echoEvent(e)
+				c.echoEvent(e, static)
 			}
 			if d.CompletedAt != nil {
 				return d, nil
@@ -229,14 +255,14 @@ var progressLabels = map[api.DeploymentStatus]string{
 	api.StatusActive:         "Retiring the previous version",
 }
 
-func (c *cli) echoEvent(e api.Event) {
+func (c *cli) echoEvent(e api.Event, static bool) {
 	switch {
 	case e.Type == api.EventStep && e.Level == api.LevelWarn:
 		c.ui.Warn("%s", e.Message)
 	case e.Type == api.EventStep:
 		c.ui.Success("%s", e.Message)
 	case e.Type == api.EventState:
-		if label, ok := progressLabels[api.DeploymentStatus(e.Message)]; ok {
+		if label, ok := progressLabel(api.DeploymentStatus(e.Message), static); ok {
 			c.ui.Progress("%s", label)
 		}
 	}
@@ -325,9 +351,15 @@ func (c *cli) validateCommand() *cobra.Command {
 		Short: "Check deploy.yaml without deploying",
 		Long: `Check deploy.yaml without deploying: it is read, its ${NAME} placeholders are
 filled in from the environment and --env-file, and it is validated exactly as
-the agent would validate it.`,
+the agent would validate it. Env values whose name is set nowhere here are
+listed: the server fills them in from its secrets when you deploy. A
+shipwick.yaml is checked the same way, entry by entry, and the order the
+applications deploy in is shown.`,
 		Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if handled, err := c.validateMany(cmd, files, envFiles); handled {
+				return err
+			}
 			for i, file := range files {
 				_, app, vars, err := c.loadConfig(file, envFiles, "")
 				if err != nil {
@@ -339,6 +371,8 @@ the agent would validate it.`,
 				c.ui.Success("%s is valid%s", file, substitutedNote(vars))
 				c.ui.Println()
 				c.ui.Fields(describeSpec(app))
+				c.printDeferred(vars)
+				c.noteBuild(app)
 			}
 			return nil
 		},
@@ -349,11 +383,12 @@ the agent would validate it.`,
 
 // describeSpec summarizes a spec as it will be applied, defaults included.
 func describeSpec(app spec.App) [][2]string {
-	fields := [][2]string{
-		{"Name", app.Name},
-		{"Image", app.Image},
-		{"Version", app.Version()},
-		{"Replicas", fmt.Sprint(app.Replicas)},
+	fields := [][2]string{{"Name", app.Name}}
+	if app.Static != nil {
+		fields = append(fields, [2]string{"Folder", app.Static.Dir + "/ — served by the proxy, no container"})
+	} else {
+		fields = append(fields, describeImage(app)...)
+		fields = append(fields, [2]string{"Replicas", fmt.Sprint(app.Replicas)})
 	}
 	if app.Port != 0 {
 		fields = append(fields, [2]string{"Port", fmt.Sprint(app.Port)})
@@ -371,14 +406,18 @@ func describeSpec(app spec.App) [][2]string {
 		fields = append(fields, [2]string{"Health check", fmt.Sprintf("%s every %s (timeout %s, %d retries)",
 			describeHealthCheck(*h), h.Interval, h.Timeout, h.Retries)})
 	}
-	fields = append(fields, [2]string{"Resources", describeResources(app.Resources)})
+	if app.Static == nil {
+		fields = append(fields, [2]string{"Resources", describeResources(app.Resources)})
+	}
 	for _, v := range app.Volumes {
 		fields = append(fields, [2]string{"Volume", v.Name + " at " + v.Path})
 	}
 	for _, p := range app.Publish {
 		fields = append(fields, [2]string{"Publish", describePublish(p)})
 	}
-	fields = append(fields, [2]string{"Restart", app.Restart.Policy})
+	if app.Static == nil {
+		fields = append(fields, [2]string{"Restart", app.Restart.Policy})
+	}
 	if app.Deploy.Strategy != spec.StrategyRolling {
 		fields = append(fields, [2]string{"Strategy", app.Deploy.Strategy})
 	}

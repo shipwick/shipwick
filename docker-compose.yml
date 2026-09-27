@@ -63,6 +63,7 @@ services:
     volumes:
       - caddy-data:/data     # certificates: keep this volume
       - caddy-config:/config # autosaved configuration, for --resume
+      - caddy-static:/srv/shipwick # the folders of static applications, put there by the agent
       # The admin API lives on a unix socket in a volume only the agent shares.
       # On a TCP port it would be open to every application container on the
       # network — and whoever can reach it controls all routing.
@@ -98,6 +99,7 @@ volumes:
   caddy-data:
   caddy-config:
   caddy-admin:
+  caddy-static:
 
 networks:
   # Applications, the agent (health checks) and Caddy (upstreams) share it.

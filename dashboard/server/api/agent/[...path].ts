@@ -9,15 +9,18 @@
  *   by line and a volume archive is downloaded as it streams from the agent.
  * - Only an allowlist of request headers is forwarded. Cookies never are.
  * - POST/PUT/DELETE require the X-Shipwick-Request header (CSRF).
- * - A PUT body (a volume archive, gigabytes) is streamed to the agent as it
- *   arrives, without a size limit of its own: the agent enforces 10 GB.
+ * - A PUT body is streamed to the agent as it arrives, without a size limit of
+ *   its own: a volume archive is gigabytes and the agent enforces 10 GB; a
+ *   secret's value is a small JSON body and the agent enforces its limits too.
+ *   The dashboard uploads neither static folders nor images; that is the CLI's.
  */
 
 import type { Readable } from 'node:stream'
 
 const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE'])
 const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type'] as const
-const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition'] as const
+// retry-after: a 429 says when the agent will look at tokens from this address again.
+const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition', 'retry-after'] as const
 
 /** The agent refuses JSON bodies over 64 KB; leave it a little room to say so itself. */
 const MAX_BODY_BYTES = 128 * 1024
@@ -63,8 +66,8 @@ export default defineEventHandler(async (event) => {
       if (body && body.length === 0) body = undefined
     }
     else if (method === 'PUT') {
-      // Never buffered: the only PUT is a volume archive. The agent wants the
-      // length to refuse an oversized upload before reading it.
+      // Never buffered: a PUT is a volume archive or a secret's value. The agent
+      // wants the length to refuse an oversized upload before reading it.
       body = event.node.req
       const length = getRequestHeader(event, 'content-length')
       if (length) headers['content-length'] = length

@@ -146,6 +146,9 @@ type routeOverride struct {
 	// desired is how many replicas should be serving while the rollout runs:
 	// the smaller of the old and the new count, which a rollout never goes below.
 	desired int
+	// staticRoot is the folder in the proxy that serves instead of replicas:
+	// a static application (see static.go).
+	staticRoot string
 }
 
 type routeMember struct {
@@ -292,7 +295,7 @@ func describeHeld(held map[string]string) string {
 func (e *Engine) explainUnserved(plans []routingPlan, containers map[string]docker.Container, routes []proxy.Route) {
 	served := map[string]bool{}
 	for _, r := range routes {
-		served[r.Domain] = len(r.Backends) > 0 || len(r.Upstreams) > 0
+		served[r.Domain] = len(r.Backends) > 0 || len(r.Upstreams) > 0 || r.StaticRoot != ""
 	}
 	for _, p := range plans {
 		if p.hosts.domain == "" || served[p.hosts.domain] {
@@ -320,6 +323,9 @@ func describeRoutes(routes []proxy.Route) string {
 			behind = append(behind, b.Name)
 		}
 		behind = append(behind, r.Upstreams...)
+		if r.StaticRoot != "" {
+			behind = append(behind, "files")
+		}
 		if len(behind) == 0 {
 			behind = []string{"503"}
 		}
@@ -340,6 +346,8 @@ type routingPlan struct {
 	appID   int64
 	hosts   hostnames
 	members []routeMember
+	// staticRoot serves in place of members: see routeOverride.
+	staticRoot string
 }
 
 // plannedHostnames is every hostname the plans may ask the proxy to serve.
@@ -382,7 +390,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
 		plan := routingPlan{app: app.Name, appID: app.ID}
 		if o, overridden := overrides[app.Name]; overridden {
 			// A rollout is in charge and says exactly who serves.
-			plan.hosts, plan.members = o.hosts, o.members
+			plan.hosts, plan.members, plan.staticRoot = o.hosts, o.members, o.staticRoot
 		} else {
 			if app.ActiveDeploymentID == nil {
 				continue
@@ -394,7 +402,11 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
 			plan.hosts = hostnamesOf(d.Spec)
 			// A stopped application keeps its route — and with it its
 			// certificate — but nobody serves it: the proxy answers 503.
-			if app.DesiredState == api.DesiredRunning {
+			switch {
+			case app.DesiredState != api.DesiredRunning:
+			case d.StaticDigest != "":
+				plan.staticRoot = staticDir(app.Name, d.StaticDigest)
+			default:
 				replicas, err := e.store.ListReplicas(ctx, d.ID)
 				if err != nil {
 					return nil, err
@@ -439,7 +451,7 @@ func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Con
 			continue
 		}
 
-		route := proxy.Route{Domain: p.hosts.domain, Aliases: claim(taken, e.readyHosts(p.hosts.aliases)), Redirects: claim(taken, e.readyHosts(p.hosts.redirects))}
+		route := proxy.Route{Domain: p.hosts.domain, Aliases: claim(taken, e.readyHosts(p.hosts.aliases)), Redirects: claim(taken, e.readyHosts(p.hosts.redirects)), StaticRoot: p.staticRoot}
 		for _, m := range p.members {
 			c, exists := containers[m.replica.ContainerID]
 			if !exists || !c.Running {

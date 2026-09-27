@@ -7,7 +7,7 @@ const props = defineProps<{ error: AgentError | null }>()
 
 // A 403 is explained from its details ("This token has the read role; deploying
 // needs deploy or admin"), which reads better than the agent's lowercase line.
-const headline = computed(() => (props.error ? forbiddenExplanation(props.error) || props.error.message : ''))
+const headline = computed(() => (props.error ? forbiddenExplanation(props.error) || props.error.displayMessage : ''))
 
 const hint = computed(() => {
   const error = props.error
@@ -24,6 +24,8 @@ const hint = computed(() => {
   if (error.code === 'APPLICATION_RUNNING') return 'Stop the application first.'
   if (error.code === 'JOB_ALREADY_RUNNING') return 'A run of this job has not finished yet; a job runs one at a time. Open it in the run history to follow it.'
   if (error.code === 'TOKEN_EXISTS') return 'Choose another name, or revoke the existing token first.'
+  if (error.code === 'STATIC_APPLICATION') return 'The files are served by the proxy as they are; there is nothing to read logs or metrics from and nothing to run a command in.'
+  if (error.code === 'VOLUME_IN_USE') return 'Only volumes of deleted applications can be removed here. To replace the data of a running application, restore a backup on its page.'
   if (error.unreachable && error.agentUrl) return `Tried ${error.agentUrl}`
   return ''
 })

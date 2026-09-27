@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeBuild,
   describeHealth,
   describeLogging,
+  describeStatic,
   formatArgv,
   formatHostname,
   formatPublish,
   hostnamesOf,
+  isLocalImage,
   shippedLogDriver,
 } from '../app/utils/spec'
 
@@ -43,6 +46,44 @@ describe('describeHealth', () => {
   it('is null without a health check', () => {
     expect(describeHealth(null)).toBeNull()
     expect(describeHealth(undefined)).toBeNull()
+  })
+
+  it('mentions the start period when a replica gets one, tidied the way Go prints it', () => {
+    expect(describeHealth({ path: '/actuator/health', interval: '30s', timeout: '5s', retries: 30, start_period: '2m0s' })?.schedule)
+      .toBe('every 30s (timeout 5s, 30 retries), after a 2m start period')
+    expect(describeHealth({ path: '/', ...schedule, start_period: '1m30s' })?.schedule).toBe('every 10s (timeout 3s, 3 retries), after a 1m30s start period')
+    expect(describeHealth({ path: '/', ...schedule, start_period: '1h0m0s' })?.schedule).toBe('every 10s (timeout 3s, 3 retries), after a 1h start period')
+    expect(describeHealth({ path: '/', ...schedule, start_period: '45s' })?.schedule).toBe('every 10s (timeout 3s, 3 retries), after a 45s start period')
+  })
+
+  it('says nothing about a start period that is absent', () => {
+    expect(describeHealth({ path: '/', ...schedule })?.schedule).toBe('every 10s (timeout 3s, 3 retries)')
+  })
+})
+
+describe('describeStatic', () => {
+  it('reads like the CLI\'s status line', () => {
+    expect(describeStatic({ digest: 'sha256:3f2a', size_bytes: 3250000, files: 42 })).toBe('42 files, 3.1 MB, served by the proxy')
+    expect(describeStatic({ digest: 'sha256:0', size_bytes: 512, files: 1 })).toBe('1 file, 512 B, served by the proxy')
+  })
+
+  it('is empty for a container deployment', () => {
+    expect(describeStatic(undefined)).toBe('')
+    expect(describeStatic(null)).toBe('')
+  })
+})
+
+describe('build', () => {
+  it('names the context and the Dockerfile the CLI builds from', () => {
+    expect(describeBuild({ context: '.', dockerfile: 'Dockerfile' })).toBe('built by shipwick deploy from . (Dockerfile)')
+    expect(describeBuild({ context: 'services/api', dockerfile: 'Dockerfile.prod' })).toBe('built by shipwick deploy from services/api (Dockerfile.prod)')
+    expect(describeBuild(undefined)).toBe('')
+  })
+
+  it('recognizes an image the CLI sent, which no registry holds', () => {
+    expect(isLocalImage('shipwick.local/my-api:20260927-153000-a1b2')).toBe(true)
+    expect(isLocalImage('ghcr.io/acme/my-api:1.4.2')).toBe(false)
+    expect(isLocalImage('')).toBe(false)
   })
 })
 

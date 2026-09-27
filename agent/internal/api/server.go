@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,14 +35,19 @@ type Server struct {
 	// that it is written at most once a minute: see recordUse.
 	usedMu   sync.Mutex
 	lastUsed map[int64]time.Time
+
+	// limiter slows down guessing: see ratelimit.go.
+	limiter *rateLimiter
 }
 
 // New creates the API server. tokenHash is the SHA-256 of the root token;
 // the server never sees or stores the token itself. Further tokens live in
 // the store.
 func New(engine *deploy.Engine, st *store.Store, tokenHash [sha256.Size]byte, log *slog.Logger) *Server {
-	return &Server{engine: engine, store: st, tokenHash: tokenHash, log: log, now: time.Now,
+	s := &Server{engine: engine, store: st, tokenHash: tokenHash, log: log, now: time.Now,
 		closing: make(chan struct{}), lastUsed: map[int64]time.Time{}}
+	s.limiter = newRateLimiter(func() time.Time { return s.now() })
+	return s
 }
 
 // Close ends long-lived responses (log streams). Call it before
@@ -73,8 +80,12 @@ func (s *Server) Handler() http.Handler {
 	routes.read("GET /api/v1/deployments/{id}", s.handleGetDeployment)
 	s.jobRoutes(routes)
 	s.volumeRoutes(routes)
+	s.managedVolumeRoutes(routes)
 	s.tokenRoutes(routes)
 	s.metricsRoutes(routes)
+	s.imageRoutes(routes)
+	s.secretRoutes(routes)
+	s.staticRoutes(routes)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, api.CodeEndpointNotFound, "no such endpoint: "+r.Method+" "+r.URL.Path, nil)
@@ -100,12 +111,21 @@ func (t routeTable) handle(pattern string, role api.Role, h http.HandlerFunc) {
 // authenticate requires "Authorization: Bearer <token>" and a token whose
 // role covers the endpoint's. The token is hashed before it is compared or
 // looked up (see identify), so neither its content nor its length leaks
-// through timing. The handler learns who called through the context.
+// through timing. An address that failed too often lately is refused before
+// its token is looked at (see ratelimit.go). The handler learns who called
+// through the context.
 func (s *Server) authenticate(role api.Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		addr := clientAddress(r.RemoteAddr)
+		if wait, limited := s.limiter.limited(addr); limited {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
+			writeError(w, http.StatusTooManyRequests, api.CodeRateLimited, "too many failed authentications from this address; try again in a minute", nil)
+			return
+		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		who, known := s.identify(r.Context(), sha256.Sum256([]byte(token)))
 		if !ok || !known {
+			s.limiter.failed(addr)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="shipwick"`)
 			writeError(w, http.StatusUnauthorized, api.CodeUnauthorized, "missing or invalid API token", nil)
 			return
@@ -207,6 +227,9 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 	var badImage *deploy.InvalidImageError
 	var portConflict *deploy.PortConflictError
 	var badCommand *deploy.InvalidCommandError
+	var missingSecrets *deploy.MissingSecretsError
+	var badUpload *deploy.InvalidUploadError
+	var volumeInUse *deploy.VolumeInUseError
 	switch {
 	case errors.As(err, &conflict):
 		// Shaped like a validation error, because to the user it is one: a
@@ -242,6 +265,22 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusConflict, api.CodeApplicationRunning, err.Error(), nil)
 	case errors.Is(err, deploy.ErrInvalidArchive):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+	case errors.As(err, &missingSecrets):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": missingSecrets.Fields()})
+	case errors.Is(err, store.ErrTooManySecrets):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+	case errors.Is(err, deploy.ErrImageNotBuilt):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+	case errors.Is(err, deploy.ErrStaticApplication):
+		writeError(w, http.StatusConflict, api.CodeStaticApplication, err.Error(), nil)
+	case errors.Is(err, deploy.ErrNoUpload):
+		writeError(w, http.StatusNotFound, api.CodeNotFound, err.Error(), nil)
+	case errors.As(err, &badUpload):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, badUpload.Reason, nil)
+	case errors.Is(err, deploy.ErrNoSuchVolume):
+		writeError(w, http.StatusNotFound, api.CodeNotFound, err.Error(), nil)
+	case errors.As(err, &volumeInUse):
+		writeError(w, http.StatusConflict, api.CodeVolumeInUse, volumeInUse.Error(), map[string]any{"application": volumeInUse.App})
 	default:
 		// Callers are authenticated operators, so the cause is more useful
 		// to them than an opaque message. Errors never contain env values.

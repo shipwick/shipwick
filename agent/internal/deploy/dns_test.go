@@ -158,7 +158,7 @@ func TestAHostnameWithoutDNSIsNotRoutedUntilItPointsHere(t *testing.T) {
 		t.Errorf("the deployment claims the domain is routed:\n%s", steps)
 	}
 	for _, want := range []string{
-		"warn: Routing https://web.example.com is waiting for DNS: does not resolve yet; it is served, and its certificate obtained, once the record points at this server",
+		"warn: Routing https://web.example.com is waiting for DNS: does not resolve yet; add an A record: web.example.com → " + serverAddress + " (DNS only, not proxied). It is served, and its certificate obtained, once the record points at this server",
 	} {
 		if !strings.Contains(steps, want) {
 			t.Errorf("steps lack %q:\n%s", want, steps)
@@ -191,7 +191,55 @@ func TestAHostnameThatPointsElsewhereIsNotRouted(t *testing.T) {
 	if p.hasRoute("web.example.com") {
 		t.Error("a hostname that points at another server must not reach the proxy")
 	}
-	want := "waiting for DNS: resolves to 104.21.5.6, not to this server (" + serverAddress + ")"
+	// 104.21.5.6 is one of Cloudflare's: the record exists and is right, the
+	// proxy in front of it is what has to go.
+	want := "waiting for DNS: resolves to Cloudflare's proxy (104.21.5.6), not to this server: turn the proxy off for this record (DNS only), or wait for Cloudflare support in a later release."
+	if steps := s.steps(d.ID); !strings.Contains(steps, want) {
+		t.Errorf("steps lack %q:\n%s", want, steps)
+	}
+}
+
+func TestANotReadyVerdictSaysWhichRecordToCreate(t *testing.T) {
+	notFound := &net.DNSError{Err: "no such host", Name: "web.example.com", IsNotFound: true}
+	tests := []struct {
+		name   string
+		server []string
+		addrs  []string
+		err    error
+		want   string
+	}{
+		{"no record, IPv4 server", []string{"203.0.113.10"}, nil, notFound,
+			"does not resolve yet; add an A record: web.example.com → 203.0.113.10 (DNS only, not proxied)"},
+		{"no record, dual-stack server", []string{"203.0.113.10", "2001:db8::10"}, nil, notFound,
+			"does not resolve yet; add an A record: web.example.com → 203.0.113.10 and an AAAA record: web.example.com → 2001:db8::10 (DNS only, not proxied)"},
+		{"no record, IPv6 listed first", []string{"2001:db8::10", "203.0.113.10"}, nil, notFound,
+			"does not resolve yet; add an A record: web.example.com → 203.0.113.10 and an AAAA record: web.example.com → 2001:db8::10 (DNS only, not proxied)"},
+		{"no record, addresses unknown", nil, nil, notFound,
+			"does not resolve yet"},
+		{"another server", []string{"203.0.113.10"}, []string{"198.51.100.7"}, nil,
+			"resolves to 198.51.100.7, not to this server; change the A record: web.example.com → 203.0.113.10 (DNS only, not proxied)"},
+		{"Cloudflare, IPv4 and IPv6", []string{"203.0.113.10"}, []string{"104.21.5.6", "2606:4700:3030::6815:506"}, nil,
+			"resolves to Cloudflare's proxy (104.21.5.6, 2606:4700:3030::6815:506), not to this server: turn the proxy off for this record (DNS only), or wait for Cloudflare support in a later release"},
+		{"Cloudflare and another server", []string{"203.0.113.10"}, []string{"104.21.5.6", "198.51.100.7"}, nil,
+			"resolves to 104.21.5.6, 198.51.100.7, not to this server; change the A record: web.example.com → 203.0.113.10 (DNS only, not proxied)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &Engine{opts: Options{ServerAddresses: tt.server}}
+			ready, why := e.verdict("web.example.com", tt.addrs, tt.err)
+			if ready || why != tt.want {
+				t.Errorf("verdict = %v, %q\nwant %q", ready, why, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnAliasWaitingForDNSNamesItsOwnRecord(t *testing.T) {
+	s, _ := newGated(t)
+	s.dns.unresolved("api.example.com")
+
+	d := s.deploy(withHostnames(web("web:1.0", 1)))
+	want := "warn: api.example.com does not resolve yet; add an A record: api.example.com → " + serverAddress + " (DNS only, not proxied). It is served, and its certificate obtained, once its DNS points at this server"
 	if steps := s.steps(d.ID); !strings.Contains(steps, want) {
 		t.Errorf("steps lack %q:\n%s", want, steps)
 	}
@@ -226,7 +274,7 @@ func TestAliasesAndRedirectsWaitForTheirOwnDNS(t *testing.T) {
 	}
 	for _, want := range []string{
 		"warn: api.example.com does not resolve yet;",
-		"warn: example.net resolves to 104.21.5.6, not to this server (" + serverAddress + ");",
+		"warn: example.net resolves to Cloudflare's proxy (104.21.5.6), not to this server:",
 	} {
 		if !strings.Contains(steps, want) {
 			t.Errorf("steps lack %q:\n%s", want, steps)

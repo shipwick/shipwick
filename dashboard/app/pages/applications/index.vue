@@ -99,7 +99,9 @@ function replicaTone(app: Application): string {
                   {{ app.version || '—' }}
                 </td>
                 <td data-label="Replicas" class="mono" :class="replicaTone(app)">
-                  <span v-if="app.replicas.desired > 0">
+                  <!-- A static application has no replicas to count: the proxy serves its files itself. -->
+                  <span v-if="app.static" class="font-sans text-fg-muted" title="A folder served by the proxy; it has no containers">static</span>
+                  <span v-else-if="app.replicas.desired > 0">
                     {{ app.replicas.healthy }}/{{ app.replicas.desired }} <span class="font-sans text-fg-subtle">healthy</span>
                   </span>
                   <span v-else>—</span>

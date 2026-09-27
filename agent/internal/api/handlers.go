@@ -98,9 +98,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, name strin
 		return
 	}
 
-	d, err := s.engine.Deploy(r.Context(), app)
-	if err != nil {
-		s.writeEngineError(w, r, err)
+	d, ok := s.startDeploy(w, r, app)
+	if !ok {
 		return
 	}
 	s.acceptDeployment(w, d)

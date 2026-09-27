@@ -79,9 +79,9 @@ PENDING → BUILDING → STARTING → HEALTH_CHECKING → HEALTHY → ACTIVE →
 | State | What happens |
 |---|---|
 | `PENDING` | Record created, application lock held. |
-| `BUILDING` | Image is pulled. Shipwick does not build images; this state covers obtaining one. If the pull fails but the image exists locally, the local copy is used and a warning event is recorded. |
+| `BUILDING` | Image is pulled. The agent does not build images; this state covers obtaining one. If the pull fails but the image exists locally, the local copy is used and a warning event is recorded. An image under `shipwick.local` (see [Images without a registry](#images-without-a-registry)) is never pulled: it is on the server already or the deployment fails. |
 | `STARTING` | Network ensured; the first new replica is created, recorded and started (on a first deployment: all of them). |
-| `HEALTH_CHECKING` | With a `health` block: every replica must answer its check once within `interval × retries`, probed every second (see [Health and supervision](#health-and-supervision)). Without one: replicas must stay running for a stabilization window (3s). Either way, a replica that exits fails the deployment at once, and its last log lines are saved as an event — the container is about to be deleted, and with it the only clue. |
+| `HEALTH_CHECKING` | With a `health` block: every replica must answer its check once within `start_period + interval × retries`, probed every second (see [Health and supervision](#health-and-supervision)). Without one: replicas must stay running for a stabilization window (3s). Either way, a replica that exits fails the deployment at once, and its last log lines are saved as an event — the container is about to be deleted, and with it the only clue. |
 | `HEALTHY` | Every replica has been replaced and serves. |
 | `ACTIVE` | **Commit point.** One SQLite transaction promotes the deployment, marks the previous one `SUPERSEDED`, and repoints the application. A final sweep removes any container of the application that does not belong to it. |
 | `FAILED` | Nothing of the old version had been retired yet: routing returns to it, the new containers are discarded, done. Otherwise the rollback path below is taken. |
@@ -153,6 +153,45 @@ the new version is ready, and the events say so.
 `pkg/spec` refuses volumes without `recreate`, and more than one replica with
 volumes: two processes on one volume is how data gets lost, and Shipwick would
 rather not offer the option.
+
+### Images without a registry
+
+An application with `build:` in its deploy.yaml has no image in any registry.
+The CLI builds it (`docker build`, as an argv, never through a shell) on the
+developer's machine for the server's architecture, tags it
+`shipwick.local/<app>:<UTC stamp>-<4 hex>`, saves it and streams the archive
+to `POST /applications/:name/images`; the agent loads it through the Engine
+API (`ImageLoad`) and the CLI then deploys a deploy.yaml whose `image` is that
+reference. From the engine's point of view nothing is new: a deployment with
+an image, which happens to be present already.
+
+The agent never builds, and this is a decision rather than an omission. A
+build runs whatever the Dockerfile says, with the network, CPU and memory of
+the machine it runs on; the server's job is to serve, and the developer's
+machine has the source, the cache and Docker already. Loading an archive is
+the one thing the server does, and it is the same primitive `docker load`
+uses.
+
+`shipwick.local` is a reserved host that does not resolve. That is the point:
+an image under it can never be pulled, so the engine does not try — not in
+`pullImage`, not when a replica is recreated and its image turns out to be
+gone. Instead the deployment fails with a sentence that says the image was
+built on a developer's machine and asks for `shipwick deploy` from the project
+again. The same host tells the agent which uploads to accept: an archive for
+`my-api` must carry exactly one image tagged `shipwick.local/my-api:<tag>`, so
+no upload can plant an image in another application's name; anything else is
+refused and untagged again. deploy.yaml validation enforces the same rule from
+the other side — next to `build`, only a `shipwick.local` image — and a
+redeploy with an image from elsewhere is refused.
+
+Local images live in Docker's store like pulled ones, so image pruning treats
+them alike: the active image and the rollback target stay, older ones go. A
+rollback to a pruned local image fails cleanly with the sentence above, where
+a registry image would have been pulled again.
+
+The whole image is sent on every deployment. It is the simple thing, and
+correct; sending only the layers the server lacks is a later optimization
+that changes the transfer, not the model.
 
 ### Rollback and redeploy on request
 
@@ -236,7 +275,10 @@ be tools that finish.
 
 The same probe is used in two places with different patience:
 
-- **Deploying** — `interval × retries` is the replica's *startup budget*.
+- **Deploying** — `start_period + interval × retries` is the replica's
+  *startup budget*. `start_period` exists so that a slow starter buys time at
+  startup only; raising `retries` would also delay noticing a running
+  replica's failure.
   Probing every second instead of every `interval` means a connection refused
   by a booting app is "not yet", not a strike, and a fast app is not made to
   wait ten seconds to be told it was ready after one.
@@ -394,6 +436,13 @@ the host is loopback or a private address.
 Caddy terminates TLS and proxies to replicas; `agent/internal/proxy` tells it
 what to route where. Shipwick does not touch certificates, ACME or HTTP/3 —
 listening on `:443` with host matchers is all Caddy needs to do those itself.
+Compression is Caddy's too: every application route carries an `encode`
+handler in front of `reverse_proxy` (zstd and gzip, zstd preferred, from
+1024 bytes, Caddy's default set of compressible content types). Routes marked
+`Streaming` — the agent's API and the dashboard, which relay followed logs —
+have none: the encoder holds back the first bytes of a response until it
+knows the content type, and a log line that arrives late is a worse trade
+than an uncompressed one.
 
 **Routing is two things.** Who serves an application is decided by *names on
 the services network*; what Caddy is told is only which name stands behind
@@ -506,6 +555,20 @@ method, so a `POST` to the old hostname stays a `POST`. During a rollout the
 route override carries the whole set of hostnames, not only the domain, or the
 aliases would disappear for its duration — and reappear with a reload.
 
+**Static applications** have no replica to name. Their route carries a
+`StaticRoot` instead of backends — the folder's directory in Caddy's own
+container — and renders as a `file_server` with `index.html` as the index; a
+path that names no file is a `404`. The rollout takes over routing only at the
+switch, with an override naming the new directory, and drops it at the commit;
+until then the database names the previous deployment's directory, and a failed
+rollout leaves routing where it was. Every new folder is a new root, so a static
+deployment reloads Caddy once — the reload a rollout of containers is designed
+to avoid, accepted here because the alternative, a stable path swapped
+underneath Caddy, would serve one version's HTML with another's assets for the
+duration of a copy. An application that changes from containers to a folder
+keeps its files serving until the first replica is ready, and the other way
+round; `retireOthers` removes the containers a folder replaced.
+
 **DNS gates the proxy** (`agent/internal/deploy/dns.go`). A hostname is put
 into Caddy's config only once it resolves — and, when the server's addresses
 are known, resolves to one of them. Caddy asks for a certificate the moment a
@@ -519,7 +582,13 @@ trusted for 30 s when the hostname points here, 10 s when it does not, so a
 fixed record is noticed within ten seconds — and builds the routes from the
 cache alone. A domain that is not ready drops its whole route, redirects and
 aliases included: the redirects' target is the domain. An alias or redirect
-that is not ready is left out on its own. The deployment records what is held
+that is not ready is left out on its own. The verdict says what to do, not
+only what is wrong: with the server's addresses known, a hostname that does
+not resolve is told the A (and AAAA) record to add, one that points elsewhere
+the record to change, and one whose addresses are all in Cloudflare's
+published ranges (embedded in `dns.go`, dated) is told to turn the proxy off
+for the record — the record is right, and the orange cloud is what breaks
+the certificate. The deployment records what is held
 back and why as warning steps, in place of the "Routed" line; the log says so
 once per change of the held-back set; and when a hostname starts pointing
 here, the next sync adds it and records an application event. The agent's and
@@ -560,7 +629,8 @@ second signal kills immediately.
 | Networks | Two bridge networks. `shipwick`: every replica, the agent (health probes) and whatever the user runs beside Shipwick. `shipwick-services`: every replica and Caddy; a replica carries its application's names here while it is ready (see Routing). No host ports are published, with the one exception under Ports — no port conflicts, replicas just work, and the proxy is the way in. |
 | Volumes | `volumes` in deploy.yaml become named Docker volumes `shipwick_<app>_<volume>`, created with labels, mounted at the given path. They belong to the application: every deployment mounts the same ones, and nothing removes them — not a rollback, not `delete`. Never a host path. **Backup and restore** go through the replica's container and Docker's archive endpoints (`CopyFromContainer`, `CopyToContainer`), which read and write a container's filesystem whether or not it runs: no helper container, no image to pull, no shell. A backup holds the lock while it streams and is rewritten on the fly so that its entries are relative to the mount point. A restore is the one thing that removes a volume: with the application stopped, the container goes, then the volume, then `createReplicas` makes both again — empty — and the archive is extracted into the mount point before any process could write there. It is the only user of the create-only half of `ensureReplicas`. |
 | Ports | None, unless deploy.yaml has `publish`; then exactly the listed container ports are bound on the server (`PortBindings`), on the address given or on every address, for services the proxy cannot serve because they are not HTTP. Only for recreate applications with one replica: a server port has one holder, so the old version is stopped before the new one binds it. The engine refuses, before anything is recorded, a port the agent or the proxy listens on and a port another application's active configuration publishes — Docker would refuse the bind too, but only at start, after the old version is gone. Published ports bypass the host firewall on most distributions (Docker inserts its own iptables rules), which is why the README says to bind to a private address. |
-| Images | After a successful deployment, and after `delete`, the images that only retired deployments of the application name are untagged. Kept, across all applications: the active deployment's image and its most recent superseded one (the rollback target). Never forced: an image any container uses stays, so does anything no deployment ever named. |
+| Images | After a successful deployment, and after `delete`, the images that only retired deployments of the application name are untagged. Kept, across all applications: the active deployment's image and its most recent superseded one (the rollback target). Never forced: an image any container uses stays, so does anything no deployment ever named. Images the CLI built and sent (`shipwick.local/…`) are loaded with `ImageLoad`, live in the same store and are pruned the same way; they are never pulled, since their host does not exist. |
+| Static folders | `static` in deploy.yaml is served by Caddy itself, from `/srv/shipwick/<app>/<digest>` inside Caddy's own container — the `caddy-static` volume of the compose setup. The CLI uploads the folder as a tar archive (`PUT …/static`); the agent inspects it while it hashes it — files and directories only, nothing outside the folder, no symbolic links, which the file server would follow into the container that holds the certificates — keeps it in `<data>/uploads/<app>/` under its digest, one per application, and answers with the digest; the deployment names it (`?static=`). The rollout runs in the proxy's container through the Engine API's exec, the way command health checks run in a replica: `mkdir -p`, `CopyToContainer` into `<digest>.part`, `test -f …/index.html`, `mv` into place — so a crash half-way never leaves a directory that looks complete — then a route whose root is the directory. Directories are named by content, not by deployment: a rollback, or a redeploy of the same folder, routes to a directory that is already there and needs no upload. After a deployment the directories that neither the active deployment nor its most recent predecessor serve are removed (`ls -1`, `rm -rf`), like images; `delete` removes the application's directory and its upload. The proxy is found by its Compose labels (`com.docker.compose.project=shipwick`, `service=caddy`); an agent whose proxy is not that container fails the deployment with a sentence. The supervisor skips static applications: there is nothing to keep alive. Logs, metrics, jobs and one-off commands answer `STATIC_APPLICATION`. |
 | Restart policy | Docker's is set to `no`. Restarts belong to Shipwick's supervisor, which adds backoff, health awareness and crash-loop detection; two restart mechanisms would fight. |
 | Limits | `resources.cpu` → `NanoCPUs`; `resources.memory` → `Memory`, with `MemorySwap` equal to it so the limit is a hard cap. |
 | Hardening | Never privileged; `no-new-privileges`; no host mounts (named volumes only); nothing from `deploy.yaml` ever runs on the server itself. |
@@ -577,9 +647,16 @@ out `SQLITE_BUSY` and lock-upgrade deadlocks by construction.
 
 Tables: `applications`, `deployments`, `deployment_replicas`, `events`,
 `tokens`, `metric_samples`, `job_runs` (one row per run of a hook, job or one-off
-command, with the tail of its output; the last 50 per job are kept).
+command, with the tail of its output; the last 50 per job are kept), `secrets`
+(name, sealed value, timestamps).
 Migrations are an append-only list tracked in `PRAGMA user_version`.
 Timestamps are fixed-width UTC text, so they sort lexicographically.
+A static deployment records `static_digest`, `static_files` and `static_bytes`
+next to its spec: the folder it serves, which names its directory in the
+proxy. The archive itself waits in `<data>/uploads/<app>/<digest>.tar` between
+the upload and the deployment, one per application, with a `.json` note of
+what it holds; it is not state — the proxy's volume is — and the data
+directory is not what a backup of Shipwick needs to include for it.
 
 The spec of every deployment is stored with it (as JSON), which is what makes
 rollback "deploy the spec of an older record again" rather than a separate
@@ -612,6 +689,11 @@ the file remains debuggable; only the values are ciphertext.
   containers, and every code path that persists a spec is covered by the same
   two functions. A store on disk refuses to open without a key; only the
   in-memory database of the tests may go without.
+- The `secrets` table — the values behind `shipwick secret set` — uses the
+  same seal, with the secret's name as the additional data, so the same key
+  covers both, and a row moved to another name fails to open the same way.
+  Values leave the store by name only, to the engine (`GetSecrets`); the
+  listing query never selects the column.
 
 ## Authentication
 
@@ -639,6 +721,17 @@ anything still using this token?", for which the minute is plenty; written on
 every request, a dashboard polling every few seconds would turn every read
 into a write on the single connection.
 
+Failed authentications are counted per client address (`agent/internal/api/
+ratelimit.go`): 20 within a minute, and the address is answered `429
+RATE_LIMITED` for the next minute before its token is looked at. Only failures
+count. The address is the connection's, never `X-Forwarded-For`, which a
+caller could set to be counted under someone else's; the price is that
+behind Caddy every client shares the proxy's address, so the limit has to be
+one that honest use — a mistyped token, a dashboard polling — cannot reach,
+and successful requests are never counted. It is in memory, pruned once a
+minute, and is not meant to stop a determined attacker: a 256-bit token does
+that. It removes "nothing slows a guess down at all".
+
 Who did what is recorded where it is cheap and durable: the authenticated
 token's name travels in the request context (`deploy.WithActor`), each
 deployment stores it (`by` in the API), and stop and start events name it
@@ -651,3 +744,43 @@ the body. JSON works too, since YAML subsumes it. One parser and one validator
 (`pkg/spec`) serve both the CLI and the agent, so error messages are identical
 on both sides — and the agent validates again regardless, because client-side
 validation is a convenience, not a trust boundary.
+
+A `shipwick.yaml` — several applications in one file — is the CLI's concept
+alone. `spec.ParseMany` splits it into one `deploy.yaml` document per entry,
+validates each with the same `Parse`, and checks the `after` graph: known
+names, no cycles. The CLI then sends the documents as separate deployments, in
+dependency order, up to four at a time. The agent sees nothing new: each
+application keeps its own record, lock and rollback, and a failure in one
+cannot touch another. The parser lives in `pkg/spec` rather than in the CLI so
+that the agent could accept the file itself one day without a second
+implementation of its rules.
+
+`${NAME}` placeholders are the one part of the document two sides fill in. The
+CLI substitutes what its environment and `--env-file` know; whatever is left
+in `env` values travels as written and is substituted by the engine from the
+`secrets` table, at the start of `Deploy`, before the record exists. The
+record then holds the resolved values: a deployment is a fact about what ran,
+so a secret changed later reaches the next `deploy` and no redeploy or
+rollback — those re-use stored specs and resolve nothing. Only `env` values
+are resolved on the server, because only they are secrets; a `${TAG}` in
+`image` is the client's, and the CLI still refuses to send one it cannot fill.
+The two sides share one pattern (`spec.Placeholder`), and the CLI leaves
+`$${NAME}` in `env` values untouched for the agent to unescape, since a
+`${NAME}` it produced would look like a placeholder to the agent. A name
+neither side has is refused as `INVALID_CONFIG` with the variable as the
+field, so the CLI renders it like any other validation error.
+
+## Installing from the laptop
+
+`shipwick server install` is the installer run over SSH, not a second
+installer. The CLI runs the system `ssh` as a program with arguments
+(`os/exec`, never a shell) with `BatchMode=yes`, so that it fails rather than
+prompts, and every remote command is a fixed string of ours. The two hostnames
+and the version are the only values from the command line that reach the
+server; they pass the same `spec.ValidateDomain` the agent applies to
+`deploy.yaml`, and go in as environment assignments of the installer, which
+reads them as documented. The token is taken from the installer's summary and
+never read from `/opt/shipwick/.env`: the command has exactly the access of
+someone running the installer by hand. `shipwick doctor` resolves hostnames
+through the same public resolvers as the agent (see Routing); the CLI carries
+its own copy, since `agent/internal` cannot be imported.

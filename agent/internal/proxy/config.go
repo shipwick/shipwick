@@ -41,9 +41,14 @@ type Route struct {
 	// Upstreams are fixed "host:port" dial addresses, for what is not an
 	// application: the agent's own API, the dashboard.
 	Upstreams []string
-	// Streaming disables response buffering, for upstreams that stream
-	// (the agent's own log-follow endpoint).
+	// Streaming disables response buffering and compression, for upstreams
+	// that stream (the agent's own log-follow endpoint).
 	Streaming bool
+	// StaticRoot is a directory inside the proxy's own container whose files
+	// are served as they are: a static application. It is built from an
+	// application name and a digest, never from user-formatted text, and
+	// excludes Backends and Upstreams.
+	StaticRoot string
 }
 
 // Backend is a name that the ready replicas of an application share, and the
@@ -95,7 +100,7 @@ func render(adminListen string, routes []Route, markerID string) ([]byte, error)
 	for _, r := range routes {
 		caddyRoutes = append(caddyRoutes, obj{
 			"match":    []any{obj{"host": append([]string{r.Domain}, r.Aliases...)}},
-			"handle":   []any{handlerFor(r)},
+			"handle":   handlersFor(r),
 			"terminal": true,
 		})
 		if len(r.Redirects) > 0 {
@@ -175,7 +180,37 @@ func redirectTo(domain string) obj {
 	}
 }
 
+// handlersFor is the chain a route's requests go through: compression, then
+// the proxy. A route that nothing serves answers its 503 alone.
+func handlersFor(r Route) []any {
+	if r.StaticRoot == "" && len(r.Backends) == 0 && len(r.Upstreams) == 0 {
+		return []any{unavailable()}
+	}
+	if r.Streaming {
+		return []any{handlerFor(r)}
+	}
+	return []any{encode(), handlerFor(r)}
+}
+
+// encode compresses responses for clients that ask, with zstd or gzip, and
+// leaves alone what is small (under a kilobyte), already compressed, or not
+// text — Caddy's default set of content types. Streaming routes are not
+// compressed: the encoder holds back the first bytes of a response until it
+// knows the content type, and a log line that arrives late is worse than one
+// that arrives uncompressed.
+func encode() obj {
+	return obj{
+		"handler":        "encode",
+		"encodings":      obj{"zstd": obj{}, "gzip": obj{}},
+		"prefer":         []string{"zstd", "gzip"},
+		"minimum_length": 1024,
+	}
+}
+
 func handlerFor(r Route) obj {
+	if r.StaticRoot != "" {
+		return fileServer(r.StaticRoot)
+	}
 	if len(r.Backends) == 0 && len(r.Upstreams) == 0 {
 		return unavailable()
 	}
@@ -214,6 +249,18 @@ func handlerFor(r Route) obj {
 		h["flush_interval"] = -1
 	}
 	return h
+}
+
+// fileServer serves a directory of the proxy's own filesystem: the uploaded
+// folder of a static application. A request for a directory gets its
+// index.html; a path that names nothing is a 404, as it would be from any
+// web server — a single-page application's fallback route is not assumed.
+func fileServer(root string) obj {
+	return obj{
+		"handler":     "file_server",
+		"root":        root,
+		"index_names": []string{"index.html"},
+	}
 }
 
 // resolverFor asks Docker's DNS, for every request, who stands behind the
@@ -258,7 +305,7 @@ func normalize(routes []Route) []Route {
 		sort.Strings(aliases)
 		redirects := append([]string(nil), r.Redirects...)
 		sort.Strings(redirects)
-		out[i] = Route{Domain: r.Domain, Aliases: aliases, Redirects: redirects, Backends: backends, Upstreams: ups, Streaming: r.Streaming}
+		out[i] = Route{Domain: r.Domain, Aliases: aliases, Redirects: redirects, Backends: backends, Upstreams: ups, Streaming: r.Streaming, StaticRoot: r.StaticRoot}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
 	return out

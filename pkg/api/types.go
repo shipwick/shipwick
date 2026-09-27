@@ -102,6 +102,9 @@ type Application struct {
 	InFlightDeploymentID *int64    `json:"in_flight_deployment_id"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
+	// Static is true for an application the proxy serves from a folder: it has
+	// no containers, and Replicas are all zero.
+	Static bool `json:"static"`
 }
 
 type ReplicaCount struct {
@@ -162,6 +165,9 @@ type Deployment struct {
 	// By is the name of the token that started the deployment; absent for
 	// deployments recorded before tokens had names.
 	By string `json:"by,omitempty"`
+	// Static describes the uploaded folder of a static deployment; absent for
+	// a deployment that runs containers.
+	Static *StaticFiles `json:"static,omitempty"`
 }
 
 type DeploymentDetail struct {
@@ -441,3 +447,73 @@ type RunDetail struct {
 type RunRequest struct {
 	Command []string `json:"command"`
 }
+
+// Secrets kept on the server.
+
+// Secret is a stored secret as GET /secrets lists it: its name and when it
+// was set. The value is never returned.
+type Secret struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SetSecretRequest is the body of PUT /secrets/:name.
+type SetSecretRequest struct {
+	Value string `json:"value"`
+}
+
+// Images built where the developer runs shipwick deploy.
+
+// LoadedImage is the answer to POST /applications/:name/images: the image the
+// archive carried, now on the server, and how many bytes were received.
+type LoadedImage struct {
+	Image     string `json:"image"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+// Static applications: a folder served by the proxy, with no container.
+
+// CodeStaticApplication: logs, metrics, jobs and one-off commands were asked
+// of an application that is a folder served by the proxy; the answer is 409.
+const CodeStaticApplication = "STATIC_APPLICATION"
+
+// StaticUpload is the answer to PUT /applications/:name/static: the archive
+// as the agent received it, and what was in it.
+type StaticUpload struct {
+	Digest    string `json:"digest"`     // sha256:<64 hex characters> of the archive
+	SizeBytes int64  `json:"size_bytes"` // the files' sizes added up
+	Files     int    `json:"files"`
+}
+
+// StaticFiles describes the folder a static deployment serves; the same
+// numbers as its upload. Deployment.Static carries it for static deployments
+// and is absent for the others.
+type StaticFiles struct {
+	Digest    string `json:"digest"`
+	SizeBytes int64  `json:"size_bytes"`
+	Files     int    `json:"files"`
+}
+
+// Volumes of deleted applications, and rate limiting.
+
+// VolumeInfo is a volume Shipwick created, whether or not the application it
+// belongs to still exists.
+type VolumeInfo struct {
+	Name        string `json:"name"`        // Docker's name: shipwick_<application>_<volume>
+	Application string `json:"application"` // the application it was created for
+	Volume      string `json:"volume"`      // the name in its deploy.yaml
+	SizeBytes   int64  `json:"size_bytes"`  // -1 when the daemon does not report it
+	// Orphan is true when the application has been deleted: the volume was
+	// kept on purpose, and removing it is now the operator's call.
+	Orphan bool `json:"orphan"`
+}
+
+const (
+	// CodeVolumeInUse means the volume belongs to an application that still
+	// exists; details: {application}.
+	CodeVolumeInUse = "VOLUME_IN_USE"
+	// CodeRateLimited means too many authentications from the caller's address
+	// failed within a minute; the Retry-After header says when to try again.
+	CodeRateLimited = "RATE_LIMITED"
+)

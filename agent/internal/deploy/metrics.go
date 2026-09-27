@@ -64,6 +64,9 @@ func (e *Engine) Metrics(ctx context.Context, name string) (api.Metrics, error) 
 	if err != nil {
 		return api.Metrics{}, err
 	}
+	if d.StaticDigest != "" {
+		return api.Metrics{}, ErrStaticApplication
+	}
 	replicas, err := e.store.ListReplicas(ctx, d.ID)
 	if err != nil {
 		return api.Metrics{}, err

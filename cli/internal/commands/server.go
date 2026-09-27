@@ -22,7 +22,7 @@ import (
 func (c *cli) serverCommand() *cobra.Command {
 	server := &cobra.Command{
 		Use:   "server",
-		Short: "Inspect the Shipwick server",
+		Short: "Inspect or install the Shipwick server",
 	}
 	server.AddCommand(&cobra.Command{
 		Use:   "status",
@@ -75,6 +75,7 @@ func (c *cli) serverCommand() *cobra.Command {
 			return nil
 		},
 	})
+	server.AddCommand(c.serverInstallCommand())
 	return server
 }
 

@@ -1,0 +1,45 @@
+# shipwick.yaml — several applications in one file.
+#
+# Every entry under `apps` is a complete deploy.yaml (see deploy.example.yaml
+# for every key) plus `after`: the names of the entries that must have deployed
+# before this one starts. `shipwick deploy` uses this file when there is no
+# deploy.yaml next to it, and deploys the applications whose dependencies are
+# done at the same time, up to four at once (--parallel N).
+#
+# ${NAME} placeholders work in every entry; names must be unique in the file.
+apps:
+  # Nothing to wait for: starts at once, together with `web`.
+  - name: postgres
+    image: postgres:17
+    port: 5432
+    env:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - name: data
+        path: /var/lib/postgresql/data
+    health:
+      tcp: 5432
+    deploy:
+      strategy: recreate
+
+  # Starts when `postgres` has deployed. If postgres fails, api is skipped and
+  # the command exits non-zero; web is not affected.
+  - name: api
+    image: ghcr.io/company/api:2.3.0
+    port: 8080
+    domain: api.example.com
+    env:
+      DATABASE_URL: postgres://app:${POSTGRES_PASSWORD}@postgres:5432/app
+    health:
+      path: /health
+    pre_deploy:
+      command: ["./migrate", "up"]
+    after: [postgres]
+
+  # Independent of the others: reaches the API at http://api:8080 whenever it
+  # is there, so it need not wait for it.
+  - name: web
+    image: ghcr.io/company/web:2.3.0
+    port: 3000
+    domain: example.com
+    redirects: [www.example.com]

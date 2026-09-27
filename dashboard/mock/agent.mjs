@@ -26,6 +26,17 @@
 // 1, "timeout" times out, anything else succeeds; failures add a `job` event.
 // A deployment with `pre_deploy` records the two hook steps and a hook run.
 //
+// Also: secrets (GET /secrets, PUT and DELETE /secrets/:name; a deploy whose
+// env refers to `${NAME}` of a secret that is not stored is refused with the
+// agent's INVALID_CONFIG shape), volumes of the whole server (GET /volumes
+// with `orphan` for a deleted application's, DELETE /volumes/:name → 204, 409
+// VOLUME_IN_USE, 404), static applications (PUT …/static takes a tar archive
+// and answers its digest; POST …/deploy?static=<digest> deploys a `static`
+// spec; logs, metrics, jobs and run answer 409 STATIC_APPLICATION), images
+// built by the CLI (POST …/images → 201; a `build` spec needs a
+// shipwick.local/ image), and 429 RATE_LIMITED after 20 failed
+// authentications within a minute from one address.
+//
 // Magic image tags for POST /applications/:name/redeploy {"image": ...}:
 //   *:fail      replica 1 crashes: FAILED, nothing of the old version was touched
 //   *:rollback  replica 1 is replaced, replica 2 crashes: FAILED → ROLLBACK →
@@ -44,7 +55,7 @@
 //                    with a domain produces the "No reverse proxy" warn step
 
 import { createServer } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 
 const PORT = Number(process.env.MOCK_PORT || 9100)
 const HOST = process.env.MOCK_HOST || '127.0.0.1'
@@ -93,6 +104,14 @@ const tokens = new Map()
 const runs = new Map()
 /** `${app}/${job}` → the minute the schedule was last looked at */
 const scheduleSeen = new Map()
+/** secret name → {created_at, updated_at}; the value is not kept, the API never returns it */
+const secrets = new Map()
+/** application name → the last static upload {digest, size_bytes, files}, one per application like the agent */
+const uploads = new Map()
+/** Volumes of deleted applications: kept on purpose, listed by GET /volumes with orphan: true */
+const orphanVolumes = []
+/** remote address → times of failed authentications within the last minute */
+const authFailures = new Map()
 
 let nextDeploymentId = 1
 let nextEventId = 1
@@ -127,16 +146,18 @@ function addApp(name, createdAt) {
 }
 
 // `by` is the token that started the deployment; null leaves it out, as the
-// agent does for deployments recorded before tokens had names.
-function addDeployment(app, sp, { status, startedAtMs, durationMs, error = '', events = [], kind = 'deploy', sourceId = null, by = 'root' }) {
+// agent does for deployments recorded before tokens had names. `files` is the
+// upload a static deployment serves: its version is the digest's first twelve
+// hex characters and it has no image.
+function addDeployment(app, sp, { status, startedAtMs, durationMs, error = '', events = [], kind = 'deploy', sourceId = null, by = 'root', files = null }) {
   const id = nextDeploymentId++
   const sequence = [...deployments.values()].filter(d => d.application === app.name).length + 1
   const d = {
     id,
     application: app.name,
     sequence,
-    version: tagOf(sp.image),
-    image: sp.image,
+    version: files ? files.digest.slice('sha256:'.length, 'sha256:'.length + 12) : tagOf(sp.image),
+    image: files ? '' : sp.image,
     status,
     error,
     started_at: iso(startedAtMs),
@@ -144,6 +165,7 @@ function addDeployment(app, sp, { status, startedAtMs, durationMs, error = '', e
     kind,
     source_deployment_id: sourceId,
     ...(by ? { by } : {}),
+    ...(files ? { static: { digest: files.digest, size_bytes: files.size_bytes, files: files.files } } : {}),
     spec: structuredClone(sp),
     events: [],
   }
@@ -162,9 +184,13 @@ const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`
 const replicaList = list => (list.length === 1 ? `Replica ${list[0]}` : `Replicas ${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`)
 const readyMessage = (sp, list) => (sp.health ? `${replicaList(list)} passed health checks` : `${replicaList(list)} running and stable`)
 const servingMessage = (i, n, version, previousVersion) => `Replica ${i}/${n} is serving ${version}; its ${previousVersion} predecessor is retired`
-const routedMessage = sp => (PROXY_ENABLED
-  ? ['step', `Routed https://${sp.domain} to ${plural(sp.replicas, 'replica')}`, 'info']
+const routedMessage = (sp, to = plural(sp.replicas, 'replica')) => (PROXY_ENABLED
+  ? ['step', `Routed https://${sp.domain} to ${to}`, 'info']
   : ['step', `No reverse proxy is configured, so ${sp.domain} is not being served. Set SHIPWICK_CADDY_ADMIN on the agent`, 'warn'])
+// An image under shipwick.local/ was built by the CLI and sent here; the agent never pulls it.
+const LOCAL_IMAGE_PREFIX = 'shipwick.local/'
+const isLocalImage = image => image.startsWith(LOCAL_IMAGE_PREFIX)
+const pulledMessage = sp => (isLocalImage(sp.image) ? `Using image ${sp.image}, sent from a developer's machine` : `Pulled image ${sp.image}`)
 
 /** Events of a finished successful deployment, for fixtures. Rolling when there was a previous version. */
 function successEvents(sp, previousVersion) {
@@ -172,7 +198,7 @@ function successEvents(sp, previousVersion) {
   const version = tagOf(sp.image)
   const events = [
     ['state', 'BUILDING', 'info', 50],
-    ['step', `Pulled image ${sp.image}`, 'info', 1900],
+    ['step', pulledMessage(sp), 'info', 1900],
     // The hook runs after the pull and before any replica is touched.
     ...(sp.pre_deploy ? [['step', 'Running pre-deploy command', 'info', 200], ['step', 'Pre-deploy command finished (12s)', 'info', 11800]] : []),
     ['state', 'STARTING', 'info', 20],
@@ -196,11 +222,33 @@ function successEvents(sp, previousVersion) {
   return events
 }
 
+/**
+ * Events of a finished static deployment: the folder is copied into the proxy
+ * (or found there already, on a redeploy or rollback), checked for index.html
+ * and routed. The agent's wording (agent/internal/deploy/static.go).
+ */
+function staticSuccessEvents(sp, files, alreadyThere = false, olderFolders = 0) {
+  const what = `${plural(files.files, 'file')} (${formatSize(files.size_bytes)})`
+  return [
+    ['state', 'BUILDING', 'info', 50],
+    ['step', alreadyThere ? `The proxy already has ${what}` : `Received ${what}`, 'info', 300],
+    ['state', 'STARTING', 'info', 20],
+    ...(alreadyThere ? [] : [['step', `Copied ${plural(files.files, 'file')} into the proxy`, 'info', 900]]),
+    ['state', 'HEALTH_CHECKING', 'info', 20],
+    ['step', 'Found index.html', 'info', 80],
+    ['state', 'HEALTHY', 'info', 20],
+    [...routedMessage(sp, 'the uploaded files'), 400],
+    ['state', 'ACTIVE', 'info', 40],
+    ...(olderFolders > 0 ? [['step', `Removed ${plural(olderFolders, 'folder')} of older versions`, 'info', 60]] : []),
+    ['step', 'Deployment successful', 'info', 30],
+  ]
+}
+
 /** A deployment whose first replica never came up: FAILED, nothing of the old version was touched. */
 function failureEvents(sp, reason, output) {
   return [
     ['state', 'BUILDING', 'info', 50],
-    ['step', `Pulled image ${sp.image}`, 'info', 1700],
+    ['step', pulledMessage(sp), 'info', 1700],
     ['state', 'STARTING', 'info', 20],
     ['step', 'Started 1 container', 'info', 600],
     ['state', 'HEALTH_CHECKING', 'info', 20],
@@ -215,7 +263,7 @@ function rolledBackEvents(sp, previousVersion, failedAt, reason, output) {
   const version = tagOf(sp.image)
   const events = [
     ['state', 'BUILDING', 'info', 50],
-    ['step', `Pulled image ${sp.image}`, 'info', 1800],
+    ['step', pulledMessage(sp), 'info', 1800],
     ['state', 'STARTING', 'info', 20],
   ]
   for (let i = 1; i < failedAt; i++) {
@@ -386,6 +434,7 @@ function seed() {
     const db = addApp('postgres', ago(20 * DAY))
     const dbSpec = spec('postgres', 'postgres:17', {
       port: 5432,
+      // The password is a secret kept on the server, filled in at deploy time; masked like every value here.
       env: { POSTGRES_USER: MASK, POSTGRES_PASSWORD: MASK, POSTGRES_DB: MASK },
       health: { tcp: 5432, interval: '10s', timeout: '3s', retries: 3 },
       resources: { memory_bytes: 2 * 1024 ** 3 },
@@ -495,6 +544,46 @@ function seed() {
   addToken('ci', 'deploy', startedAt - 20 * DAY, startedAt - 2 * HOUR)
   addToken('viewer', 'read', startedAt - 3 * DAY, null)
 
+  // Secrets: names and dates only. The database password was rotated once.
+  secrets.set('POSTGRES_PASSWORD', { created_at: ago(20 * DAY), updated_at: ago(6 * DAY) })
+  secrets.set('STRIPE_KEY', { created_at: ago(4 * HOUR), updated_at: ago(4 * HOUR) })
+
+  // A volume left behind by a deleted application, kept on purpose.
+  orphanVolumes.push({ name: 'shipwick_pgtest_data', application: 'pgtest', volume: 'data', size_bytes: 13631488 })
+
+  // A static application: a built frontend the proxy serves itself. No container, no replicas, no image.
+  {
+    const app = addApp('landing', ago(15 * DAY))
+    const sp = spec('landing', '', { domain: 'acme.example.com', redirects: ['www.acme.example.com'], static: { dir: 'dist' } })
+    const first = { digest: 'sha256:9c1d7e2a4b60f3d8a5e7c2b1904f6d3e8a7b5c4d2e1f0a9b8c7d6e5f4a3b2c1d', size_bytes: 2987654, files: 39 }
+    addDeployment(app, sp, { status: 'SUPERSEDED', startedAtMs: startedAt - 15 * DAY, durationMs: 2600, events: staticSuccessEvents(sp, first), by: 'ci', files: first })
+    const files = { digest: 'sha256:3f2a8b1c9d4e7f60a2b5c8d1e4f7a0b3c6d9e2f5a8b1c4d7e0f3a6b9c2d5e8f1', size_bytes: 3250000, files: 42 }
+    const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 3 * HOUR, durationMs: 2100, events: staticSuccessEvents(sp, files), by: 'ci', files })
+    app.active_deployment_id = active.id
+    app.updated_at = active.completed_at
+    uploads.set('landing', files)
+  }
+
+  // An application whose image is built by the CLI and sent here: no registry involved.
+  {
+    const app = addApp('shop', ago(9 * DAY))
+    const base = stamp => spec('shop', `${LOCAL_IMAGE_PREFIX}shop:${stamp}`, {
+      port: 3000,
+      domain: 'shop.example.com',
+      build: { context: '.', dockerfile: 'Dockerfile' },
+      env: { DATABASE_URL: MASK, SESSION_SECRET: MASK },
+      health: { path: '/healthz', interval: '10s', timeout: '3s', retries: 3 },
+      resources: { memory_bytes: 512 * 1024 ** 2 },
+    })
+    const first = base('20260918-091204-4e1a')
+    addDeployment(app, first, { status: 'SUPERSEDED', startedAtMs: startedAt - 9 * DAY, durationMs: 6100, events: successEvents(first, null), by: 'ci' })
+    const sp = base('20260926-141230-7c1e')
+    const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 26 * HOUR, durationMs: 6800, events: successEvents(sp, '20260918-091204-4e1a'), by: 'ci' })
+    app.active_deployment_id = active.id
+    app.updated_at = active.completed_at
+    app.containers = makeContainers(app, active)
+  }
+
   // DEPLOYING: first deployment in flight, waiting on a slow starter. It gives up after 15 minutes.
   {
     const app = addApp('billing', ago(90 * SECOND))
@@ -503,7 +592,8 @@ function seed() {
       domain: 'billing.example.com',
       replicas: 2,
       env: { STRIPE_KEY: MASK, DATABASE_URL: MASK },
-      health: { path: '/actuator/health', interval: '30s', timeout: '5s', retries: 30 },
+      // A JVM that takes its time: failed checks only count after the start period.
+      health: { path: '/actuator/health', interval: '30s', timeout: '5s', retries: 30, start_period: '2m0s' },
       resources: { cpu: 2, memory_bytes: 2 * 1024 ** 3 },
     })
     const d = addDeployment(app, sp, {
@@ -581,12 +671,15 @@ function isHealthy(c) {
   return c.state === 'running' && c.health !== 'unhealthy'
 }
 
+const isStaticSpec = sp => Boolean(sp?.static)
+
 function appSummary(app) {
   const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
   const flying = inFlight(app.name)
   // Mid-rollout, replica slots are filled by containers of two deployments: count slots, not containers.
   const own = active ? app.containers.filter(c => flying || c.deployment_id === active.id) : []
-  const desired = active ? active.spec.replicas : 0
+  // A static application has nothing to count: the proxy serves it, all three numbers are zero, and zero of zero is healthy.
+  const desired = active && !isStaticSpec(active.spec) ? active.spec.replicas : 0
   const running = new Set(own.filter(c => c.state === 'running').map(c => c.replica)).size
   const healthy = new Set(own.filter(isHealthy).map(c => c.replica)).size
 
@@ -612,6 +705,15 @@ function appSummary(app) {
     in_flight_deployment_id: flying ? flying.id : null,
     created_at: app.created_at,
     updated_at: app.updated_at,
+    static: isStaticSpec(active?.spec ?? flying?.spec),
+  }
+}
+
+/** The application is a folder the proxy serves: logs, metrics, jobs and commands do not apply. */
+function refuseStatic(app) {
+  const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+  if (isStaticSpec(active?.spec ?? inFlight(app.name)?.spec)) {
+    throw new HttpError(409, 'STATIC_APPLICATION', 'this application is a folder served by the proxy; it has no containers')
   }
 }
 
@@ -648,7 +750,8 @@ function pushDeploymentEvent(d, type, message, level = 'info') {
  * dies at replica 2, after replica 1 was replaced, so the retired replica of
  * the previous version is restored: FAILED → ROLLBACK → RESTORING → ROLLED_BACK.
  */
-function startDeployment(app, sp, { kind, sourceId, by }) {
+function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
+  if (isStaticSpec(sp)) return startStaticDeployment(app, sp, files, { kind, sourceId, by })
   const previous = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
   const d = addDeployment(app, sp, { status: 'PENDING', startedAtMs: Date.now(), durationMs: null, kind, sourceId, by })
   const tag = d.version
@@ -795,6 +898,44 @@ function startDeployment(app, sp, { kind, sourceId, by }) {
     pushDeploymentEvent(d, 'step', 'Deployment successful')
   })
   then(700, complete)
+  return d
+}
+
+/**
+ * A static deployment: no replicas, the folder is copied into the proxy (or is
+ * there already, on a redeploy or rollback), checked for index.html and routed.
+ * Containers of a previous container version are retired at the end.
+ */
+function startStaticDeployment(app, sp, files, { kind, sourceId, by }) {
+  const previous = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+  const d = addDeployment(app, sp, { status: 'PENDING', startedAtMs: Date.now(), durationMs: null, kind, sourceId, by, files })
+  // Folders are kept by digest: the serving version's and the one before it.
+  const kept = new Set([previous?.static?.digest, previous && deployments.get(previous.source_deployment_id)?.static?.digest].filter(Boolean))
+  const alreadyThere = kept.has(files.digest)
+  const olderFolders = Math.max(0, kept.size + (alreadyThere ? 0 : 1) - 2)
+  let clock = 0
+  for (const [type, message, level, dt] of staticSuccessEvents(sp, files, alreadyThere, olderFolders)) {
+    clock += dt
+    setTimeout(() => {
+      if (apps.get(app.name) !== app || d.completed_at) return
+      pushDeploymentEvent(d, type, message, level)
+      if (type !== 'state') return
+      d.status = message
+      if (message === 'ACTIVE') {
+        if (previous) previous.status = 'SUPERSEDED'
+        app.active_deployment_id = d.id
+        app.desired_state = 'running'
+        app.containers = []
+        endFollowers(app.name)
+        app.updated_at = iso(Date.now())
+      }
+    }, clock)
+  }
+  setTimeout(() => {
+    if (apps.get(app.name) !== app || d.completed_at) return
+    d.completed_at = iso(Date.now())
+    app.updated_at = d.completed_at
+  }, clock + 400)
   return d
 }
 
@@ -1285,7 +1426,42 @@ function parseSpec(name, body) {
   }
   const fields = []
   const problem = (field, message, expected) => fields.push({ field, message, ...(expected ? { expected } : {}) })
-  if (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image)) problem('image', 'is required', 'ghcr.io/org/app:1.0.0')
+
+  // A folder served by the proxy: a cleaned relative path, a domain, and nothing that describes a container.
+  let isStatic = false
+  if (body.static !== undefined && body.static !== null && body.static !== '') {
+    isStatic = true
+    const dir = String(body.static).trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+    if (dir === '' || dir === '.') problem('static', 'must name a folder below the project', 'dist')
+    else if (dir.startsWith('/') || dir.split('/').includes('..')) problem('static', 'must be a relative path inside the project', 'dist')
+    else body.static = dir
+    if (!body.domain) problem('domain', 'is required for a static application: the proxy serves it by hostname', 'www.example.com')
+    for (const key of ['image', 'build', 'port', 'env', 'health', 'resources', 'volumes', 'publish', 'entrypoint', 'command', 'user', 'logging', 'pre_deploy', 'jobs']) {
+      if (body[key] !== undefined && body[key] !== null) problem(key, 'does not apply to a static application: the proxy serves the files, there is no container')
+    }
+    if (body.replicas !== undefined && body.replicas !== 1) problem('replicas', 'does not apply to a static application: the proxy serves the files, there is no container')
+  }
+
+  // Built where shipwick deploy runs: the document arrives with the shipwick.local/ image the agent was sent.
+  let build
+  if (!isStatic && body.build !== undefined && body.build !== null && body.build !== '') {
+    const raw = typeof body.build === 'string' ? { context: body.build } : body.build
+    build = { context: String(raw.context ?? '').trim() || undefined, dockerfile: String(raw.dockerfile ?? '').trim() || 'Dockerfile' }
+    if (!build.context) problem('build.context', 'is required', '.')
+    if (body.image === undefined || body.image === '') {
+      throw new HttpError(400, 'INVALID_REQUEST', 'image: this application is built where shipwick deploy runs and sent to the server first; the agent never builds. Run shipwick deploy from the project')
+    }
+    if (typeof body.image === 'string' && !isLocalImage(body.image)) problem('image', `must be tagged ${LOCAL_IMAGE_PREFIX}${name}:<tag> when build is set; shipwick deploy does that`, `${LOCAL_IMAGE_PREFIX}${name}:20260927-153000-a1b2`)
+  }
+  if (!isStatic && (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image))) problem('image', 'is required', 'ghcr.io/org/app:1.0.0')
+
+  // `${NAME}` in an env value is filled in from the secrets kept here; a name that is not stored refuses the whole document.
+  for (const [variable, value] of Object.entries(body.env ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    const missing = [...new Set([...String(value ?? '').matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(m => m[1]))].filter(n => !secrets.has(n)).sort()
+    for (const secret of missing) {
+      problem(`env.${variable}`, `refers to \${${secret}}, which is not set where shipwick runs and not stored on the server`, `shipwick secret set ${secret}`)
+    }
+  }
 
   const hosts = (field, list) => {
     if (list === undefined) return undefined
@@ -1322,7 +1498,13 @@ function parseSpec(name, body) {
       for (const [i, arg] of command.entries()) if (arg === '') problem(`health.command[${i}]`, 'must not be empty', '["pg_isready", "-U", "postgres"]')
       h.command = command
     }
-    health = { ...(h.path ? { path: h.path } : {}), ...(h.tcp ? { tcp: h.tcp } : {}), ...(h.command ? { command: h.command } : {}), interval: h.interval ?? '10s', timeout: h.timeout ?? '3s', retries: h.retries ?? 3 }
+    if (h.start_period !== undefined && h.start_period !== '' && h.start_period !== 0) {
+      const period = typeof h.start_period === 'string' ? parseDuration(h.start_period) : null
+      if (period === null || period > 30 * MINUTE) problem('health.start_period', `invalid value ${JSON.stringify(h.start_period)}`, '30s, 1m, 5m, ... (up to 30m)')
+      else h.start_period = formatGoDuration(period)
+    }
+    else delete h.start_period
+    health = { ...(h.path ? { path: h.path } : {}), ...(h.tcp ? { tcp: h.tcp } : {}), ...(h.command ? { command: h.command } : {}), interval: h.interval ?? '10s', timeout: h.timeout ?? '3s', retries: h.retries ?? 3, ...(h.start_period ? { start_period: h.start_period } : {}) }
   }
 
   let publish
@@ -1343,7 +1525,18 @@ function parseSpec(name, body) {
   }
 
   if (fields.length > 0) throw configError(fields)
+  if (isStatic) {
+    return spec(name, '', {
+      domain,
+      ...(aliases?.length ? { aliases } : {}),
+      ...(redirects?.length ? { redirects } : {}),
+      static: { dir: body.static },
+      restart: body.restart ?? { policy: 'always' },
+      deploy: body.deploy ?? { strategy: 'rolling' },
+    })
+  }
   return spec(name, body.image, {
+    ...(build ? { build } : {}),
     ...(body.port ? { port: body.port } : {}),
     ...(domain ? { domain } : {}),
     ...(aliases?.length ? { aliases } : {}),
@@ -1361,6 +1554,24 @@ function parseSpec(name, body) {
     restart: body.restart ?? { policy: 'always' },
     deploy: body.deploy ?? { strategy: 'rolling' },
   })
+}
+
+/** A Go duration ("1m30s", "500ms", "2h") in milliseconds; null when it is not one. */
+function parseDuration(text) {
+  if (!/^(\d+(\.\d+)?(ms|s|m|h))+$/.test(text)) return null
+  const units = { ms: 1, s: SECOND, m: MINUTE, h: HOUR }
+  let total = 0
+  for (const [, n, , unit] of text.matchAll(/(\d+(\.\d+)?)(ms|s|m|h)/g)) total += Number(n) * units[unit]
+  return total
+}
+
+/** Milliseconds as Go prints a duration: 90s → "1m30s", 2m → "2m0s", 500ms → "500ms". */
+function formatGoDuration(ms) {
+  if (ms < SECOND) return `${ms}ms`
+  const h = Math.floor(ms / HOUR)
+  const m = Math.floor((ms % HOUR) / MINUTE)
+  const s = (ms % MINUTE) / SECOND
+  return `${h ? `${h}h` : ''}${h || m ? `${m}m` : ''}${s}s`
 }
 
 const hostnamesOf = sp => [...(sp.domain ? [sp.domain] : []), ...(sp.aliases ?? []), ...(sp.redirects ?? [])]
@@ -1508,24 +1719,97 @@ async function readJSON(req, allowed) {
 /**
  * Reads an archive upload: the content type must say tar, the first block
  * must be a tar header, and the rest is counted, not kept. Answers the size.
+ * `what` names the thing for the size limit's message; the digest and the
+ * file count are what a static upload is answered with.
  */
-async function readArchive(req) {
+async function readArchive(req, { limit = 10 * 1024 ** 3, what = 'the archive', wrongType = 'the body must be a tar archive sent as Content-Type: application/x-tar' } = {}) {
   const [type] = String(req.headers['content-type'] ?? '').split(';')
-  if (type.trim() !== 'application/x-tar') {
-    throw new HttpError(400, 'INVALID_REQUEST', 'the body must be a tar archive sent as Content-Type: application/x-tar')
-  }
-  if (Number(req.headers['content-length'] ?? 0) > 10 * 1024 ** 3) throw new HttpError(413, 'INVALID_REQUEST', 'the archive exceeds 10 GB')
+  if (type.trim() !== 'application/x-tar') throw new HttpError(400, 'INVALID_REQUEST', wrongType)
+  const tooLarge = () => new HttpError(413, 'INVALID_REQUEST', `${what} exceeds ${formatSize(limit).replace('.0', '')}`)
+  if (Number(req.headers['content-length'] ?? 0) > limit) throw tooLarge()
+  const hash = createHash('sha256')
   let size = 0
-  let head = Buffer.alloc(0)
+  let files = 0
+  let fileBytes = 0
+  // Walk the headers: a file entry's data follows it, padded to 512 bytes.
+  let offset = 0
+  let skip = 0
+  let pending = Buffer.alloc(0)
   for await (const chunk of req) {
     size += chunk.length
-    if (head.length < 512) head = Buffer.concat([head, chunk]).subarray(0, 512)
-    if (size > 10 * 1024 ** 3) throw new HttpError(413, 'INVALID_REQUEST', 'the archive exceeds 10 GB')
+    if (size > limit) throw tooLarge()
+    hash.update(chunk)
+    pending = Buffer.concat([pending, chunk])
+    while (pending.length >= 512) {
+      if (skip > 0) {
+        const take = Math.min(skip, pending.length - (pending.length % 512))
+        if (take === 0) break
+        pending = pending.subarray(take)
+        skip -= take
+        offset += take
+        continue
+      }
+      const header = pending.subarray(0, 512)
+      pending = pending.subarray(512)
+      offset += 512
+      if (header.every(b => b === 0)) continue
+      if (offset === 512 && header.toString('ascii', 257, 262) !== 'ustar') throw new HttpError(400, 'INVALID_REQUEST', `${what} is not a tar file`)
+      const entrySize = parseInt(header.toString('ascii', 124, 136).replace(/\0.*$/, '').trim() || '0', 8)
+      const kind = header.toString('ascii', 156, 157)
+      if (kind === '0' || kind === '\0' || kind === '') {
+        files++
+        fileBytes += entrySize
+      }
+      skip = Math.ceil(entrySize / 512) * 512
+    }
   }
-  if (head.length < 512 || head.toString('ascii', 257, 262) !== 'ustar') {
-    throw new HttpError(400, 'INVALID_REQUEST', 'the archive is not a tar file')
+  if (offset < 512) throw new HttpError(400, 'INVALID_REQUEST', `${what} is not a tar file`)
+  return { size, files, fileBytes, digest: `sha256:${hash.digest('hex')}` }
+}
+
+/** A volume's Docker name, shipwick_<application>_<volume>, taken apart; null when it is not one. */
+function parseVolumeName(name) {
+  const m = /^shipwick_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$/.exec(name ?? '')
+  return m ? { application: m[1], volume: m[3] } : null
+}
+
+/** Every volume on the server: those of existing applications' active deployments, and the kept ones of deleted applications. */
+function managedVolumes() {
+  const list = [...orphanVolumes.map(v => ({ ...v, orphan: true }))]
+  for (const app of apps.values()) {
+    const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+    for (const v of active?.spec.volumes ?? []) {
+      // The database's volume holds data; anything else has been created but not written to, which the daemon reports as no size.
+      const size = app.name === 'postgres' ? 2684354560 : -1
+      list.push({ name: `shipwick_${app.name}_${v.name}`, application: app.name, volume: v.name, size_bytes: size, orphan: false })
+    }
   }
-  return size
+  return list.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
+
+function requireSecretName(name) {
+  if (!SECRET_NAME.test(name ?? '')) {
+    throw new HttpError(400, 'INVALID_REQUEST', `invalid secret name ${JSON.stringify(name)}: letters, digits and underscores, not starting with a digit, at most 64 characters`)
+  }
+}
+
+/** Failed authentications per address: the 21st within a minute is refused for a minute without looking at the token. */
+const AUTH_FAILURE_LIMIT = 20
+
+function rateLimited(address) {
+  const now = Date.now()
+  const recent = (authFailures.get(address) ?? []).filter(t => now - t < MINUTE)
+  authFailures.set(address, recent)
+  if (recent.length < AUTH_FAILURE_LIMIT) return 0
+  return Math.max(1, Math.ceil((recent[recent.length - 1] + MINUTE - now) / SECOND))
+}
+
+function recordAuthFailure(address) {
+  const list = authFailures.get(address) ?? []
+  list.push(Date.now())
+  authFailures.set(address, list)
 }
 
 function requireApp(name) {
@@ -1567,6 +1851,8 @@ const ROUTES = {
   'GET /applications/:p/volumes': 'read',
   'GET /applications/:p/volumes/:x/archive': 'admin',
   'PUT /applications/:p/volumes/:x/archive': 'admin',
+  'PUT /applications/:p/static': 'deploy',
+  'POST /applications/:p/images': 'deploy',
   'GET /applications/:p/jobs': 'read',
   'GET /applications/:p/runs': 'read',
   'GET /applications/:p/runs/:x': 'read',
@@ -1578,6 +1864,11 @@ const ROUTES = {
   'GET /tokens': 'admin',
   'POST /tokens': 'admin',
   'DELETE /tokens/:p': 'admin',
+  'GET /secrets': 'read',
+  'PUT /secrets/:p': 'admin',
+  'DELETE /secrets/:p': 'admin',
+  'GET /volumes': 'read',
+  'DELETE /volumes/:p': 'admin',
 }
 
 async function handle(req, res) {
@@ -1590,7 +1881,7 @@ async function handle(req, res) {
   }
 
   const segments = path.startsWith('/api/v1/') ? path.split('/').filter(Boolean).slice(2).map(decodeURIComponent) : []
-  const collection = ['applications', 'deployments', 'tokens'].includes(segments[0])
+  const collection = ['applications', 'deployments', 'tokens', 'secrets', 'volumes'].includes(segments[0])
   const route = `${method} /${segments.map((s, i) => (collection && i === 1 ? ':p' : collection && i === 3 && ['volumes', 'runs', 'jobs'].includes(segments[2]) ? ':x' : s)).join('/')}`
   const param = segments[1]
   const required = ROUTES[route]
@@ -1599,8 +1890,16 @@ async function handle(req, res) {
     // The agent has no such operation, as opposed to NOT_FOUND: unknown application or deployment.
     return sendError(res, 404, 'ENDPOINT_NOT_FOUND', `no such endpoint: ${method} ${path}`)
   }
+  // Too many failed authentications from this address: refused for a minute, the token not even looked at.
+  const address = req.socket.remoteAddress ?? ''
+  const retryAfter = rateLimited(address)
+  if (retryAfter > 0) {
+    res.setHeader('retry-after', String(retryAfter))
+    return sendError(res, 429, 'RATE_LIMITED', 'too many failed authentications from this address; try again in a minute')
+  }
   const who = identify(req.headers.authorization)
   if (!who) {
+    recordAuthFailure(address)
     res.setHeader('www-authenticate', 'Bearer realm="shipwick"')
     return sendError(res, 401, 'UNAUTHORIZED', 'missing or invalid API token')
   }
@@ -1640,9 +1939,12 @@ async function handle(req, res) {
       const app = requireApp(param)
       requireIdle(app)
       endFollowers(app.name)
+      // The volumes stay, on purpose: GET /volumes lists them as orphans until someone removes them.
+      for (const v of managedVolumes()) if (v.application === app.name && !v.orphan) orphanVolumes.push({ name: v.name, application: v.application, volume: v.volume, size_bytes: v.size_bytes })
       apps.delete(app.name)
       appEvents.delete(app.name)
       logBuffers.delete(app.name)
+      uploads.delete(app.name)
       for (const d of [...deployments.values()]) if (d.application === app.name) deployments.delete(d.id)
       for (const r of [...runs.values()]) if (r.application === app.name) runs.delete(r.id)
       res.writeHead(204)
@@ -1652,12 +1954,23 @@ async function handle(req, res) {
     case 'POST /applications/:p/deploy': {
       // The dashboard never deploys a raw spec; the CLI would. JSON only: see the header.
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
+      const digest = url.searchParams.get('static')
+      if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new HttpError(400, 'INVALID_REQUEST', 'static: must be the digest PUT …/static answered, sha256:<64 hex characters>')
       const body = await readJSON(req, null)
       const sp = parseSpec(param, body)
+      let files = null
+      if (isStaticSpec(sp)) {
+        if (digest === null) throw new HttpError(400, 'INVALID_REQUEST', `static: the folder ${sp.static.dir}/ has not been uploaded for this deployment; upload it with PUT /applications/${param}/static first and pass its digest as ?static=`)
+        files = uploads.get(param)?.digest === digest ? uploads.get(param) : null
+        if (!files) throw new HttpError(404, 'NOT_FOUND', 'no files were uploaded for this deployment: run shipwick deploy from the project')
+      }
+      else if (digest !== null) {
+        throw new HttpError(400, 'INVALID_REQUEST', 'static: this deploy.yaml describes a container; ?static= is for a static application')
+      }
       const app = apps.get(param) ?? addApp(param, iso(Date.now()))
       requireIdle(app)
       checkConflicts(app, sp)
-      const d = startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name })
+      const d = startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name, files })
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -1668,14 +1981,18 @@ async function handle(req, res) {
       const active = requireActive(app)
       const sp = structuredClone(active.spec)
       if (body.image !== undefined && body.image !== '') {
+        if (isStaticSpec(sp)) throw new HttpError(400, 'INVALID_REQUEST', 'image: a static application has no image; to serve other files, deploy the folder again')
         if (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image)) {
           throw new HttpError(400, 'INVALID_REQUEST', `image: invalid reference ${JSON.stringify(body.image)}`)
+        }
+        if (sp.build && !isLocalImage(body.image)) {
+          throw new HttpError(400, 'INVALID_REQUEST', 'image: this application is built by shipwick deploy; run it from the project to deploy a new image, or remove build from deploy.yaml')
         }
         sp.image = body.image
       }
       // A stored configuration's hostnames and ports may have been taken since.
       checkConflicts(app, sp)
-      const d = startDeployment(app, sp, { kind: 'redeploy', sourceId: active.id, by: who.name })
+      const d = startDeployment(app, sp, { kind: 'redeploy', sourceId: active.id, by: who.name, files: active.static ?? null })
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -1696,7 +2013,7 @@ async function handle(req, res) {
       const target = wanted ? candidates.find(d => d.id === wanted) : candidates[0]
       if (!target) throw new HttpError(409, 'NO_ROLLBACK_TARGET', 'no earlier successful deployment to roll back to')
       checkConflicts(app, target.spec)
-      const d = startDeployment(app, structuredClone(target.spec), { kind: 'rollback', sourceId: target.id, by: who.name })
+      const d = startDeployment(app, structuredClone(target.spec), { kind: 'rollback', sourceId: target.id, by: who.name, files: target.static ?? null })
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -1731,6 +2048,7 @@ async function handle(req, res) {
 
     case 'GET /applications/:p/metrics/history': {
       const app = requireApp(param)
+      refuseStatic(app)
       const since = url.searchParams.get('since') || '1h'
       if (!HISTORY_WINDOWS[since]) throw new HttpError(400, 'INVALID_REQUEST', 'since must be 1h, 24h or 7d')
       return sendJSON(res, 200, metricsHistory(app, since))
@@ -1742,8 +2060,33 @@ async function handle(req, res) {
       return sendJSON(res, 200, (active.spec.volumes ?? []).map(v => ({ name: v.name, path: v.path })))
     }
 
-    case 'GET /applications/:p/jobs':
-      return sendJSON(res, 200, jobsView(requireApp(param)))
+    case 'PUT /applications/:p/static': {
+      const app = requireApp(param)
+      requireIdle(app)
+      const archive = await readArchive(req, {
+        limit: 512 * 1024 ** 2,
+        what: 'the folder',
+        wrongType: 'the body must be a tar archive of the folder sent as Content-Type: application/x-tar',
+      })
+      if (archive.files === 0) throw new HttpError(400, 'INVALID_REQUEST', 'the folder holds no files')
+      const files = { digest: archive.digest, size_bytes: archive.fileBytes, files: archive.files }
+      uploads.set(app.name, files)
+      return sendJSON(res, 200, files)
+    }
+
+    case 'POST /applications/:p/images': {
+      if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
+      const archive = await readArchive(req, { limit: 4 * 1024 ** 3, what: 'the image' })
+      // The archive's own tag is not read here; the CLI stamps the image the same way.
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
+      return sendJSON(res, 201, { image: `${LOCAL_IMAGE_PREFIX}${param}:${stamp}-${randomHex(4)}`, size_bytes: archive.size })
+    }
+
+    case 'GET /applications/:p/jobs': {
+      const app = requireApp(param)
+      refuseStatic(app)
+      return sendJSON(res, 200, jobsView(app))
+    }
 
     case 'GET /applications/:p/runs': {
       const app = requireApp(param)
@@ -1766,6 +2109,7 @@ async function handle(req, res) {
       const app = requireApp(param)
       const name = segments[3]
       if (!JOB_NAME.test(name ?? '')) throw new HttpError(400, 'INVALID_REQUEST', 'job: lowercase letters, digits and dashes only')
+      refuseStatic(app)
       requireIdle(app)
       const active = requireActive(app)
       const job = (active.spec.jobs ?? []).find(j => j.name === name)
@@ -1781,6 +2125,7 @@ async function handle(req, res) {
       const app = requireApp(param)
       const body = await readJSON(req, ['command'])
       validateCommand(body.command)
+      refuseStatic(app)
       requireIdle(app)
       const active = requireActive(app)
       const run = startRun(app, active, { job: 'run', kind: 'manual', command: body.command, timeout: '10m0s' })
@@ -1808,12 +2153,51 @@ async function handle(req, res) {
       if (app.desired_state !== 'stopped' || app.containers.some(c => c.state === 'running')) {
         throw new HttpError(409, 'APPLICATION_RUNNING', 'the application is running; stop it first with: shipwick stop')
       }
-      const size = await readArchive(req)
+      const { size } = await readArchive(req)
       // The replica is created again around the fresh volume, and stays stopped.
       const active = requireActive(app)
       app.containers = makeContainers(app, active, { 1: { state: 'created', started_at: null, health: active.spec.health ? 'unknown' : '' } })
       app.updated_at = iso(Date.now())
       addAppEvent(app.name, 'info', 'app', `Volume ${volume.name} restored from a backup (${formatSize(size)})`)
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /secrets':
+      return sendJSON(res, 200, [...secrets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, s]) => ({ name, ...s })))
+
+    case 'PUT /secrets/:p': {
+      requireSecretName(param)
+      const body = await readJSON(req, ['value'])
+      if (typeof body.value !== 'string' || body.value === '') throw new HttpError(400, 'INVALID_REQUEST', 'value is required and must not be empty')
+      if (body.value.includes('\0')) throw new HttpError(400, 'INVALID_REQUEST', 'value must not contain a NUL byte')
+      if (!secrets.has(param) && secrets.size >= 500) throw new HttpError(400, 'INVALID_REQUEST', 'at most 500 secrets can be stored; remove one first')
+      const now = iso(Date.now())
+      // The value is neither kept nor echoed: only that it was set, and when.
+      secrets.set(param, { created_at: secrets.get(param)?.created_at ?? now, updated_at: now })
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'DELETE /secrets/:p': {
+      requireSecretName(param)
+      if (!secrets.delete(param)) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /volumes':
+      return sendJSON(res, 200, managedVolumes())
+
+    case 'DELETE /volumes/:p': {
+      const parsed = parseVolumeName(param)
+      if (!parsed) throw new HttpError(400, 'INVALID_REQUEST', `invalid volume name ${JSON.stringify(param)}: Shipwick names its volumes shipwick_<application>_<volume>`)
+      const found = managedVolumes().find(v => v.name === param)
+      if (!found) throw new HttpError(404, 'NOT_FOUND', 'no volume by that name is managed by Shipwick; list them with: shipwick volumes')
+      if (!found.orphan) {
+        throw new HttpError(409, 'VOLUME_IN_USE', `the volume belongs to application ${found.application}; delete the application first — its data stays until the volume is removed`, { application: found.application })
+      }
+      orphanVolumes.splice(orphanVolumes.findIndex(v => v.name === param), 1)
       res.writeHead(204)
       return res.end()
     }
@@ -1852,12 +2236,14 @@ async function handle(req, res) {
 
     case 'GET /applications/:p/metrics': {
       const app = requireApp(param)
+      refuseStatic(app)
       requireActive(app)
       return sendJSON(res, 200, metrics(app))
     }
 
     case 'GET /applications/:p/logs': {
       const app = requireApp(param)
+      refuseStatic(app)
       const follow = boolParam(url, 'follow')
       if (app.containers.length === 0) throw new HttpError(409, 'NOT_DEPLOYED', `${app.name} has no containers`)
       if (!follow) {

@@ -39,12 +39,13 @@ type raw struct {
 	Replicas  *int              `yaml:"replicas"`
 	Env       map[string]string `yaml:"env"`
 	Health    *struct {
-		Path     string   `yaml:"path"`
-		TCP      *int     `yaml:"tcp"`
-		Command  []string `yaml:"command"`
-		Interval string   `yaml:"interval"`
-		Timeout  string   `yaml:"timeout"`
-		Retries  *int     `yaml:"retries"`
+		Path        string   `yaml:"path"`
+		TCP         *int     `yaml:"tcp"`
+		Command     []string `yaml:"command"`
+		Interval    string   `yaml:"interval"`
+		Timeout     string   `yaml:"timeout"`
+		Retries     *int     `yaml:"retries"`
+		StartPeriod string   `yaml:"start_period"`
 	} `yaml:"health"`
 	Resources struct {
 		CPU    string `yaml:"cpu"`
@@ -77,6 +78,8 @@ type raw struct {
 		Driver  string            `yaml:"driver"`
 		Options map[string]string `yaml:"options"`
 	} `yaml:"logging"`
+	Build   buildRaw `yaml:"build"`
+	Static  string   `yaml:"static"`
 	Restart struct {
 		Policy string `yaml:"policy"`
 	} `yaml:"restart"`
@@ -214,7 +217,9 @@ func (r raw) validate() (App, error) {
 	}
 
 	if app.Image == "" {
-		verr.add("image", "is required", "ghcr.io/company/my-api:1.4.2")
+		if r.Static == "" && r.Build.Context == "" {
+			verr.add("image", "is required", "ghcr.io/company/my-api:1.4.2")
+		}
 	} else if err := ValidateImage(app.Image); err != nil {
 		verr.add("image", err.Error(), "nginx:1.27, ghcr.io/company/my-api:1.4.2, ...")
 	}
@@ -230,7 +235,7 @@ func (r raw) validate() (App, error) {
 		if err := ValidateDomain(app.Domain); err != nil {
 			verr.add("domain", err.Error(), "api.example.com")
 		}
-		if r.Port == nil {
+		if r.Port == nil && r.Static == "" {
 			verr.add("port", "is required when domain is set", "the port your application listens on, e.g. 8080")
 		}
 	}
@@ -283,6 +288,8 @@ func (r raw) validate() (App, error) {
 	app.Entrypoint, app.Command, app.User = r.validateProcess(verr)
 	app.PreDeploy, app.Jobs = r.validateJobs(verr)
 	app.Logging = r.validateLogging(verr)
+	app.Build = r.validateBuild(verr)
+	app.Static = r.validateStatic(verr, app)
 	app.Volumes = r.validateVolumes(verr)
 	if len(app.Volumes) > 0 {
 		// Two versions writing the same files at once is how data gets lost.
@@ -427,6 +434,13 @@ func (r raw) validateHealth(verr *ValidationError) *Health {
 			verr.add("health.retries", fmt.Sprintf("invalid value %d", *r.Health.Retries), "a number between 1 and 100")
 		}
 		h.Retries = *r.Health.Retries
+	}
+	if v := r.Health.StartPeriod; v != "" {
+		d, err := parseDuration(v, 0, 30*time.Minute)
+		if err != nil {
+			verr.add("health.start_period", err.Error(), "30s, 1m, 5m, ... (up to 30m)")
+		}
+		h.StartPeriod = Duration(d)
 	}
 	return h
 }

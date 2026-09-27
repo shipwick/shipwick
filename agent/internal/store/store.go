@@ -198,6 +198,21 @@ var migrations = []string{
 		finished_at    TEXT
 	);
 	CREATE INDEX job_runs_job ON job_runs(application_id, job, id);`,
+	// 8: secrets kept on the server, for ${NAME} in env values. The value is
+	// encrypted like an env value is (crypto.go), with the name bound to it.
+	`CREATE TABLE secrets (
+		name       TEXT PRIMARY KEY,
+		value      BLOB NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
+	// 9: what a static application's deployment serves: the digest of the
+	// uploaded archive, which names its directory in the proxy, and the count
+	// and size of the files in it. Empty and zero for deployments that run
+	// containers.
+	`ALTER TABLE deployments ADD COLUMN static_digest TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE deployments ADD COLUMN static_files INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE deployments ADD COLUMN static_bytes INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

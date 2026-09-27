@@ -31,7 +31,7 @@ export function agentUrl(path: string, query?: Record<string, QueryValue>): stri
 export function useAgent() {
   const session = useSession()
 
-  async function send(method: 'GET' | 'POST' | 'DELETE', path: string, options: AgentRequestOptions = {}): Promise<Response> {
+  async function send(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, options: AgentRequestOptions = {}): Promise<Response> {
     const headers: Record<string, string> = { ...REQUEST_HEADERS }
     let body: string | undefined
     if (options.body !== undefined) {
@@ -63,7 +63,7 @@ export function useAgent() {
     return response
   }
 
-  async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, options?: AgentRequestOptions): Promise<T> {
+  async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, options?: AgentRequestOptions): Promise<T> {
     const response = await send(method, path, options)
     if (response.status === 204) return undefined as T
     try {
@@ -83,6 +83,8 @@ export function useAgent() {
   return {
     get: <T>(path: string, options?: AgentRequestOptions) => request<T>('GET', path, options),
     post: <T>(path: string, options?: AgentRequestOptions) => request<T>('POST', path, options),
+    /** For a JSON body that creates or replaces (a secret); archives are not uploaded from the browser. */
+    put: (path: string, options?: AgentRequestOptions) => request<void>('PUT', path, options),
     del: (path: string, options?: AgentRequestOptions) => request<void>('DELETE', path, options),
     /** For NDJSON: resolves with the raw response once headers arrive; errors are thrown as for any request. */
     stream: (path: string, options?: AgentRequestOptions) => send('GET', path, options),

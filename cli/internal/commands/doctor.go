@@ -1,0 +1,333 @@
+package commands
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/shipwick/shipwick/cli/internal/client"
+	"github.com/shipwick/shipwick/cli/internal/ui"
+	"github.com/shipwick/shipwick/pkg/api"
+	"github.com/shipwick/shipwick/pkg/version"
+)
+
+func (c *cli) doctorCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check the setup end to end and say what to fix",
+		Long: `Check the setup end to end: the versions of this shipwick and of the agent,
+whether the agent answers and accepts the token, Docker and the proxy on the
+server, ports 80 and 443, and for every application with a domain whether DNS
+points at the server and https://<domain>/ answers.
+
+Each line says what to do about it. The command exits non-zero when something
+is broken (✗), not for things merely worth a look (!).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return c.doctor(cmd.Context())
+		},
+	}
+}
+
+// report counts what doctor found, so the end of the screen can sum it up.
+type report struct {
+	c               *cli
+	problems, hints int
+}
+
+func (r *report) ok(format string, args ...any) { r.c.ui.Success(format, args...) }
+
+func (r *report) hint(format string, args ...any) {
+	r.hints++
+	r.c.ui.Println(r.c.ui.Styled(ui.Yellow, "!") + " " + fmt.Sprintf(format, args...))
+}
+
+func (r *report) problem(format string, args ...any) {
+	r.problems++
+	r.c.ui.Failure(format, args...)
+}
+
+// finish sums up and turns problems into a non-zero exit; the lines above
+// already said everything.
+func (r *report) finish() error {
+	r.c.ui.Println()
+	switch {
+	case r.problems == 0 && r.hints == 0:
+		r.c.ui.Println("Everything checks out.")
+	case r.problems == 0:
+		r.c.ui.Println(fmt.Sprintf("No problems; %s worth a look.", plural(r.hints, "thing")))
+	default:
+		r.c.ui.Println(fmt.Sprintf("%s found.", plural(r.problems, "problem")))
+		return ErrReported
+	}
+	return nil
+}
+
+// release reports where a version stands against the latest release. The
+// lookup may have failed; that is one word on the line, not an error.
+func (r *report) release(what, current, latest, upgrade string) {
+	switch {
+	case latest == "":
+		r.ok("%s %s (could not check for a newer release)", what, current)
+	case !parses(current):
+		r.ok("%s %s, a development build; the latest release is %s", what, current, latest)
+	case version.Compare(current, latest) < 0:
+		r.hint("%s %s; %s is available. Upgrade with: %s", what, current, latest, upgrade)
+	default:
+		r.ok("%s %s, the latest release", what, current)
+	}
+}
+
+func (c *cli) doctor(ctx context.Context) error {
+	r := &report{c: c}
+	local := c.local.withDefaults()
+
+	latest := c.latestReleaseQuietly(ctx)
+	r.release("shipwick", c.upgrade.withDefaults().version, latest, "shipwick upgrade")
+
+	target, err := c.resolve()
+	if err != nil {
+		r.problem("%s", strings.ReplaceAll(err.Error(), "\n\n", ". "))
+		return r.finish()
+	}
+	cl, err := client.New(target.URL, target.Token)
+	if err != nil {
+		r.problem("%s", err)
+		return r.finish()
+	}
+	health, err := cl.Health(ctx)
+	if err != nil {
+		r.problem("The agent at %s cannot be reached: %s. Is it running? A remote server is reached over HTTPS at its hostname, or through a tunnel: ssh -L 9000:127.0.0.1:9000 user@server",
+			c.describeServer(cl.URL()), cause(err))
+		return r.finish()
+	}
+	r.release("Agent "+c.describeServer(cl.URL())+" runs", health.Version, latest, installerCommand+" (on the server)")
+
+	info, err := cl.Server(ctx)
+	switch {
+	case client.IsCode(err, api.CodeUnauthorized):
+		r.problem("The agent rejected the API token. Save a valid one with: shipwick login")
+		return r.finish()
+	case err != nil:
+		r.problem("The agent did not answer GET /server: %s", cause(err))
+		return r.finish()
+	case info.Token.Name != "":
+		r.ok("Token %s (%s)", info.Token.Name, info.Token.Role)
+	default:
+		r.ok("Token accepted")
+	}
+	if info.DockerVersion != "" {
+		r.ok("Docker %s on the server", info.DockerVersion)
+	} else {
+		r.hint("The agent did not report a Docker version; see: shipwick server status")
+	}
+	switch p := info.Proxy; {
+	case !p.Enabled:
+		r.hint("Proxy not configured: domains are not served. Set SHIPWICK_CADDY_ADMIN on the agent")
+	case !p.Reachable:
+		r.problem("Proxy unreachable: %s. Check the caddy container on the server: docker logs shipwick-caddy-1", p.Error)
+	default:
+		r.ok("Proxy serving %s", plural(p.Routes, "domain"))
+	}
+
+	serverAddrs := c.serverAddresses(ctx, r, local, cl.URL())
+	for _, port := range []int{80, 443} {
+		if len(serverAddrs) == 0 {
+			break
+		}
+		address := net.JoinHostPort(serverAddrs[0], strconv.Itoa(port))
+		if err := local.dial(ctx, address); err != nil {
+			r.problem("Port %d is not reachable on %s: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443", port, serverAddrs[0])
+			continue
+		}
+		r.ok("Port %d open on %s", port, serverAddrs[0])
+	}
+
+	apps, err := cl.Applications(ctx)
+	if err != nil {
+		r.problem("The applications could not be listed: %s", cause(err))
+		return r.finish()
+	}
+	for _, app := range apps {
+		if app.Domain == "" {
+			continue
+		}
+		hostnames := append(append([]string{app.Domain}, app.Aliases...), app.Redirects...)
+		for _, h := range hostnames {
+			c.checkDNS(ctx, r, local, h, serverAddrs)
+		}
+		c.checkHTTPS(ctx, r, local, app)
+	}
+	return r.finish()
+}
+
+// serverAddresses learns the server's addresses from the agent's own
+// hostname: that is what every application's DNS must point at. Through a
+// tunnel the agent is 127.0.0.1, and the server's address stays unknown.
+func (c *cli) serverAddresses(ctx context.Context, r *report, local localOptions, agentURL string) []string {
+	u, err := url.Parse(agentURL)
+	if err != nil {
+		return nil
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	switch {
+	case host == "localhost", ip != nil && ip.IsLoopback():
+		r.hint("The agent is reached through %s (a tunnel, or this machine), so the server's public address is not known: ports and DNS targets are not checked", host)
+		return nil
+	case ip != nil:
+		return []string{host}
+	}
+	addrs, err := local.lookupHost(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		r.problem("%s, the agent's hostname, does not resolve, yet the agent answered: DNS may be set only on this machine. Create an A record for it, DNS only (not proxied)", host)
+		return nil
+	}
+	r.ok("%s → %s", host, strings.Join(addrs, ", "))
+	return addrs
+}
+
+func (c *cli) checkDNS(ctx context.Context, r *report, local localOptions, hostname string, serverAddrs []string) {
+	addrs, err := local.lookupHost(ctx, hostname)
+	var dnsErr *net.DNSError
+	switch {
+	case errors.As(err, &dnsErr) && dnsErr.IsNotFound, err == nil && len(addrs) == 0:
+		if len(serverAddrs) > 0 {
+			r.problem("%s does not resolve. Create an A record %s → %s, DNS only (not proxied)", hostname, hostname, serverAddrs[0])
+		} else {
+			r.problem("%s does not resolve. Create an A record for it pointing at the server, DNS only (not proxied)", hostname)
+		}
+	case err != nil:
+		r.hint("%s could not be looked up: %s", hostname, cause(err))
+	case len(serverAddrs) > 0 && !overlap(addrs, serverAddrs):
+		r.problem("%s → %s, which is not the server (%s). Point the record at the server; if it is proxied through a CDN, turn the proxy off (DNS only)",
+			hostname, strings.Join(addrs, ", "), strings.Join(serverAddrs, ", "))
+	default:
+		r.ok("%s → %s", hostname, strings.Join(addrs, ", "))
+	}
+}
+
+func (c *cli) checkHTTPS(ctx context.Context, r *report, local localOptions, app api.Application) {
+	address := "https://" + app.Domain + "/"
+	// A redirect is an answer too; what it points at is the application's
+	// business.
+	noFollow := *local.http
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+	if err != nil {
+		r.problem("%s: %s", address, err)
+		return
+	}
+	req.Header.Set("User-Agent", "shipwick/"+version.Version)
+	resp, err := noFollow.Do(req)
+	if err != nil {
+		var certErr *tls.CertificateVerificationError
+		if errors.As(err, &certErr) {
+			r.problem("%s has no valid certificate yet: %s. Caddy obtains one on the first request once DNS points at the server; try again in a minute", address, cause(certErr.Err))
+			return
+		}
+		r.problem("%s does not answer: %s", address, cause(err))
+		return
+	}
+	resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusBadGateway, resp.StatusCode == http.StatusServiceUnavailable:
+		r.hint("%s answers HTTP %d: the proxy is up, but %s is not answering behind it. Look at: shipwick logs %s", address, resp.StatusCode, app.Name, app.Name)
+	case resp.StatusCode >= 500:
+		r.hint("%s answers HTTP %d. Look at: shipwick logs %s", address, resp.StatusCode, app.Name)
+	default:
+		r.ok("%s answers HTTP %d", address, resp.StatusCode)
+	}
+}
+
+// latestReleaseQuietly is `upgrade --check`'s lookup for a screen that must
+// not wait on GitHub: a few seconds, and "" when it did not answer.
+func (c *cli) latestReleaseQuietly(ctx context.Context) string {
+	opts := c.upgrade
+	if opts.http == nil {
+		opts.http = &http.Client{Timeout: 5 * time.Second}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tag, err := opts.withDefaults().latestRelease(ctx)
+	if err != nil {
+		return ""
+	}
+	return tag
+}
+
+// cause is an error in one line, for a line that already says where.
+func cause(err error) string {
+	var unreachable *client.UnreachableError
+	if errors.As(err, &unreachable) {
+		err = unreachable.Err
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	// Windows' socket errors end in a period; the sentence around them has
+	// its own.
+	return strings.TrimSuffix(strings.SplitN(err.Error(), "\n", 2)[0], ".")
+}
+
+func overlap(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// publicResolvers are asked before the system's: a record that exists at
+// Cloudflare, Google and Quad9 exists for the visitors, whatever this
+// machine's own resolver still remembers.
+var publicResolvers = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
+
+// publicLookupHost resolves host through the public resolvers, believing the
+// first that knows it and "no such host" from all of them; when none can be
+// reached, the system's resolver decides.
+func publicLookupHost(ctx context.Context, host string) ([]string, error) {
+	var notFound, unreachable error
+	for _, server := range publicResolvers {
+		r := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 2 * time.Second}
+				return d.DialContext(ctx, network, server)
+			},
+		}
+		addrs, err := r.LookupHost(ctx, host)
+		if err == nil && len(addrs) > 0 {
+			return addrs, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			notFound = err
+			continue
+		}
+		unreachable = err
+	}
+	if notFound != nil {
+		return nil, notFound
+	}
+	if unreachable != nil {
+		return net.DefaultResolver.LookupHost(ctx, host)
+	}
+	return nil, &net.DNSError{Err: "no addresses", Name: host, IsNotFound: true}
+}

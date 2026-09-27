@@ -15,77 +15,134 @@ import (
 
 // A deploy.yaml may refer to values it must not contain: ${DATABASE_PASSWORD}
 // is replaced before the file is validated or sent, from the environment and
-// from --env-file. Only the ${NAME} form is recognized — a bare $NAME is left
-// alone, and $${NAME} yields a literal ${NAME}. A name that is set nowhere is
-// an error, never silently empty: an empty password is the worse surprise.
+// from --env-file. Only the ${NAME} form is recognized (spec.Placeholder) — a
+// bare $NAME is left alone, and $${NAME} yields a literal ${NAME}.
+//
+// Env values are the exception in two ways, because the agent fills them in
+// too, from the secrets stored on the server (`shipwick secret set`): a name
+// that is set nowhere here is left in place for the server rather than being
+// an error, and $${NAME} is left as it is, for the agent to turn into ${NAME}
+// — done here, the agent would take the result for a placeholder. Anywhere
+// else — an image tag, a command — a name that is set nowhere is an error,
+// never silently empty: an empty password is the worse surprise.
 //
 // Placeholders are looked for in values only, by walking the document: a
 // comment that explains ${NAME}, or a key, is not a reference.
-var placeholder = regexp.MustCompile(`\$(\$?)\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// expand substitutes placeholders in data. It returns the names substituted,
-// for the summary line, and never the values. A document that does not parse
-// is returned as it is, for spec.Parse to explain.
-func expand(data []byte, lookup func(string) (string, bool)) ([]byte, []string, error) {
+// placeholders is what expand did with a document's ${NAME} references. It
+// carries names only, never values.
+type placeholders struct {
+	substituted []string // filled in here, from the environment or --env-file
+	deferred    []string // env values left for the agent to fill in from its secrets
+}
+
+// note is the parenthesis after "Validated deploy.yaml".
+func (p placeholders) note() string {
+	var parts []string
+	if n := len(p.substituted); n > 0 {
+		parts = append(parts, plural(n, "variable")+" substituted")
+	}
+	if n := len(p.deferred); n > 0 {
+		if len(parts) == 0 {
+			parts = append(parts, plural(n, "variable")+" left to the server")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d left to the server", n))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+// expand substitutes placeholders in data. A document that does not parse is
+// returned as it is, for spec.Parse to explain.
+func expand(data []byte, lookup func(string) (string, bool)) ([]byte, placeholders, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil || doc.Kind != yaml.DocumentNode {
-		return data, nil, nil
+		return data, placeholders{}, nil
 	}
 	x := &expander{lookup: lookup, seen: map[string]bool{}}
-	x.walk(&doc, false)
+	for _, root := range doc.Content {
+		x.walkRoot(root)
+	}
 	if len(x.missing) > 0 {
 		sort.Strings(x.missing)
 		missing := unique(x.missing)
-		return nil, nil, fmt.Errorf("refers to %s, which %s not set\n\nSet %s in the environment, or in a file given with --env-file.",
+		return nil, placeholders{}, fmt.Errorf("refers to %s, which %s not set\n\nSet %s in the environment, or in a file given with --env-file. Only values under env can be left to the secrets on the server.",
 			quoteAll(missing), pluralIs(len(missing)), pluralIt(len(missing)))
 	}
 	if !x.changed {
-		return data, nil, nil
+		return data, x.placeholders, nil
 	}
 	out, err := yaml.Marshal(&doc)
 	if err != nil {
-		return nil, nil, err
+		return nil, placeholders{}, err
 	}
-	return out, x.used, nil
+	return out, x.placeholders, nil
 }
 
 type expander struct {
 	lookup  func(string) (string, bool)
 	seen    map[string]bool
-	used    []string
 	missing []string
 	changed bool
+	placeholders
 }
 
-func (x *expander) walk(n *yaml.Node, isKey bool) {
+// walkRoot walks the top-level mapping, where the env block is told apart:
+// its values are the ones the agent fills in from its secrets. In a
+// shipwick.yaml every entry of apps is such a mapping.
+func (x *expander) walkRoot(n *yaml.Node) {
+	if n.Kind != yaml.MappingNode {
+		x.walk(n, false)
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key, value := n.Content[i].Value, n.Content[i+1]
+		if key == "apps" && value.Kind == yaml.SequenceNode {
+			for _, entry := range value.Content {
+				x.walkRoot(entry)
+			}
+			continue
+		}
+		x.walk(value, key == "env")
+	}
+}
+
+func (x *expander) walk(n *yaml.Node, env bool) {
 	switch n.Kind {
-	case yaml.DocumentNode, yaml.SequenceNode:
+	case yaml.SequenceNode:
 		for _, c := range n.Content {
-			x.walk(c, false)
+			x.walk(c, env)
 		}
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			x.walk(n.Content[i+1], false)
+			x.walk(n.Content[i+1], env)
 		}
 	case yaml.ScalarNode:
-		if isKey || !placeholder.MatchString(n.Value) {
+		if !spec.Placeholder.MatchString(n.Value) {
 			return
 		}
-		n.Value = placeholder.ReplaceAllStringFunc(n.Value, func(match string) string {
-			m := placeholder.FindStringSubmatch(match)
+		n.Value = spec.Placeholder.ReplaceAllStringFunc(n.Value, func(match string) string {
+			m := spec.Placeholder.FindStringSubmatch(match)
 			if m[1] != "" {
+				if env {
+					return match
+				}
 				x.changed = true
 				return "${" + m[2] + "}"
 			}
 			value, ok := x.lookup(m[2])
 			if !ok {
-				x.missing = append(x.missing, m[2])
+				if env {
+					x.remember(&x.deferred, m[2])
+				} else {
+					x.missing = append(x.missing, m[2])
+				}
 				return match
 			}
-			if !x.seen[m[2]] {
-				x.seen[m[2]] = true
-				x.used = append(x.used, m[2])
-			}
+			x.remember(&x.substituted, m[2])
 			x.changed = true
 			return value
 		})
@@ -94,6 +151,15 @@ func (x *expander) walk(n *yaml.Node, isKey bool) {
 		n.Tag = "!!str"
 		n.Style = 0
 	}
+}
+
+// remember records a name once, in order of first appearance.
+func (x *expander) remember(names *[]string, name string) {
+	if x.seen[name] {
+		return
+	}
+	x.seen[name] = true
+	*names = append(*names, name)
 }
 
 // loadEnvFiles reads KEY=VALUE files, later files overriding earlier ones.
@@ -148,26 +214,39 @@ func (c *cli) lookup(files map[string]string) func(string) (string, bool) {
 }
 
 // loadConfig reads a deploy.yaml, substitutes its placeholders and validates
-// it. data is what is sent to the agent: complete, with nothing left to
-// resolve on the server.
-func (c *cli) loadConfig(path string, envFiles []string, image string) (data []byte, app spec.App, substituted []string, err error) {
+// it. data is what is sent to the agent: complete but for the env values the
+// server fills in from its secrets.
+func (c *cli) loadConfig(path string, envFiles []string, image string) (data []byte, app spec.App, vars placeholders, err error) {
 	data, err = readFile(path)
 	if err != nil {
-		return nil, spec.App{}, nil, err
+		return nil, spec.App{}, placeholders{}, err
 	}
 	files, err := loadEnvFiles(envFiles)
 	if err != nil {
-		return nil, spec.App{}, nil, err
+		return nil, spec.App{}, placeholders{}, err
 	}
-	data, substituted, err = expand(data, c.lookup(files))
+	data, vars, err = expand(data, c.lookup(files))
 	if err != nil {
-		return nil, spec.App{}, nil, fmt.Errorf("%s: %w", path, err)
+		return nil, spec.App{}, placeholders{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if image != "" {
 		data = overrideImage(data, image)
 	}
 	app, err = spec.Parse(data)
-	return data, app, substituted, err
+	return data, app, vars, err
+}
+
+// printDeferred says, under a validation summary, which env values the
+// server will fill in. It cannot say whether the server has them: that is
+// the deployment's first check.
+func (c *cli) printDeferred(vars placeholders) {
+	if len(vars.deferred) == 0 {
+		return
+	}
+	c.ui.Println()
+	for _, name := range vars.deferred {
+		c.ui.Println("  ${" + name + "} is not set here; the server fills it in from its secrets")
+	}
 }
 
 func unique(names []string) []string {

@@ -66,8 +66,14 @@ type App struct {
 	PreDeploy  *Hook    `json:"pre_deploy,omitempty"`
 	Jobs       []Job    `json:"jobs,omitempty"`
 	Logging    *Logging `json:"logging,omitempty"`
-	Restart    Restart  `json:"restart"`
-	Deploy     Deploy   `json:"deploy"`
+	// Build says where the image comes from when it is built on the developer's
+	// machine and sent to the server; Image is then filled in by the CLI.
+	Build *Build `json:"build,omitempty"`
+	// Static is a folder of files served by the proxy itself, with no container;
+	// such an application has no image, port or replicas.
+	Static  *Static `json:"static,omitempty"`
+	Restart Restart `json:"restart"`
+	Deploy  Deploy  `json:"deploy"`
 }
 
 // Volume is a named Docker volume mounted into every replica. It belongs to
@@ -88,6 +94,9 @@ type Health struct {
 	Interval Duration `json:"interval"`
 	Timeout  Duration `json:"timeout"`
 	Retries  int      `json:"retries"`
+	// StartPeriod is how long a replica may take before failed checks count,
+	// on top of interval × retries; zero means no extra time.
+	StartPeriod Duration `json:"start_period,omitempty"`
 }
 
 // Resources are per-replica limits. A zero value means "unlimited".
@@ -197,4 +206,17 @@ func (h Health) Kind() string {
 		return HealthTCP
 	}
 	return HealthHTTP
+}
+
+// Build describes an image built where the developer runs `shipwick deploy`
+// and sent to the server: the build context and, relative to it, the
+// Dockerfile.
+type Build struct {
+	Context    string `json:"context"`
+	Dockerfile string `json:"dockerfile"`
+}
+
+// Static is a folder served by the proxy as it is: a built frontend.
+type Static struct {
+	Dir string `json:"dir"` // relative to deploy.yaml, on the developer's machine
 }

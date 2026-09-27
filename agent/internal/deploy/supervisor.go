@@ -200,6 +200,9 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 		s.logErr(ctx, "load active deployment", err)
 		return
 	}
+	if d.StaticDigest != "" {
+		return // the proxy serves it from a folder: no replicas to keep alive
+	}
 	replicas, err := s.e.store.ListReplicas(ctx, d.ID)
 	if err != nil {
 		s.logErr(ctx, "list replicas", err)

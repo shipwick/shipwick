@@ -15,7 +15,7 @@ roles and a dashboard are included.
 ## Five minutes to a running application
 
 You need a Linux server with Docker, a domain whose DNS points at it, and a
-Docker image of your application.
+Dockerfile or an image of your application.
 
 **1. On the server**, as root:
 
@@ -39,6 +39,11 @@ Shipwick is running.
 It asks for two hostnames (one for the API, one for the dashboard), sets up
 three containers, and prints your API token once.
 
+Or from your laptop, once the CLI from step 2 is installed:
+`shipwick server install root@203.0.113.10 --agent-domain agent.example.com --dashboard-domain dashboard.example.com`
+runs the same installer over SSH, saves the token for you and prints the DNS
+records to create.
+
 **2. On your laptop:**
 
 ```bash
@@ -49,8 +54,11 @@ shipwick login --url https://agent.example.com           # asks for the token, s
 **3. In your project:**
 
 ```bash
-shipwick init
+shipwick init    # writes a Dockerfile and deploy.yaml for a Node, .NET, Go, Python or static project
 ```
+
+With `build: .` instead of `image:`, `shipwick deploy` builds the image on your
+machine and sends it to the server; no registry needed.
 
 ```yaml
 # deploy.yaml
@@ -102,53 +110,50 @@ Or open the dashboard: the same information, live, with the everyday actions.
 
 Every application reaches the others by name on the server: `postgres:5432`,
 `api:8080`. No domain is needed for that, and nothing outside the server can
-reach those names.
+reach those names. Several applications live in one `shipwick.yaml`:
 
 ```yaml
-# postgres/deploy.yaml
-name: postgres
-image: postgres:17
-port: 5432
-env:
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}   # filled in when you deploy, never in the file
-volumes:
-  - name: data
-    path: /var/lib/postgresql/data
-health:
-  tcp: 5432
-deploy:
-  strategy: recreate                        # a database cannot run twice
-```
+# shipwick.yaml
+apps:
+  - name: postgres
+    image: postgres:17
+    port: 5432
+    env:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}   # filled in when you deploy, never in the file
+    volumes:
+      - name: data
+        path: /var/lib/postgresql/data
+    health:
+      tcp: 5432
+    deploy:
+      strategy: recreate                        # a database cannot run twice
 
-```yaml
-# api/deploy.yaml
-name: api
-image: ghcr.io/company/api:2.3.0
-port: 8080
-domain: api.example.com
-env:
-  DATABASE_URL: postgres://app:${POSTGRES_PASSWORD}@postgres:5432/app
-health:
-  path: /health
-pre_deploy:
-  command: ["./migrate", "up"]              # runs from the new image before any replica starts
-```
+  - name: api
+    image: ghcr.io/company/api:2.3.0
+    port: 8080
+    domain: api.example.com
+    env:
+      DATABASE_URL: postgres://app:${POSTGRES_PASSWORD}@postgres:5432/app
+    health:
+      path: /health
+    pre_deploy:
+      command: ["./migrate", "up"]              # runs from the new image before any replica starts
+    after: [postgres]                           # not before the database is up
 
-```yaml
-# web/deploy.yaml
-name: web
-image: ghcr.io/company/web:2.3.0
-port: 3000
-domain: example.com
-redirects: [www.example.com]
+  - name: web
+    image: ghcr.io/company/web:2.3.0
+    port: 3000
+    domain: example.com
+    redirects: [www.example.com]
 ```
 
 ```bash
-echo 'POSTGRES_PASSWORD=…' > .env.production
-shipwick deploy -f postgres/deploy.yaml -f api/deploy.yaml -f web/deploy.yaml --env-file .env.production
+shipwick secret set POSTGRES_PASSWORD     # once; asked without echo, kept encrypted on the server
+shipwick deploy
 ```
 
-They deploy in that order; if one fails, the ones after it are not touched.
+`postgres` and `web` deploy at the same time, `api` once `postgres` is done.
+If one fails, what depends on it is skipped and the rest finishes.
 
 ## A new version, and back again
 

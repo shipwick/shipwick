@@ -24,6 +24,9 @@ const ITEMS: Item[] = [
   { to: '/deployments', label: 'Deployments', icon: 'deployments', match: p => p.startsWith('/deployments') },
   { to: '/servers', label: 'Servers', icon: 'servers', match: p => p.startsWith('/servers') },
   { to: '/logs', label: 'Logs', icon: 'logs', match: p => p.startsWith('/logs') },
+  // Every role may list volumes and secrets; changing them is admin's, and the pages say so.
+  { to: '/volumes', label: 'Volumes', icon: 'disk', match: p => p.startsWith('/volumes') },
+  { to: '/secrets', label: 'Secrets', icon: 'lock', match: p => p.startsWith('/secrets') },
   // Only once the role is known to be admin: a read-only token should not see the entry flash.
   { to: '/tokens', label: 'Tokens', icon: 'key', match: p => p.startsWith('/tokens'), admin: true },
 ]
