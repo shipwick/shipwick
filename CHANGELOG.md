@@ -8,6 +8,17 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-27
+
+Before 1.0 a minor version may change how things work under the hood. This one
+adds to the database and to the data directory. Upgrading is still running the
+installer again: the agent applies four migrations on its first start, creates
+`encryption.key` next to `shipwick.db` and encrypts the environment values of
+earlier deployments once. **Back up `encryption.key` with the database**;
+without it the database cannot be read. The token from the installer keeps
+working as the root token, application containers are not touched, and the
+compose file gains two optional variables for notifications.
+
 ### Added
 
 - **A hostname is served once its DNS points at the server.** Deploying before
@@ -232,7 +243,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/shipwick/shipwick/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/shipwick/shipwick/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/shipwick/shipwick/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/shipwick/shipwick/releases/tag/v0.1.0
