@@ -48,7 +48,7 @@ const errorTitle = computed(() => {
 <template>
   <div class="w-full max-w-[22rem]">
     <div class="mb-6 flex items-center gap-2">
-      <AppMark :size="20" />
+      <AppMark :size="20" compact />
       <span class="text-lg font-semibold tracking-tight">Shipwick</span>
     </div>
 

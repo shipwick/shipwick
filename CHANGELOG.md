@@ -8,6 +8,10 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard's mark and favicon are Wick, the project's mascot.
+
 ### Fixed
 
 - The installer's removal of earlier releases' images did nothing: it asked

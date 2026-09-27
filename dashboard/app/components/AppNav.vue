@@ -42,7 +42,7 @@ async function signOut() {
 <template>
   <div class="flex h-full flex-col">
     <NuxtLink to="/" class="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4" @click="emit('navigate')">
-      <AppMark />
+      <AppMark compact />
       <span class="text-base font-semibold tracking-tight">Shipwick</span>
     </NuxtLink>
 

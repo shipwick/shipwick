@@ -48,7 +48,7 @@ watch(() => route.fullPath, closeDrawer)
         <UiIcon name="menu" />
       </button>
       <NuxtLink to="/" class="flex items-center gap-2">
-        <AppMark :size="16" />
+        <AppMark :size="16" compact />
         <span class="text-base font-semibold tracking-tight">Shipwick</span>
       </NuxtLink>
     </header>
