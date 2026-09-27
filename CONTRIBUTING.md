@@ -8,6 +8,9 @@ welcome.
 
 Everyone taking part is expected to follow the
 [code of conduct](https://github.com/shipwick/.github/blob/main/CODE_OF_CONDUCT.md).
+Who decides what, and how one becomes a maintainer, is in
+[GOVERNANCE.md](GOVERNANCE.md). If you run Shipwick in production, add
+yourself to [ADOPTERS.md](ADOPTERS.md).
 
 ## Before you write code
 
