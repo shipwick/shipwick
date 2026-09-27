@@ -69,7 +69,7 @@ PackageName: Shipwick
 PackageUrl: https://shipwick.com
 License: Apache-2.0
 LicenseUrl: https://github.com/$REPO/blob/main/LICENSE
-ShortDescription: Deploy Docker applications to your own server, without Kubernetes
+ShortDescription: Production deployments on your own server
 Description: |-
   shipwick is the command-line client of Shipwick, which runs Docker applications on a single server: health checks, rolling deployments, rollbacks, resource limits and HTTPS from one small config file. This package installs the client; the server side is installed on the server itself.
 Moniker: shipwick
