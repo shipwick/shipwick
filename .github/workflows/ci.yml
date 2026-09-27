@@ -93,4 +93,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck -s sh scripts/*.sh
+        run: shellcheck -s sh scripts/*.sh packaging/winget/*.sh
