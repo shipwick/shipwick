@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-27
+
 ### Added
 
 - `build: .` in deploy.yaml, in place of `image`: `shipwick deploy` builds the
@@ -95,6 +97,14 @@ says so under **Changed** and explains how to upgrade.
 
 ### Changed
 
+- The database gains two migrations, applied when the 0.4 agent first starts:
+  the `secrets` table and the columns of static deployments. A 0.3 agent
+  refuses a database that has them, so upgrade with the installer and do not
+  go back. The 0.3 CLI keeps working against the 0.4 agent; the new commands
+  and `deploy.yaml` keys need the 0.4 CLI (`shipwick upgrade`).
+- The compose file gives Caddy a `caddy-static` volume for the folders of
+  static applications, so the upgrade recreates the Caddy container once:
+  connections open at that moment are reset, applications keep running.
 - The installer removes the agent and dashboard images of earlier releases
   after an upgrade; they used to stay behind, a few hundred megabytes per
   release.
@@ -362,7 +372,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/shipwick/shipwick/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/shipwick/shipwick/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/shipwick/shipwick/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/shipwick/shipwick/compare/v0.1.1...v0.2.0
