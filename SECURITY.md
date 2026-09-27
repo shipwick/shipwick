@@ -33,7 +33,7 @@ running the installer again.
 
 ## What counts
 
-The trust model is described in the [Security section of the README](README.md#12-security).
+The trust model is described in the [Security section of the handbook](docs/handbook.md#12-security).
 In short: **the API token is equivalent to root on the server, by design**, and
 Shipwick is not a multi-tenant sandbox.
 

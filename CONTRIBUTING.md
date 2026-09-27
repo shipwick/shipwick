@@ -30,7 +30,7 @@ What guides those answers:
   is a bug waiting to diverge.
 
 Out of scope, and likely to stay there: multi-node scheduling, building images,
-anything that requires an external service. The [roadmap](README.md#14-roadmap)
+anything that requires an external service. The [roadmap](ROADMAP.md)
 lists what may come.
 
 ## Getting started
@@ -41,7 +41,7 @@ Go 1.27+, Docker, and Node 24 for the dashboard.
 make dev    # dashboard :3000, agent :9000, Caddy :8080/:8443
 ```
 
-The [Development section of the README](README.md#13-development) covers the
+The [Development section of the handbook](docs/handbook.md#13-development) covers the
 rest, including running without `make` on Windows.
 [docs/architecture.md](docs/architecture.md) explains how the pieces fit and
 why they are the way they are — read the part you are about to change. The

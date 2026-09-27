@@ -104,7 +104,9 @@ a dashboard change, and the race detector for anything that touches
 
 ## Documentation
 
-Behavior users can see is documented in [README.md](README.md); keep it true.
+Behavior users can see is documented in [docs/handbook.md](docs/handbook.md),
+the complete description; [README.md](README.md) is the short guide. Keep both
+true.
 User-visible changes get a line under *Unreleased* in
 [CHANGELOG.md](CHANGELOG.md). Measured numbers in the docs were measured; do not
 invent new ones. The public documentation at shipwick.com is a separate
