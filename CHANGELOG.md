@@ -8,6 +8,23 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- The installer removes the agent and dashboard images of earlier releases
+  after an upgrade; they used to stay behind, a few hundred megabytes per
+  release.
+
+### Fixed
+
+- An empty `entrypoint` or `command` argument (`command: ""`) is refused instead
+  of being handed to Docker as an empty argument.
+- After a rollback, and after `shipwick start`, a replica that had just passed
+  its health check could be reported as `starting` — and the application as
+  `DOWN` — until the supervisor's next probe. A passed check now counts at once.
+- `shipwick restore --volume nope` and `shipwick jobs logs` for an unknown job
+  said the server did not know the application; they now say what was not
+  found.
+
 ## [0.3.1] - 2026-09-27
 
 Found on a real server the day 0.3.0 shipped. Upgrade by running the installer

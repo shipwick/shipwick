@@ -822,8 +822,10 @@ address per replica that carries the name, and Caddy asks it for every request.
   added latency, through 18 consecutive rolling redeploys: 15,774 of 15,774
   requests answered, 0 reloads.
 - **No healthy replica, or `shipwick stop`:** the domain answers `503` rather
-  than timing out, and keeps its certificate. An address no application serves
-  answers `404`.
+  than timing out, and keeps its certificate. A hostname nothing serves has no
+  certificate, so an HTTPS connection to it fails before any answer, and plain
+  HTTP is redirected to HTTPS first; a request that does get through with an
+  unknown hostname answers `404`.
 - **One hostname, one application.** A second application claiming a hostname
   in use — as its domain, an alias or a redirect — is refused as a config error
   before anything is started.

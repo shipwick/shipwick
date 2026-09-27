@@ -56,6 +56,9 @@ Expected behavior — not vulnerabilities:
   containers through Docker, or otherwise controlling the server;
 - anyone with access to the Docker socket, the agent's data directory or
   Caddy's admin socket doing the same;
+- an application container reaching the agent's API over the `shipwick`
+  network: the agent is on that network for health checks, and the API asks
+  for the token there like anywhere else (documented; on the roadmap);
 - root on the server reading the encryption key next to the database, or env
   values through `docker inspect` (documented in the README);
 - exposing port 9000 to the internet against the documentation's advice.

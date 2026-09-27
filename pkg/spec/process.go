@@ -63,7 +63,10 @@ func validateArgv(verr *ValidationError, field string, args []string, example st
 		return nil
 	}
 	for i, arg := range args {
-		if strings.ContainsAny(arg, "\x00\r\n") {
+		switch {
+		case arg == "":
+			verr.add(fmt.Sprintf("%s[%d]", field, i), "must not be empty", example)
+		case strings.ContainsAny(arg, "\x00\r\n"):
 			verr.add(fmt.Sprintf("%s[%d]", field, i), "must not contain newlines or NUL bytes", "")
 		}
 	}

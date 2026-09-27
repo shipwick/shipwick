@@ -254,6 +254,11 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 		case api.CodeEndpointNotFound:
 			return "The agent does not know this operation — it is probably older than this shipwick.\n\nCompare versions with: shipwick server status"
 		case api.CodeNotFound:
+			// The bare "not found" is an unknown application; anything more
+			// specific — a volume, a job, a run — says what it is.
+			if apiErr.Message != "" && apiErr.Message != "not found" {
+				return "Error: " + apiErr.Message
+			}
 			return "The server does not know that application.\n\nList what it runs with: shipwick ps"
 		case api.CodeNotDeployed:
 			return "This application has no successful deployment yet.\n\nDeploy it with: shipwick deploy"

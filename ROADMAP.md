@@ -101,6 +101,11 @@ with contexts; the dashboard should too, one sign-in per server.
 **Roles per application.** A token that may deploy one application and read
 the others.
 
+**The API reachable only from the proxy and the dashboard.** Application
+containers share the `shipwick` network with the agent, which needs it for
+health checks, so today they can reach the API and try tokens against it. The
+agent should answer only the proxy, the dashboard and the server itself.
+
 **Log archiving.** A run's output and a replica's last log lines kept beyond
 the container's life, searchable from the dashboard.
 

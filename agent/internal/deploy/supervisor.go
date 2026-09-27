@@ -602,3 +602,17 @@ func shortDuration(d time.Duration) string {
 	}
 	return s
 }
+
+// markHealthy records that a replica has just answered its health check —
+// during a deployment or a rollback — so that the views do not call it
+// "starting", and the application DOWN, until the next scheduled probe.
+func (s *supervisor) markHealthy(containerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.states[containerID]
+	if !ok {
+		st = &replicaState{}
+		s.states[containerID] = st
+	}
+	st.health, st.failures = api.HealthHealthy, 0
+}

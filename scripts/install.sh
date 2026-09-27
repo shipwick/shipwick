@@ -314,6 +314,19 @@ install_server() {
     print_summary
 }
 
+# prune_old_images removes the Shipwick images of earlier releases. Every
+# upgrade leaves the previous agent and dashboard images behind, a few hundred
+# megabytes each; the running ones and anything else on the server are kept.
+prune_old_images() {
+    keep="$(docker compose config --images 2>/dev/null)"
+    removed=0
+    for image in $(docker images --format '{{.Repository}}:{{.Tag}}' 'ghcr.io/shipwick/agent' 'ghcr.io/shipwick/dashboard' 2>/dev/null); do
+        case " $keep " in *" $image "*) continue ;; esac
+        docker image rm "$image" >/dev/null 2>&1 && removed=$((removed + 1))
+    done
+    [ "$removed" -eq 0 ] || step "Removed $removed image(s) of earlier Shipwick releases"
+}
+
 print_summary() {
     agent_domain="$(sed -n 's/^SHIPWICK_AGENT_DOMAIN=//p' "$INSTALL_DIR/.env")"
     dashboard_domain="$(sed -n 's/^SHIPWICK_DASHBOARD_DOMAIN=//p' "$INSTALL_DIR/.env")"

@@ -21,6 +21,16 @@ func TestProcessOverrides(t *testing.T) {
 		t.Errorf("omitted: %+v, %v", app, err)
 	}
 
+	// An empty string would be an empty argument, which no image expects.
+	for _, doc := range []string{
+		"name: api\nimage: app:1\nentrypoint: \"\"\n",
+		"name: api\nimage: app:1\ncommand: [\"node\", \"\"]\n",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+			t.Errorf("empty argument accepted: %v", err)
+		}
+	}
+
 	// A string is one argument, spaces and all: there is no shell to split it.
 	app, err = Parse([]byte("name: api\nimage: app:1\ncommand: serve --port 8080\n"))
 	if err != nil || len(app.Command) != 1 || app.Command[0] != "serve --port 8080" {

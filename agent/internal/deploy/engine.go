@@ -538,7 +538,11 @@ func (e *Engine) awaitHealthy(ctx context.Context, d *store.Deployment, replicas
 				}
 				lastErr[r.Index] = err
 				stillPending = append(stillPending, r)
+				continue
 			}
+			// The supervisor may still call it "starting" from a restart on
+			// request; it has just answered, and the status must say so.
+			e.sup.markHealthy(c.ID)
 		}
 		pending = stillPending
 		if len(pending) == 0 {

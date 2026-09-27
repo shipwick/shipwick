@@ -101,6 +101,11 @@ func TestRecreateRollsBackByStartingTheOldContainerAgain(t *testing.T) {
 	if app.ActiveDeploymentID == nil || *app.ActiveDeploymentID != v1.ID {
 		t.Errorf("active deployment = %v, want %d", app.ActiveDeploymentID, v1.ID)
 	}
+	// The restored replica passed its health check a moment ago; the status
+	// must not call the application DOWN until the supervisor's next probe.
+	if view, err := s.engine.Application(context.Background(), "web"); err != nil || view.Status != api.AppHealthy || view.Replicas.Healthy != 1 {
+		t.Errorf("after the rollback the view says %s with %d healthy (err %v), want HEALTHY 1", view.Status, view.Replicas.Healthy, err)
+	}
 }
 
 func TestVolumesAreTheApplicationsAndOutliveDeployments(t *testing.T) {
