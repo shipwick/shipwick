@@ -27,13 +27,13 @@ of static files — and writes a Dockerfile, a `.dockerignore` and a
 `deploy.yaml` that work as they are. `static: dist/` serves a built frontend
 straight from the proxy, with no container at all.
 
-**Secrets kept on the server.** `shipwick secret set my-api DATABASE_PASSWORD`
+**Secrets kept on the server.** `shipwick secret set DATABASE_PASSWORD`
 stores a value on the server, encrypted like environment values are, and
 `${DATABASE_PASSWORD}` in `deploy.yaml` is filled in by the agent. The
 `--env-file` on every laptop and in every pipeline becomes optional.
 
 **Installing the server from the laptop.** `shipwick server install
-root@203.0.113.10 --domain example.com` connects over SSH, installs Docker if
+root@203.0.113.10 --agent-domain agent.example.com` connects over SSH, installs Docker if
 it is missing, runs the installer, saves the token as a context, and prints
 the DNS records to create. Nothing to type on the server.
 
@@ -48,7 +48,6 @@ has one file to read. `-f` repeated stays.
 
 **Faster deployments.** Independent applications of one command deploy at the
 same time, not one after the other; `after:` in the file says which must wait.
-Image transfer sends only the layers the server does not have.
 
 **Small things that remove a question.** `shipwick deploy` in a directory
 without a `deploy.yaml` starts `init` instead of failing. `shipwick doctor`

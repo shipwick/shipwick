@@ -15,8 +15,8 @@ ones below it:
 
 | Role | May |
 |---|---|
-| `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics |
-| `deploy` | And change what runs: `deploy`, `redeploy`, `rollback`, `stop`, `start` |
+| `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics, jobs and their runs, volumes, the names of `/secrets` |
+| `deploy` | And change what runs: `deploy`, `redeploy`, `rollback`, `stop`, `start`, `run`, starting a job, sending an image or a static folder |
 | `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints, setting and removing `/secrets` |
 
 There are two kinds of token. The **root token** is the one the agent is
@@ -290,7 +290,7 @@ three things, and any client may do the same:
    application lock. `201`:
 
    ```json
-   {"data": {"image": "shipwick.local/my-api:20260927-153000-a1b2", "size_bytes": 267078442}}
+   {"data": {"image": "shipwick.local/my-api:20260927-153000-a1b2", "size_bytes": 68800000}}
    ```
 
 3. `POST /applications/:name/deploy` with `image` set to that reference. A

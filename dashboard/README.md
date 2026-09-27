@@ -346,6 +346,8 @@ it does not buffer responses, or followed logs will arrive in bursts.
 - **Roles are enforced by the agent**, not here. Hiding or disabling a control
   for a `read` or `deploy` token is a courtesy; a request the role does not
   cover is answered `403` by the agent whatever the page does.
-- Not included: login rate limiting (put it in the reverse proxy; the token is
-  at least 16 random characters). Accounts are the agent's named tokens with
-  roles; the dashboard has none of its own.
+- Sign-in attempts are limited by the agent, not here: after 20 failed
+  authentications within a minute from the dashboard server's address, wrong
+  tokens are answered `429 RATE_LIMITED`, which the login page shows as such.
+  Accounts are the agent's named tokens with roles; the dashboard has none of
+  its own.

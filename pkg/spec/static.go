@@ -17,7 +17,7 @@ func (r raw) validateStatic(verr *ValidationError, app App) *Static {
 	}
 	dir, problem := cleanStaticDir(r.Static)
 	if problem != "" {
-		verr.add("static", problem, "dist/, build, out/public — a folder relative to deploy.yaml")
+		verr.add("static", problem, "dist/, build/, out/ — a folder relative to deploy.yaml")
 	}
 	if app.Domain == "" {
 		verr.add("domain", "is required for a static application: the proxy serves the files at it", "example.com")
