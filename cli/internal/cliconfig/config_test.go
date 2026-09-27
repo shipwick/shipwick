@@ -98,8 +98,8 @@ func TestResolveSelectsAContext(t *testing.T) {
 func TestSaveAndLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
 	var want Config
-	want.Set("prod", Context{URL: "https://agent.example.com", Token: "shw_secret"})
-	want.Set("staging", Context{URL: "http://127.0.0.1:9000", Token: "shw_other"})
+	want.Set("prod", Context{URL: "https://agent.example.com", Token: "swk_secret"})
+	want.Set("staging", Context{URL: "http://127.0.0.1:9000", Token: "swk_other"})
 
 	if err := Save(path, want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -134,13 +134,13 @@ func TestSaveAndLoad(t *testing.T) {
 
 func TestLoadMigratesASingleServerFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	os.WriteFile(path, []byte("url: https://agent.example.com\ntoken: shw_secret\n"), 0o600)
+	os.WriteFile(path, []byte("url: https://agent.example.com\ntoken: swk_secret\n"), 0o600)
 
 	got, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := oneServer("https://agent.example.com", "shw_secret")
+	want := oneServer("https://agent.example.com", "swk_secret")
 	if got.Current != DefaultContext || got.Contexts[DefaultContext] != want.Contexts[DefaultContext] {
 		t.Errorf("Load = %+v, want %+v", got, want)
 	}

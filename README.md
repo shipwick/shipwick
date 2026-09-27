@@ -431,9 +431,10 @@ Nothing else changes: the container is on the same networks, other
 applications still reach it at `postgres:5432`, and the port comes and goes
 with the replica. A published port needs `deploy.strategy: recreate` and one
 replica — a server port has one holder, so the old version must be gone before
-the new one binds it — and 80 and 443 are the proxy's. A port the agent or the
-proxy listens on, or one another application already publishes, is refused
-before anything is started. `shipwick deploy` lists the published ports in its
+the new one binds it — and 80 and 443 are the proxy's. The ports the proxy and
+the agent listen on (80, 443, 8080, 8443 and the agent's own), and a port
+another application already publishes, are refused
+before anything is started. `shipwick validate` lists the published ports in its
 summary.
 
 **Docker's published ports bypass the host firewall.** On most distributions
@@ -457,9 +458,9 @@ shipwick start postgres
 
 A backup is taken while the application runs, unless it is stopped. A database
 that is being written to may not be consistent in the copy — the CLI says so
-when the application is running; stop it first, or use the database's own dump
-tool. A restore replaces *everything* in the volume with the archive's
-contents, so it requires the application to be stopped and leaves it stopped.
+when the application is running; stop it first. A restore replaces *everything*
+in the volume with the archive's contents, so it requires the application to be
+stopped and leaves it stopped.
 The archives are plain tar files holding the volume's contents, relative to
 the mount point; anything that can write such a tar can be restored.
 
@@ -898,8 +899,8 @@ shipwick token revoke ci
 
 Give CI a `deploy` token and people `admin` ones. A token with too small a role
 is told so, and what it needs; `shipwick server status` shows which token and
-role you are using. Deployments record which token made them (`by` in the
-history), and a stop or start by a token other than root says so in the
+role you are using. Deployments record which token made them (`by` in the API
+and the dashboard's history), and a stop or start by a token other than root says so in the
 application's events.
 
 What Shipwick does:
@@ -1024,11 +1025,10 @@ What the current version does is this document; what changed between versions is
 
 Next, roughly in this order:
 
-- **Encrypted secrets.** `${NAME}` keeps a secret out of `deploy.yaml`, but the
-  value is stored in plain text in the agent's SQLite file.
 - **Registry credential helpers** (`credsStore`), not only `auths` entries.
-- **Custom Caddy directives** per application: headers, redirects, basic auth.
-- **Several servers** from one CLI configuration and one dashboard.
+- **Custom Caddy directives** per application: headers, basic auth.
+- **Several servers in one dashboard**; the CLI already has contexts.
+- **Key rotation** for the encryption key.
 
 Out of scope, and likely to stay there: multi-node scheduling, building images,
 anything that requires an external database or queue. Shipwick is for one

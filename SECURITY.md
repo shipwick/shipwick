@@ -56,7 +56,8 @@ Expected behavior — not vulnerabilities:
   containers through Docker, or otherwise controlling the server;
 - anyone with access to the Docker socket, the agent's data directory or
   Caddy's admin socket doing the same;
-- secrets being unencrypted in the SQLite file (documented; on the roadmap);
+- root on the server reading the encryption key next to the database, or env
+  values through `docker inspect` (documented in the README);
 - exposing port 9000 to the internet against the documentation's advice.
 
 If you are unsure which list something belongs to, report it privately anyway.

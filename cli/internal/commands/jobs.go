@@ -127,6 +127,9 @@ func (c *cli) jobsRunCommand() *cobra.Command {
 			}
 			run, err := cl.RunJob(cmd.Context(), name, args[1])
 			if err != nil {
+				if client.IsCode(err, api.CodeNotFound) {
+					return fmt.Errorf("%s has no job named %q, or the server does not know the application\n\nSee its jobs with: shipwick jobs %s", name, args[1], name)
+				}
 				return err
 			}
 			return c.followRun(cmd.Context(), cl, run)

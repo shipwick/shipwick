@@ -114,7 +114,7 @@ func TestBackupWritesOneArchivePerVolume(t *testing.T) {
 			t.Errorf("output does not name %s:\n%s", name, out)
 		}
 	}
-	if !strings.Contains(errOut, "my-api is running") || !strings.Contains(errOut, "shipwick run my-api") {
+	if !strings.Contains(errOut, "my-api is running") || !strings.Contains(errOut, "shipwick stop my-api") {
 		t.Errorf("a running application deserves the consistency warning, got:\n%s", errOut)
 	}
 }

@@ -81,7 +81,7 @@ func (c *cli) status(ctx context.Context, name string) error {
 	}
 	if app.Spec != nil {
 		if h := app.Spec.Health; h != nil {
-			fields = append(fields, [2]string{"Health", fmt.Sprintf("GET %s every %s", h.Path, h.Interval)})
+			fields = append(fields, [2]string{"Health", fmt.Sprintf("%s every %s", describeHealthCheck(*h), h.Interval)})
 		}
 		fields = append(fields, [2]string{"Limits", describeResources(app.Spec.Resources)})
 	}

@@ -90,7 +90,7 @@ func TestResolveTokenGeneratesOnceAndPersistsOnlyTheHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveToken: %v", err)
 	}
-	if !strings.HasPrefix(generated, "shw_") || len(generated) != 4+64 {
+	if !strings.HasPrefix(generated, "swk_") || len(generated) != 4+64 {
 		t.Errorf("unexpected generated token format (length %d)", len(generated))
 	}
 	if hash != sha256.Sum256([]byte(generated)) {
@@ -101,7 +101,7 @@ func TestResolveTokenGeneratesOnceAndPersistsOnlyTheHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash file: %v", err)
 	}
-	if strings.Contains(string(onDisk), generated) || strings.Contains(string(onDisk), strings.TrimPrefix(generated, "shw_")) {
+	if strings.Contains(string(onDisk), generated) || strings.Contains(string(onDisk), strings.TrimPrefix(generated, "swk_")) {
 		t.Error("the plaintext token must never be written to disk")
 	}
 

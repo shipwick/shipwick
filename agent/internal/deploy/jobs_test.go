@@ -356,8 +356,14 @@ func TestRunCommandIsIndependentAndKeepsTheOutput(t *testing.T) {
 		}
 	}
 
-	h.rt.Crash(got[0].ID, 3)
-	h.rt.Crash(got[1].ID, 0)
+	// The listing is unordered; the run id in the spec says which is which.
+	for _, c := range got {
+		code := 0
+		if h.rt.Spec(c.ID).Job.RunID == first.ID {
+			code = 3
+		}
+		h.rt.Crash(c.ID, code)
+	}
 	h.engine.Wait()
 
 	detail, err := h.engine.JobRun(ctx, "my-api", first.ID)

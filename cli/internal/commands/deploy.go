@@ -368,15 +368,8 @@ func describeSpec(app spec.App) [][2]string {
 		fields = append(fields, [2]string{"Redirects", strings.Join(app.Redirects, ", ") + " → https://" + app.Domain})
 	}
 	if h := app.Health; h != nil {
-		check := "GET " + h.Path
-		switch h.Kind() {
-		case spec.HealthTCP:
-			check = fmt.Sprintf("TCP :%d", h.TCP)
-		case spec.HealthCommand:
-			check = "command " + strings.Join(h.Command, " ")
-		}
 		fields = append(fields, [2]string{"Health check", fmt.Sprintf("%s every %s (timeout %s, %d retries)",
-			check, h.Interval, h.Timeout, h.Retries)})
+			describeHealthCheck(*h), h.Interval, h.Timeout, h.Retries)})
 	}
 	fields = append(fields, [2]string{"Resources", describeResources(app.Resources)})
 	for _, v := range app.Volumes {
@@ -431,4 +424,16 @@ func describeResources(r spec.Resources) string {
 		mem = spec.FormatMemory(r.MemoryBytes)
 	}
 	return cpu + ", " + mem
+}
+
+// describeHealthCheck names the check itself: "GET /health", "TCP :5432" or
+// the command.
+func describeHealthCheck(h spec.Health) string {
+	switch h.Kind() {
+	case spec.HealthTCP:
+		return fmt.Sprintf("TCP :%d", h.TCP)
+	case spec.HealthCommand:
+		return "command " + strings.Join(h.Command, " ")
+	}
+	return "GET " + h.Path
 }

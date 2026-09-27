@@ -201,7 +201,7 @@ func ResolveToken(cfg Config) (hash [sha256.Size]byte, generated string, err err
 	if _, err := rand.Read(secret); err != nil {
 		return hash, "", fmt.Errorf("generate token: %w", err)
 	}
-	generated = "shw_" + hex.EncodeToString(secret)
+	generated = "swk_" + hex.EncodeToString(secret)
 	hash = sha256.Sum256([]byte(generated))
 
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {

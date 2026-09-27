@@ -356,6 +356,8 @@ Environment:
   SHIPWICK_VERSION            release to install (default: latest)
   SHIPWICK_AGENT_DOMAIN       hostname for the API; asked for when run in a terminal
   SHIPWICK_DASHBOARD_DOMAIN   hostname for the dashboard; likewise
+  SHIPWICK_WEBHOOK_URL        where the agent posts notifications (optional)
+  SHIPWICK_WEBHOOK_SECRET     signs those requests (optional)
   SHIPWICK_INSTALL_DIR        default /opt/shipwick
   SHIPWICK_BIN_DIR            default /usr/local/bin
 EOF

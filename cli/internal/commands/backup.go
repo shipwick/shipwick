@@ -58,7 +58,7 @@ application first, or use its own dump tool with "shipwick run".`,
 				return err
 			}
 			if app.Replicas.Running > 0 {
-				c.ui.Warn("%s is running; for a consistent copy of a database, stop it first or use its own dump tool: shipwick run %s -- pg_dump ...", name, name)
+				c.ui.Warn("%s is running; a copy taken now may be inconsistent. For a database, stop it first: shipwick stop %s", name, name)
 			}
 
 			stamp := c.now().UTC().Format("20060102-150405")
