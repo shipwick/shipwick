@@ -76,9 +76,11 @@ func freshServer(argv []string, stdout, stderr io.Writer) error {
 func TestServerInstallRunsSSHWithoutAShell(t *testing.T) {
 	f := newFakeAgent(t)
 	programs := &fakePrograms{respond: freshServer}
-	f.local = localOptions{exec: programs.exec, lookupHost: func(context.Context, string) ([]string, error) {
-		t.Fatal("an IP address needs no lookup")
-		return nil, nil
+	f.local = localOptions{exec: programs.exec, lookupHost: func(_ context.Context, host string) ([]string, error) {
+		if host == "203.0.113.10" {
+			t.Fatal("an IP address needs no lookup")
+		}
+		return nil, errors.New("no such host") // the records do not exist yet
 	}}
 	config := filepath.Join(t.TempDir(), "config.yaml")
 	f.env = map[string]string{cliconfig.EnvConfig: config}
@@ -179,17 +181,33 @@ func TestServerInstallWithDockerAndNoHostname(t *testing.T) {
 func TestServerInstallPrintsRecordsForAResolvedHost(t *testing.T) {
 	f := newFakeAgent(t)
 	programs := &fakePrograms{respond: freshServer}
-	f.local = localOptions{exec: programs.exec, lookupHost: func(context.Context, string) ([]string, error) {
-		return []string{"203.0.113.10", "2001:db8::10"}, nil
+	f.local = localOptions{exec: programs.exec, lookupHost: func(_ context.Context, host string) ([]string, error) {
+		if host == "box.example.net" {
+			return []string{"203.0.113.10", "2001:db8::10"}, nil
+		}
+		return nil, errors.New("no such host")
 	}}
 	out, _, err := f.run(t.TempDir(), "server", "install", "root@box.example.net", "--agent-domain", "agent.example.com")
 	if err != nil {
 		t.Fatalf("server install: %v\n%s", err, out)
 	}
 	assertInOrder(t, out, []string{
+		"Create these DNS records",
 		"A     agent.example.com  →  203.0.113.10",
 		"AAAA  agent.example.com  →  2001:db8::10",
 	})
+
+	// On an upgrade the record exists: it is confirmed, not asked for.
+	f.local.lookupHost = func(context.Context, string) ([]string, error) {
+		return []string{"203.0.113.10", "2001:db8::10"}, nil
+	}
+	out, _, err = f.run(t.TempDir(), "server", "install", "root@box.example.net", "--agent-domain", "agent.example.com")
+	if err != nil {
+		t.Fatalf("server install: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "✓ agent.example.com already points at 203.0.113.10, 2001:db8::10") || strings.Contains(out, "Create these DNS records") {
+		t.Errorf("an existing record is confirmed, not asked for:\n%s", out)
+	}
 }
 
 func TestServerInstallUpgradeKeepsOrAsksForTheToken(t *testing.T) {

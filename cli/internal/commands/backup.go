@@ -331,7 +331,11 @@ removed; a running application's data is replaced with "shipwick restore".`,
 			if err := cl.RemoveVolume(ctx, name); err != nil {
 				return err
 			}
-			c.ui.Success("Removed volume %s (%s)", name, volumeSize(*found))
+			if found.SizeBytes < 0 {
+				c.ui.Success("Removed volume %s", name)
+			} else {
+				c.ui.Success("Removed volume %s (%s)", name, volumeSize(*found))
+			}
 			return nil
 		},
 	}

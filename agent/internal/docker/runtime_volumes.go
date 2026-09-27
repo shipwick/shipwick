@@ -46,7 +46,7 @@ func (r *Runtime) ListVolumes(ctx context.Context) ([]Volume, error) {
 		return nil, fmt.Errorf("list volumes: %w", err)
 	}
 	sizes := map[string]int64{}
-	if usage, err := r.cli.DiskUsage(ctx, client.DiskUsageOptions{Volumes: true}); err == nil {
+	if usage, err := r.cli.DiskUsage(ctx, client.DiskUsageOptions{Volumes: true, Verbose: true}); err == nil {
 		for _, v := range usage.Volumes.Items {
 			if v.UsageData != nil {
 				sizes[v.Name] = v.UsageData.Size

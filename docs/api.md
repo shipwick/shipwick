@@ -27,10 +27,11 @@ cannot be revoked through the API. Every other token is created with
 
 The agent holds only the SHA-256 of each token and compares in constant time.
 A wrong or revoked token is `401 UNAUTHORIZED`. After 20 failed
-authentications within a minute from one client address, every request from
-it is `429 RATE_LIMITED` for the next minute, with a `Retry-After` header in
-seconds, before its token is looked at; successful authentications never
-count, and `GET /health` is not limited. A valid token whose role does
+authentications within a minute from one client address, its further wrong
+tokens are `429 RATE_LIMITED` for the next minute, with a `Retry-After` header
+in seconds. A valid token is never refused — behind the proxy every client
+shares one address — successful authentications never count, and `GET /health`
+is not limited. A valid token whose role does
 not cover the endpoint is `403 FORBIDDEN`, and `details` says which role it has
 and which the endpoint wants:
 
@@ -82,7 +83,7 @@ Failure — `details` is always an object:
 | 409 | `JOB_ALREADY_RUNNING` | A run of this job has not finished yet; a job runs one at a time |
 | 409 | `STATIC_APPLICATION` | Logs, metrics, jobs or a one-off command were asked of an application the proxy serves from a folder; it has no containers |
 | 409 | `VOLUME_IN_USE` | The volume belongs to an application that still exists; `details: {application}`. Delete the application first, or replace the data with a restore |
-| 429 | `RATE_LIMITED` | 20 authentications from this address failed within a minute; `Retry-After` says in how many seconds to try again. Answered without checking the token |
+| 429 | `RATE_LIMITED` | A wrong token, after 20 authentications from this address failed within a minute; `Retry-After` says in how many seconds wrong tokens are answered `401` again. A valid token is never refused |
 | 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB; a volume archive larger than 10 GB; an image archive larger than 4 GB; a static folder larger than 512 MB |
 | 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down |
 | 500 | `INTERNAL_ERROR` | Anything else; `message` carries the cause |

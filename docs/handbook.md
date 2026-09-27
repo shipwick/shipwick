@@ -1178,12 +1178,12 @@ What Shipwick does:
   shell history), stores it `0600`, refuses to send a saved token to a
   different agent than the one it was saved for, and warns before a token
   crosses the network over plain HTTP.
-- Guessing is slowed down: after 20 failed authentications within a minute
-  from one address, the agent answers `429` for the next minute without
-  looking at the token. Requests with a valid token are never limited, and
-  `GET /health` is not affected. Behind Caddy every client shares the proxy's
-  address, which is why only failures count, and why the limit is one that
-  a mistyped token does not reach.
+- Guessing is answered: after 20 failed authentications within a minute
+  from one address, the agent answers wrong tokens from it with `429` for
+  the next minute. A valid token is never refused and `GET /health` is not
+  affected: behind Caddy every client shares the proxy's address, so a
+  guesser must not be able to lock anyone else out, and only failures count,
+  so a mistyped token does not reach the limit.
 - No shell, anywhere. The agent talks to the Docker Engine API directly and
   nothing from `deploy.yaml` is ever executed or interpolated into a command.
 - Strict validation of names, images, domains and health paths — the inputs

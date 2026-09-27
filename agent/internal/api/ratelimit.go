@@ -7,13 +7,13 @@ import (
 )
 
 // Failed authentications are counted per client address, and an address that
-// fails failedAuthLimit times within failedAuthWindow is refused for
-// rateLimitFor without its token being looked at. Only failures count: a
-// dashboard polling with a good token is never slowed down. Behind the proxy
-// every client shares Caddy's address, so the limit is one that honest use
-// cannot reach — a mistyped token is one failure, not twenty — while a guess
-// at a 256-bit token gets nowhere at twenty tries a minute either way; what
-// the limit removes is "nothing slows it down at all".
+// fails failedAuthLimit times within failedAuthWindow has its further wrong
+// tokens answered 429 for rateLimitFor. Only failures count, and a valid
+// token is never refused: behind the proxy every client shares Caddy's
+// address, and a guesser must not be able to lock the dashboard and the CLI
+// out for everyone. A guess at a 256-bit token gets nowhere at twenty tries a
+// minute either way; what the limit gives is a clear signal — in the answer
+// and in the log — that someone is guessing, and no twenty-first hash.
 const (
 	failedAuthLimit  = 20
 	failedAuthWindow = time.Minute

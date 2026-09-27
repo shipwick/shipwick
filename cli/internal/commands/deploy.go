@@ -191,7 +191,7 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 	if final.Spec.Domain != "" {
 		c.ui.Println("https://" + final.Spec.Domain)
 	}
-	if final.Sequence == 1 {
+	if final.Sequence == 1 && !c.manyInFlight {
 		c.printNextSteps(name)
 	}
 	return nil
@@ -403,8 +403,11 @@ func describeSpec(app spec.App) [][2]string {
 		fields = append(fields, [2]string{"Redirects", strings.Join(app.Redirects, ", ") + " → https://" + app.Domain})
 	}
 	if h := app.Health; h != nil {
-		fields = append(fields, [2]string{"Health check", fmt.Sprintf("%s every %s (timeout %s, %d retries)",
-			describeHealthCheck(*h), h.Interval, h.Timeout, h.Retries)})
+		line := fmt.Sprintf("%s every %s (timeout %s, %d retries)", describeHealthCheck(*h), h.Interval, h.Timeout, h.Retries)
+		if h.StartPeriod > 0 {
+			line += fmt.Sprintf(", after a %s start period", h.StartPeriod)
+		}
+		fields = append(fields, [2]string{"Health check", line})
 	}
 	if app.Static == nil {
 		fields = append(fields, [2]string{"Resources", describeResources(app.Resources)})

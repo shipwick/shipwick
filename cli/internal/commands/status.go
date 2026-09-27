@@ -64,8 +64,11 @@ func (c *cli) status(ctx context.Context, name string) error {
 		}
 		fields = append(fields,
 			[2]string{"Version", fmt.Sprintf("%s  %s", d.Version, c.ui.Styled(ui.Dim, fmt.Sprintf("(deployment #%d, %s)", d.Sequence, ui.RelativeTime(deployed, now))))},
-			[2]string{"Image", d.Image},
 		)
+		// A static deployment has no image; its Files line says what it serves.
+		if d.Image != "" {
+			fields = append(fields, [2]string{"Image", d.Image})
+		}
 	}
 	if app.Domain != "" {
 		fields = append(fields, [2]string{"URL", "https://" + app.Domain})

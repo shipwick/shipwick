@@ -61,6 +61,9 @@ type cli struct {
 	// a deploy.yaml, so that init's closing line does not send the user to a
 	// command that is already running.
 	deployFollowsInit bool
+	// manyInFlight is set on the copies of this state that deploy the entries
+	// of a shipwick.yaml: the closing hints are printed once, not per entry.
+	manyInFlight bool
 	// build is how `shipwick deploy` builds and saves an image on this
 	// machine for an application with `build:`; tests substitute fakes.
 	build buildTools

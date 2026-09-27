@@ -38,9 +38,9 @@ func TestTooManyFailedAuthenticationsAreRateLimited(t *testing.T) {
 		}
 	}
 
-	rec := f.from(h, guesser, "/api/v1/applications", good)
+	rec := f.from(h, guesser, "/api/v1/applications", "Bearer still-wrong")
 	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("after %d failures: status = %d, want 429 even with the right token", failedAuthLimit, rec.Code)
+		t.Fatalf("after %d failures: status = %d, want 429 for the next wrong token", failedAuthLimit, rec.Code)
 	}
 	if e := decodeError(t, rec.Body.Bytes()); e.Code != api.CodeRateLimited {
 		t.Errorf("code = %q, want %s", e.Code, api.CodeRateLimited)
@@ -48,8 +48,10 @@ func TestTooManyFailedAuthenticationsAreRateLimited(t *testing.T) {
 	if got := rec.Header().Get("Retry-After"); got != "60" {
 		t.Errorf("Retry-After = %q, want 60: the block lasts a minute from the failure that reached the limit", got)
 	}
-	if rec := f.from(h, guesser, "/api/v1/applications", "Bearer still-wrong"); rec.Code != http.StatusTooManyRequests {
-		t.Errorf("a wrong token during the block: status = %d, want 429 without the token being checked", rec.Code)
+	// Behind the proxy the guesser shares its address with everyone else, so
+	// the right token must keep working through the block.
+	if rec := f.from(h, guesser, "/api/v1/applications", good); rec.Code != http.StatusOK {
+		t.Errorf("the right token during the block: status = %d, want 200; a guesser must not lock others out", rec.Code)
 	}
 
 	// Other clients and the unauthenticated endpoint are not affected.
@@ -64,15 +66,14 @@ func TestTooManyFailedAuthenticationsAreRateLimited(t *testing.T) {
 	}
 
 	clock = clock.Add(30 * time.Second)
-	if rec := f.from(h, guesser, "/api/v1/applications", good); rec.Code != http.StatusTooManyRequests {
+	if rec := f.from(h, guesser, "/api/v1/applications", "Bearer wrong-again"); rec.Code != http.StatusTooManyRequests {
 		t.Errorf("half a minute in: status = %d, want 429", rec.Code)
-	}
-	if got := rec.Header().Get("Retry-After"); got != "60" {
-		t.Errorf("Retry-After on the first refusal = %q", got)
+	} else if got := rec.Header().Get("Retry-After"); got != "30" {
+		t.Errorf("Retry-After half a minute in = %q, want 30", got)
 	}
 	clock = clock.Add(31 * time.Second)
-	if rec := f.from(h, guesser, "/api/v1/applications", good); rec.Code != http.StatusOK {
-		t.Errorf("after the minute: status = %d, want 200; the right token works again", rec.Code)
+	if rec := f.from(h, guesser, "/api/v1/applications", "Bearer wrong-again"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("after the minute: status = %d, want 401; wrong tokens are counted afresh", rec.Code)
 	}
 }
 

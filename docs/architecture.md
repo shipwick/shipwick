@@ -722,15 +722,16 @@ every request, a dashboard polling every few seconds would turn every read
 into a write on the single connection.
 
 Failed authentications are counted per client address (`agent/internal/api/
-ratelimit.go`): 20 within a minute, and the address is answered `429
-RATE_LIMITED` for the next minute before its token is looked at. Only failures
-count. The address is the connection's, never `X-Forwarded-For`, which a
-caller could set to be counted under someone else's; the price is that
-behind Caddy every client shares the proxy's address, so the limit has to be
-one that honest use — a mistyped token, a dashboard polling — cannot reach,
-and successful requests are never counted. It is in memory, pruned once a
-minute, and is not meant to stop a determined attacker: a 256-bit token does
-that. It removes "nothing slows a guess down at all".
+ratelimit.go`): 20 within a minute, and the address's further wrong tokens
+are answered `429 RATE_LIMITED` for the next minute. Only failures count, and
+a valid token is never refused. The address is the connection's, never
+`X-Forwarded-For`, which a caller could set to be counted under someone
+else's; the price is that behind Caddy every client shares the proxy's
+address — which is why a valid token must pass even while the address is
+limited, or one guesser would lock the dashboard and every CLI out, and why
+the limit is one that honest use cannot reach. It is in memory, pruned once
+a minute, and is not meant to stop a determined attacker: a 256-bit token
+does that. It gives the guess a clear answer and spares the hash.
 
 Who did what is recorded where it is cheap and durable: the authenticated
 token's name travels in the request context (`deploy.WithActor`), each

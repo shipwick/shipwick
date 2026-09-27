@@ -9,6 +9,7 @@ import (
 	"net"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -255,14 +256,29 @@ func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarg
 				addrs = resolved
 			}
 		}
-		c.ui.Println("Create these DNS records, DNS only (not proxied):")
+		// On an upgrade the records usually exist already; saying so beats
+		// asking for them again.
+		var missing []string
 		for _, h := range hostnames {
-			for _, addr := range addrs {
-				kind := "A"
-				if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
-					kind = "AAAA"
+			if resolved, err := local.lookupHost(ctx, h); err == nil && pointsAt(resolved, addrs) {
+				c.ui.Success("%s already points at %s", h, strings.Join(resolved, ", "))
+				continue
+			}
+			missing = append(missing, h)
+		}
+		if len(missing) > 0 {
+			if len(missing) < len(hostnames) {
+				c.ui.Println()
+			}
+			c.ui.Println("Create these DNS records, DNS only (not proxied):")
+			for _, h := range missing {
+				for _, addr := range addrs {
+					kind := "A"
+					if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+						kind = "AAAA"
+					}
+					c.ui.Println(fmt.Sprintf("  %-5s %s  →  %s", kind, h, addr))
 				}
-				c.ui.Println(fmt.Sprintf("  %-5s %s  →  %s", kind, h, addr))
 			}
 		}
 		c.ui.Println()
@@ -356,4 +372,18 @@ func (d *dimmedLines) line(s string) {
 		s = "      (the API token — saved to your shipwick config, not shown)"
 	}
 	d.c.ui.Println("  " + d.c.ui.Styled(ui.Dim, s))
+}
+
+// pointsAt reports whether every address a hostname resolves to is one of
+// the server's.
+func pointsAt(resolved, server []string) bool {
+	if len(resolved) == 0 {
+		return false
+	}
+	for _, r := range resolved {
+		if !slices.Contains(server, r) {
+			return false
+		}
+	}
+	return true
 }

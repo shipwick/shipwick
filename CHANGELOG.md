@@ -80,8 +80,8 @@ says so under **Changed** and explains how to upgrade.
   with an AAAA record when the server has an IPv6 address; a hostname behind
   Cloudflare's proxy is told to turn the proxy off for the record instead.
 - The API limits failed authentications: after 20 within a minute from one
-  address it answers `429 RATE_LIMITED` with `Retry-After` for the next minute,
-  without checking the token. Valid tokens are never limited.
+  address, its wrong tokens are answered `429 RATE_LIMITED` with `Retry-After`
+  for the next minute. A valid token is never refused.
 - Dashboard: a **Secrets** page lists the secrets kept on the server, and an
   admin adds, replaces or removes one there; values are never shown.
 - Dashboard: a **Volumes** page lists every volume on the server with its

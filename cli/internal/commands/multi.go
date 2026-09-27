@@ -182,6 +182,7 @@ func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e
 	// with the prefixed UI keeps one implementation for one and for many.
 	cc := *c
 	cc.ui = u
+	cc.manyInFlight = true
 
 	// An entry with build: is built here first, like a deploy.yaml is; its
 	// paths are relative to the shipwick.yaml.

@@ -117,14 +117,18 @@ func (t routeTable) handle(pattern string, role api.Role, h http.HandlerFunc) {
 func (s *Server) authenticate(role api.Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		addr := clientAddress(r.RemoteAddr)
-		if wait, limited := s.limiter.limited(addr); limited {
-			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
-			writeError(w, http.StatusTooManyRequests, api.CodeRateLimited, "too many failed authentications from this address; try again in a minute", nil)
-			return
-		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		who, known := s.identify(r.Context(), sha256.Sum256([]byte(token)))
 		if !ok || !known {
+			// A limited address is answered 429 instead of 401 and its
+			// attempts no longer counted. A valid token is never refused:
+			// behind the proxy every client shares one address, and one
+			// guesser must not lock the others out (see ratelimit.go).
+			if wait, limited := s.limiter.limited(addr); limited {
+				w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
+				writeError(w, http.StatusTooManyRequests, api.CodeRateLimited, "too many failed authentications from this address; try again in a minute", nil)
+				return
+			}
 			s.limiter.failed(addr)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="shipwick"`)
 			writeError(w, http.StatusUnauthorized, api.CodeUnauthorized, "missing or invalid API token", nil)
