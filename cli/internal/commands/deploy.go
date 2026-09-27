@@ -361,13 +361,29 @@ func describeSpec(app spec.App) [][2]string {
 	if app.Domain != "" {
 		fields = append(fields, [2]string{"Domain", app.Domain})
 	}
-	if app.Health != nil {
-		fields = append(fields, [2]string{"Health check", fmt.Sprintf("GET %s every %s (timeout %s, %d retries)",
-			app.Health.Path, app.Health.Interval, app.Health.Timeout, app.Health.Retries)})
+	if len(app.Aliases) > 0 {
+		fields = append(fields, [2]string{"Aliases", strings.Join(app.Aliases, ", ")})
+	}
+	if len(app.Redirects) > 0 {
+		fields = append(fields, [2]string{"Redirects", strings.Join(app.Redirects, ", ") + " → https://" + app.Domain})
+	}
+	if h := app.Health; h != nil {
+		check := "GET " + h.Path
+		switch h.Kind() {
+		case spec.HealthTCP:
+			check = fmt.Sprintf("TCP :%d", h.TCP)
+		case spec.HealthCommand:
+			check = "command " + strings.Join(h.Command, " ")
+		}
+		fields = append(fields, [2]string{"Health check", fmt.Sprintf("%s every %s (timeout %s, %d retries)",
+			check, h.Interval, h.Timeout, h.Retries)})
 	}
 	fields = append(fields, [2]string{"Resources", describeResources(app.Resources)})
 	for _, v := range app.Volumes {
 		fields = append(fields, [2]string{"Volume", v.Name + " at " + v.Path})
+	}
+	for _, p := range app.Publish {
+		fields = append(fields, [2]string{"Publish", describePublish(p)})
 	}
 	fields = append(fields, [2]string{"Restart", app.Restart.Policy})
 	if app.Deploy.Strategy != spec.StrategyRolling {
@@ -376,7 +392,34 @@ func describeSpec(app spec.App) [][2]string {
 	if len(app.Env) > 0 {
 		fields = append(fields, [2]string{"Environment", fmt.Sprintf("%d variables", len(app.Env))})
 	}
+	if len(app.Entrypoint) > 0 {
+		fields = append(fields, [2]string{"Entrypoint", describeArgv(app.Entrypoint)})
+	}
+	if len(app.Command) > 0 {
+		fields = append(fields, [2]string{"Command", describeArgv(app.Command)})
+	}
+	if app.User != "" {
+		fields = append(fields, [2]string{"User", app.User})
+	}
+	if app.Logging != nil {
+		fields = append(fields, [2]string{"Logging", describeLogging(*app.Logging)})
+	}
+	if app.PreDeploy != nil {
+		fields = append(fields, [2]string{"Pre-deploy", strings.Join(app.PreDeploy.Command, " ")})
+	}
+	for _, j := range app.Jobs {
+		fields = append(fields, [2]string{"Job", fmt.Sprintf("%s at %s UTC: %s", j.Name, j.Schedule, strings.Join(j.Command, " "))})
+	}
 	return fields
+}
+
+// describePublish reads "5432/tcp → server port 15432 on 10.0.0.5".
+func describePublish(p spec.Publish) string {
+	s := fmt.Sprintf("%d/%s → server port %d", p.Port, p.Protocol, p.Host)
+	if p.Address != "" {
+		s += " on " + p.Address
+	}
+	return s
 }
 
 func describeResources(r spec.Resources) string {

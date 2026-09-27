@@ -13,6 +13,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/proxy"
 	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/api"
+	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 // Proxy is what the engine needs from the reverse proxy. *proxy.Caddy is the
@@ -24,42 +25,85 @@ type Proxy interface {
 	Status() proxy.Status
 }
 
-// DomainConflictError is returned when a deployment claims a domain that
-// something else already serves.
+// DomainConflictError is returned when a deployment claims a hostname that
+// something else already serves — as its domain, an alias or a redirect.
 type DomainConflictError struct {
 	Domain string
+	Field  string // where deploy.yaml claims it: "domain", "aliases[0]", "redirects[1]"
 	Owner  string // an application, or Shipwick itself
 }
 
 func (e *DomainConflictError) Error() string {
-	return fmt.Sprintf("domain %s is already served by %s", e.Domain, e.Owner)
+	return fmt.Sprintf("%s: %s is already served by %s", e.Field, e.Domain, e.Owner)
 }
 
-// checkDomain refuses a domain that is already taken. Two routes for one
-// hostname would silently send all traffic to whichever sorts first.
-func (e *Engine) checkDomain(ctx context.Context, appName, domain string) error {
-	if domain == "" {
-		return nil
+// hostnames is everything one application answers to: its domain, the
+// aliases served like it, and the redirects sent to it.
+type hostnames struct {
+	domain    string
+	aliases   []string
+	redirects []string
+}
+
+func hostnamesOf(a spec.App) hostnames {
+	return hostnames{domain: a.Domain, aliases: a.Aliases, redirects: a.Redirects}
+}
+
+// all lists every hostname with the deploy.yaml field that names it.
+func (h hostnames) all() []namedHost {
+	var out []namedHost
+	if h.domain != "" {
+		out = append(out, namedHost{"domain", h.domain})
 	}
-	for _, r := range e.opts.ExtraRoutes {
-		if r.Domain == domain {
-			return &DomainConflictError{Domain: domain, Owner: "Shipwick itself (the agent or the dashboard)"}
-		}
+	for i, a := range h.aliases {
+		out = append(out, namedHost{fmt.Sprintf("aliases[%d]", i), a})
+	}
+	for i, r := range h.redirects {
+		out = append(out, namedHost{fmt.Sprintf("redirects[%d]", i), r})
+	}
+	return out
+}
+
+type namedHost struct{ field, host string }
+
+func routeHostnames(r proxy.Route) []string {
+	out := append([]string{r.Domain}, r.Aliases...)
+	return append(out, r.Redirects...)
+}
+
+// checkDomain refuses a hostname that is already taken, whatever role it has
+// on either side. Two routes for one hostname would silently send all traffic
+// to whichever sorts first.
+func (e *Engine) checkDomain(ctx context.Context, app spec.App) error {
+	claims := hostnamesOf(app).all()
+	if len(claims) == 0 {
+		return nil
 	}
 	apps, err := e.store.ListApplications(ctx)
 	if err != nil {
 		return err
 	}
+	owners := map[string]string{}
 	for _, other := range apps {
-		if other.Name == appName || other.ActiveDeploymentID == nil {
+		if other.Name == app.Name || other.ActiveDeploymentID == nil {
 			continue
 		}
 		d, err := e.store.GetDeployment(ctx, *other.ActiveDeploymentID)
 		if err != nil {
 			return err
 		}
-		if d.Spec.Domain == domain {
-			return &DomainConflictError{Domain: domain, Owner: fmt.Sprintf("application %q", other.Name)}
+		for _, h := range hostnamesOf(d.Spec).all() {
+			owners[h.host] = fmt.Sprintf("application %q", other.Name)
+		}
+	}
+	for _, r := range e.opts.ExtraRoutes {
+		for _, h := range routeHostnames(r) {
+			owners[h] = "Shipwick itself (the agent or the dashboard)"
+		}
+	}
+	for _, c := range claims {
+		if owner := owners[c.host]; owner != "" {
+			return &DomainConflictError{Domain: c.host, Field: c.field, Owner: owner}
 		}
 	}
 	return nil
@@ -88,7 +132,7 @@ func backendName(app string, port int) string {
 // progress: a mix of old and new replicas that no single deployment record
 // describes.
 type routeOverride struct {
-	domain  string
+	hosts   hostnames
 	members []routeMember
 	// desired is how many replicas should be serving while the rollout runs:
 	// the smaller of the old and the new count, which a rollout never goes below.
@@ -185,7 +229,7 @@ func (e *Engine) explainUnserved(plans []routingPlan, containers map[string]dock
 		served[r.Domain] = len(r.Backends) > 0 || len(r.Upstreams) > 0
 	}
 	for _, p := range plans {
-		if p.domain == "" || served[p.domain] {
+		if p.hosts.domain == "" || served[p.hosts.domain] {
 			continue
 		}
 		for _, m := range p.members {
@@ -197,7 +241,8 @@ func (e *Engine) explainUnserved(plans []routingPlan, containers map[string]dock
 	}
 }
 
-// describeRoutes is a one-line summary for the log: "web.example.com→web_8080".
+// describeRoutes is a one-line summary for the log:
+// "web.example.com,api.example.com→web_8080 www.example.com→308".
 func describeRoutes(routes []proxy.Route) string {
 	parts := make([]string, 0, len(routes))
 	for _, r := range routes {
@@ -210,7 +255,11 @@ func describeRoutes(routes []proxy.Route) string {
 			behind = []string{"503"}
 		}
 		sort.Strings(behind)
-		parts = append(parts, r.Domain+"→"+strings.Join(behind, "+"))
+		served := append([]string{r.Domain}, r.Aliases...)
+		parts = append(parts, strings.Join(served, ",")+"→"+strings.Join(behind, "+"))
+		for _, h := range r.Redirects {
+			parts = append(parts, h+"→308")
+		}
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, " ")
@@ -219,7 +268,7 @@ func describeRoutes(routes []proxy.Route) string {
 // routingPlan is who should be serving one application.
 type routingPlan struct {
 	app     string
-	domain  string
+	hosts   hostnames
 	members []routeMember
 }
 
@@ -250,7 +299,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]do
 		plan := routingPlan{app: app.Name}
 		if o, overridden := overrides[app.Name]; overridden {
 			// A rollout is in charge and says exactly who serves.
-			plan.domain, plan.members = o.domain, o.members
+			plan.hosts, plan.members = o.hosts, o.members
 		} else {
 			if app.ActiveDeploymentID == nil {
 				continue
@@ -259,7 +308,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]do
 			if err != nil {
 				return nil, nil, err
 			}
-			plan.domain = d.Spec.Domain
+			plan.hosts = hostnamesOf(d.Spec)
 			// A stopped application keeps its route — and with it its
 			// certificate — but nobody serves it: the proxy answers 503.
 			if app.DesiredState == api.DesiredRunning {
@@ -285,18 +334,18 @@ func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Con
 	routes := append([]proxy.Route(nil), e.opts.ExtraRoutes...)
 	taken := map[string]bool{}
 	for _, r := range routes {
-		taken[r.Domain] = true
+		claim(taken, routeHostnames(r))
 	}
 
 	for _, p := range plans {
 		// checkDomain prevents duplicates; this keeps a config sane even if
 		// one slipped in (e.g. two first deployments racing for a domain).
-		if p.domain == "" || taken[p.domain] {
+		if p.hosts.domain == "" || taken[p.hosts.domain] {
 			continue
 		}
-		taken[p.domain] = true
+		taken[p.hosts.domain] = true
 
-		route := proxy.Route{Domain: p.domain}
+		route := proxy.Route{Domain: p.hosts.domain, Aliases: claim(taken, p.hosts.aliases), Redirects: claim(taken, p.hosts.redirects)}
 		for _, m := range p.members {
 			c, exists := containers[m.replica.ContainerID]
 			if !exists || !c.Running {
@@ -310,6 +359,18 @@ func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Con
 		routes = append(routes, route)
 	}
 	return routes
+}
+
+// claim marks hosts as taken and returns the ones that were not already.
+func claim(taken map[string]bool, hosts []string) []string {
+	var free []string
+	for _, h := range hosts {
+		if !taken[h] {
+			taken[h] = true
+			free = append(free, h)
+		}
+	}
+	return free
 }
 
 // setNames makes names what the container answers to, if it is not already.

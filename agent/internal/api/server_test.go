@@ -28,11 +28,12 @@ type fixture struct {
 	rt     *dockertest.Fake
 	api    *Server
 	logs   *bytes.Buffer
+	store  *store.Store
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	st, err := store.Open(context.Background(), ":memory:")
+	st, err := store.Open(context.Background(), ":memory:", store.Options{EncryptionKey: []byte("an-encryption-key-of-32-bytes!!!")})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -41,7 +42,7 @@ func newFixture(t *testing.T) *fixture {
 	engine := deploy.New(st, rt, deploy.Options{StabilizeWindow: 20 * time.Millisecond, NameSettle: time.Millisecond, Logger: quiet})
 
 	logs := &bytes.Buffer{}
-	apiServer := New(engine, sha256.Sum256([]byte(testToken)), slog.New(slog.NewTextHandler(logs, nil)))
+	apiServer := New(engine, st, sha256.Sum256([]byte(testToken)), slog.New(slog.NewTextHandler(logs, nil)))
 	handler := apiServer.Handler()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(func() {
@@ -50,7 +51,7 @@ func newFixture(t *testing.T) *fixture {
 		engine.Shutdown(context.Background())
 		st.Close()
 	})
-	return &fixture{t: t, srv: srv, engine: engine, rt: rt, api: apiServer, logs: logs}
+	return &fixture{t: t, srv: srv, engine: engine, rt: rt, api: apiServer, logs: logs, store: st}
 }
 
 // do sends an authenticated request and returns the status and raw body.

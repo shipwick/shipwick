@@ -13,15 +13,22 @@ const emit = defineEmits<{ navigate: [] }>()
 
 const route = useRoute()
 const session = useSession()
+const access = useAccess()
 const signingOut = ref(false)
 
-const ITEMS: { to: string, label: string, icon: IconName, match: (path: string) => boolean }[] = [
+interface Item { to: string, label: string, icon: IconName, match: (path: string) => boolean, admin?: boolean }
+
+const ITEMS: Item[] = [
   { to: '/', label: 'Overview', icon: 'overview', match: p => p === '/' },
   { to: '/applications', label: 'Applications', icon: 'applications', match: p => p.startsWith('/applications') },
   { to: '/deployments', label: 'Deployments', icon: 'deployments', match: p => p.startsWith('/deployments') },
   { to: '/servers', label: 'Servers', icon: 'servers', match: p => p.startsWith('/servers') },
   { to: '/logs', label: 'Logs', icon: 'logs', match: p => p.startsWith('/logs') },
+  // Only once the role is known to be admin: a read-only token should not see the entry flash.
+  { to: '/tokens', label: 'Tokens', icon: 'key', match: p => p.startsWith('/tokens'), admin: true },
 ]
+
+const items = computed(() => ITEMS.filter(item => !item.admin || access.knownTo('admin')))
 
 async function signOut() {
   signingOut.value = true
@@ -38,7 +45,7 @@ async function signOut() {
 
     <nav aria-label="Main" class="flex-1 overflow-y-auto p-2">
       <ul class="space-y-px">
-        <li v-for="item in ITEMS" :key="item.to">
+        <li v-for="item in items" :key="item.to">
           <NuxtLink
             :to="item.to"
             class="flex h-8 items-center gap-2.5 rounded-sm px-2 transition-colors duration-100"
@@ -66,6 +73,14 @@ async function signOut() {
         </span>
         <span v-else class="skeleton mt-1.5 w-24" />
       </NuxtLink>
+
+      <!-- Who is signed in, so what the buttons allow is never a surprise. -->
+      <div v-if="access.token.value" class="px-1 py-0.5" :title="`Signed in with the ${access.token.value.name} token, which has the ${access.token.value.role} role`">
+        <span class="label block">Token</span>
+        <span class="mono block truncate text-xs">
+          {{ access.token.value.name }} <span class="text-fg-muted">· {{ access.token.value.role }}</span>
+        </span>
+      </div>
 
       <div class="flex items-center justify-between gap-2">
         <ThemeToggle />

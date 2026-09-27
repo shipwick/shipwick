@@ -94,6 +94,9 @@ func (e *Engine) Application(ctx context.Context, name string) (api.ApplicationD
 		}
 	}
 	for _, c := range listed {
+		if c.Job != "" {
+			continue // job containers are not replicas; runs have their own view
+		}
 		// Inspect adds exit code, OOM flag and start time. A container may
 		// vanish between list and inspect; the listed data is good enough then.
 		if full, err := e.rt.InspectContainer(ctx, c.ID); err == nil {
@@ -136,6 +139,7 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 	crashLoop := false
 	if active != nil {
 		out.Image, out.Version, out.Domain = active.Image, active.Version, active.Spec.Domain
+		out.Aliases, out.Redirects = active.Spec.Aliases, active.Spec.Redirects
 		out.Replicas.Desired = active.Spec.Replicas
 
 		// Normally the replicas that count are the active deployment's. While a
@@ -150,7 +154,7 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 			out.Replicas.Desired = o.desired
 		}
 		for _, c := range containers {
-			if c.App != app.Name || !counts(c) {
+			if c.App != app.Name || c.Job != "" || !counts(c) {
 				continue
 			}
 			health, looping := e.sup.snapshot(c.ID)
@@ -214,6 +218,7 @@ func DeploymentView(d store.Deployment) api.Deployment {
 
 		Kind:               d.Kind,
 		SourceDeploymentID: d.SourceID,
+		By:                 d.Actor,
 	}
 }
 
@@ -361,7 +366,7 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 	}
 	running := 0
 	for _, c := range containers {
-		if c.Running {
+		if c.Running && c.Job == "" {
 			running++
 		}
 	}
@@ -382,5 +387,6 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		Applications:  len(apps),
 		Containers:    running,
 		Proxy:         api.ProxyStatus(e.ProxyStatus()),
+		Notifications: e.Notifications(),
 	}, nil
 }

@@ -40,6 +40,14 @@ type Fake struct {
 	// which is how long a second caller for the same container has to collide.
 	NamesErr   error
 	NamesDelay time.Duration
+	// Clock, when set, is the time Stats stamps its readings with, so tests
+	// can space readings out without waiting.
+	Clock func() time.Time
+	// JobExits is the exit code a job container ends with, by job name;
+	// unlisted jobs exit 0. Jobs finish the moment WaitContainer is called,
+	// unless HoldJobs is set: then they run until ReleaseJob or Crash.
+	JobExits map[string]int
+	HoldJobs bool
 
 	mu         sync.Mutex
 	nextID     int
@@ -56,6 +64,18 @@ type Fake struct {
 	renaming                       map[string]bool
 	namedAt, stoppedAt             map[string]time.Time // by container name
 	removedImages                  []string
+	stopped                        map[string]chan struct{} // closed when the container stops or goes; see WaitContainer
+
+	// ExecResults is what Exec answers, looked up by container name and then
+	// by the command joined with spaces; a container matched by neither exits
+	// 0 with no output. SetExecResult changes it while the engine runs.
+	ExecResults map[string]ExecResult
+	execCalls   []ExecCall
+	// The fake's filesystem, see fake_archive.go: files by container, and
+	// by Docker volume name for what lives under a mount point.
+	files          map[string]map[string][]byte
+	volumes        map[string]map[string][]byte
+	removedVolumes []string
 }
 
 func New() *Fake {
@@ -70,6 +90,11 @@ func New() *Fake {
 		renaming:    map[string]bool{},
 		namedAt:     map[string]time.Time{},
 		stoppedAt:   map[string]time.Time{},
+		ExecResults: map[string]ExecResult{},
+		files:       map[string]map[string][]byte{},
+		volumes:     map[string]map[string][]byte{},
+		JobExits:    map[string]int{},
+		stopped:     map[string]chan struct{}{},
 	}
 }
 
@@ -86,6 +111,7 @@ func (f *Fake) Crash(id string, exitCode int) {
 	defer f.mu.Unlock()
 	if c, ok := f.containers[id]; ok {
 		c.Running, c.State, c.ExitCode, c.IP = false, "exited", exitCode, ""
+		f.signalStopped(id)
 	}
 }
 
@@ -158,7 +184,10 @@ func (f *Fake) CreateContainer(_ context.Context, spec docker.ContainerSpec) (st
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	name := docker.ContainerName(spec.App, spec.Sequence, spec.Replica)
+	name, job := docker.ContainerName(spec.App, spec.Sequence, spec.Replica), ""
+	if spec.Job != nil {
+		name, job = docker.JobContainerName(spec.App, spec.Job.Name, spec.Job.RunID), spec.Job.Name
+	}
 	for _, c := range f.containers {
 		if c.Name == name {
 			return "", "", fmt.Errorf("container name %q is already in use", name)
@@ -172,6 +201,7 @@ func (f *Fake) CreateContainer(_ context.Context, spec docker.ContainerSpec) (st
 		App:          spec.App,
 		DeploymentID: spec.DeploymentID,
 		Replica:      spec.Replica,
+		Job:          job,
 		Image:        spec.Image,
 		State:        "created",
 		// Born on the services network, nameless.
@@ -211,6 +241,7 @@ func (f *Fake) StopContainer(_ context.Context, id string, _ time.Duration) erro
 	if c, ok := f.containers[id]; ok && c.Running {
 		c.Running, c.State, c.ExitCode, c.IP = false, "exited", 0, ""
 		f.stoppedAt[c.Name] = time.Now()
+		f.signalStopped(id)
 	}
 	return nil
 }
@@ -228,6 +259,7 @@ func (f *Fake) RemoveContainer(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	delete(f.containers, id)
 	delete(f.specs, id)
+	f.signalStopped(id)
 	return nil
 }
 
@@ -328,7 +360,7 @@ func (f *Fake) Stats(_ context.Context, id string, withPrevious bool) (docker.St
 		}
 	}
 	f.statsCalls++
-	now := time.Now()
+	now := f.now()
 	sample := at(now)
 	if withPrevious {
 		f.blockingStatsCalls++

@@ -26,6 +26,10 @@ const PATHS = {
   'logout': 'M6.5 2.5h-3v11h3M10 5l3 3-3 3M13 8H6.5',
   'search': 'M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM10.25 10.25l3.25 3.25',
   'arrow-down': 'M8 3v10M4 9l4 4 4-4',
+  'download': 'M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25M2.5 13.5h11',
+  'upload': 'M8 10.5v-8M4.75 5.75 8 2.5l3.25 3.25M2.5 13.5h11',
+  'copy': 'M6 6h7.5v7.5H6zM2.5 10V2.5H10',
+  'key': 'M6.25 9.75a3.25 3.25 0 1 1 1.6-2.9L13.5 2.5M11 5l1.75 1.75M6.25 9.75 3 13v.5h.5',
 } as const
 
 export type IconName = keyof typeof PATHS

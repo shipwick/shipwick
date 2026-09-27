@@ -2,6 +2,8 @@
 import type { Deployment, DeploymentDetail } from '~/types/api'
 import { deriveProgress } from '~/utils/deploymentProgress'
 import { durationBetween, formatAbsoluteUtc, formatBytes, formatCores, formatDuration } from '~/utils/format'
+import { tidyDuration } from '~/utils/jobs'
+import { describeHealth, describeLogging, formatArgv, formatHostname, formatPublish, hostnamesOf } from '~/utils/spec'
 import { deploymentStatusDisplay } from '~/utils/status'
 
 const route = useRoute()
@@ -25,6 +27,20 @@ const status = computed(() => (d.value ? deploymentStatusDisplay(d.value.status)
 const progress = computed(() => (d.value ? deriveProgress(d.value) : null))
 const events = computed(() => [...(d.value?.events ?? [])].sort((a, b) => a.id - b.id))
 const envNames = computed(() => Object.keys(d.value?.spec.env ?? {}).sort())
+const hostnames = computed(() => (d.value ? hostnamesOf(d.value.spec).map(formatHostname) : []))
+const healthCheck = computed(() => describeHealth(d.value?.spec.health))
+const published = computed(() => (d.value?.spec.publish ?? []).map(formatPublish))
+const process = computed(() => {
+  const s = d.value?.spec
+  if (!s) return []
+  const lines: { label: string, value: string }[] = []
+  if (s.entrypoint?.length) lines.push({ label: 'Entrypoint', value: formatArgv(s.entrypoint) })
+  if (s.command?.length) lines.push({ label: 'Command', value: formatArgv(s.command) })
+  if (s.user) lines.push({ label: 'User', value: s.user })
+  return lines
+})
+const logging = computed(() => describeLogging(d.value?.spec))
+const loggingOptions = computed(() => Object.entries(d.value?.spec.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
 
 // A redeploy or rollback re-used another deployment's stored configuration.
 // Deployment records are immutable enough for this: fetch the source once to
@@ -170,12 +186,20 @@ const crumbs = computed(() => [
                 {{ duration }}
               </dd>
             </div>
-            <div class="bg-bg px-4 py-2.5 sm:col-span-2 lg:col-span-3">
+            <div class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
                 Image
               </dt>
               <dd class="mono mt-0.5 break-all">
                 {{ d.image }}
+              </dd>
+            </div>
+            <div class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                By
+              </dt>
+              <dd class="mono mt-0.5" :title="d.by ? `The token that started it` : 'Recorded before tokens had names'">
+                {{ d.by ?? '—' }}
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -210,10 +234,15 @@ const crumbs = computed(() => [
             </div>
             <div class="bg-bg px-4 py-2.5">
               <dt class="label">
-                Domain
+                {{ hostnames.length > 1 ? 'Hostnames' : 'Domain' }}
               </dt>
               <dd class="mono mt-0.5 break-all">
-                {{ d.spec.domain || '—' }}
+                <template v-if="hostnames.length > 0">
+                  <div v-for="host in hostnames" :key="host">{{ host }}</div>
+                </template>
+                <template v-else>
+                  —
+                </template>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -229,8 +258,8 @@ const crumbs = computed(() => [
                 Health check
               </dt>
               <dd class="mono mt-0.5">
-                <template v-if="d.spec.health">
-                  GET {{ d.spec.health.path }} every {{ d.spec.health.interval }}, timeout {{ d.spec.health.timeout }}, {{ d.spec.health.retries }} retries
+                <template v-if="healthCheck">
+                  {{ healthCheck.check }} <span class="text-fg-muted">{{ healthCheck.schedule }}</span>
                 </template>
                 <template v-else>
                   None
@@ -243,6 +272,70 @@ const crumbs = computed(() => [
               </dt>
               <dd class="mono mt-0.5">
                 CPU {{ formatCores(d.spec.resources.cpu) }} · memory {{ d.spec.resources.memory_bytes ? formatBytes(d.spec.resources.memory_bytes) : 'unlimited' }}
+              </dd>
+            </div>
+            <div v-if="published.length > 0" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Published ports
+              </dt>
+              <dd class="mono mt-0.5">
+                <div v-for="line in published" :key="line">{{ line }}</div>
+              </dd>
+            </div>
+            <div v-if="d.spec.volumes?.length" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Volumes
+              </dt>
+              <dd class="mono mt-0.5">
+                <div v-for="v in d.spec.volumes" :key="v.name">{{ v.name }} <span class="text-fg-muted">at</span> {{ v.path }}</div>
+              </dd>
+            </div>
+            <div v-if="process.length > 0" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Process
+              </dt>
+              <dd class="mt-0.5 space-y-0.5">
+                <div v-for="line in process" :key="line.label" class="flex gap-2">
+                  <span class="w-20 shrink-0 text-fg-muted">{{ line.label }}</span>
+                  <span class="mono min-w-0 break-all">{{ line.value }}</span>
+                </div>
+              </dd>
+            </div>
+            <div v-if="d.spec.pre_deploy" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Pre-deploy
+              </dt>
+              <dd class="mono mt-0.5 break-all">
+                {{ formatArgv(d.spec.pre_deploy.command) }} <span class="text-fg-muted">timeout {{ tidyDuration(d.spec.pre_deploy.timeout) }}</span>
+              </dd>
+            </div>
+            <div v-if="d.spec.jobs?.length" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Jobs <span class="normal-case tracking-normal text-fg-faint">schedules in UTC</span>
+              </dt>
+              <dd class="mt-0.5 space-y-0.5">
+                <div v-for="job in d.spec.jobs" :key="job.name" class="mono break-all">
+                  {{ job.name }} <span class="text-fg-muted">{{ job.schedule }}</span> {{ formatArgv(job.command) }} <span class="text-fg-muted">timeout {{ tidyDuration(job.timeout) }}</span>
+                </div>
+              </dd>
+            </div>
+            <div v-if="logging" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Logging
+              </dt>
+              <dd class="mono mt-0.5">
+                {{ logging }}
+                <details v-if="loggingOptions.length > 0" class="mt-1 font-sans text-xs">
+                  <summary class="cursor-pointer select-none text-fg-subtle hover:text-fg">
+                    Options
+                  </summary>
+                  <dl class="mono mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5">
+                    <template v-for="[key, value] in loggingOptions" :key="key">
+                      <dt class="text-fg-muted">{{ key }}</dt>
+                      <dd class="break-all">{{ value }}</dd>
+                    </template>
+                  </dl>
+                </details>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5 sm:col-span-2 lg:col-span-4">

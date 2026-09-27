@@ -23,6 +23,10 @@ function hasOrigin(d: Deployment): boolean {
   return d.kind === 'rollback' || d.kind === 'redeploy'
 }
 
+// Who started each deployment. The column only appears once the agent records
+// it: deployments made before tokens had names carry no `by`.
+const anyBy = computed(() => props.deployments.some(d => d.by))
+
 function open(d: Deployment, event: MouseEvent) {
   // Let real links inside the row (and text selection) work as usual.
   if ((event.target as HTMLElement).closest('a') || window.getSelection()?.toString()) return
@@ -42,6 +46,7 @@ function open(d: Deployment, event: MouseEvent) {
         </th>
         <th>Version</th>
         <th>Origin</th>
+        <th v-if="anyBy">By</th>
         <th>Status</th>
         <th>Started</th>
         <th class="right">
@@ -66,6 +71,9 @@ function open(d: Deployment, event: MouseEvent) {
         </td>
         <td :data-label="hasOrigin(d) ? 'Origin' : undefined" :class="hasOrigin(d) ? '' : 'max-sm:!hidden'">
           <DeploymentOrigin :deployment="d" :known="props.deployments" />
+        </td>
+        <td v-if="anyBy" :data-label="d.by ? 'By' : undefined" class="mono text-fg-muted" :class="d.by ? '' : 'max-sm:!hidden'">
+          {{ d.by ?? '' }}
         </td>
         <td data-label="Status">
           <StatusBadge v-bind="deploymentStatusDisplay(d.status)" :raw="d.status" />

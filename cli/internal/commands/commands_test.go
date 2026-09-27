@@ -41,20 +41,29 @@ type fakeAgent struct {
 	events          []api.Event
 	server          api.Server
 	metrics         *api.Metrics // nil: the agent answers 404
+	health          api.Health   // zero: the agent runs 1.2.3
 
 	deployBodies []string
 	actionBodies map[string]string // "redeploy" | "rollback" → the JSON body received
 	requests     []string
 	env          map[string]string // extra environment for the CLI under test
+	stdin        string            // what the CLI under test reads from standard input
+	upgrade      upgradeOptions    // where `shipwick upgrade` looks, see upgrade_test.go
+	jobs         fakeJobs          // see jobs_test.go
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
 	t.Helper()
 	f := &fakeAgent{t: t, actionBodies: map[string]string{}}
 	mux := http.NewServeMux()
+	f.jobs.register(mux)
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, api.Health{Status: "ok", Version: "1.2.3"})
+		health := f.health
+		if health.Version == "" {
+			health = api.Health{Status: "ok", Version: "1.2.3"}
+		}
+		respond(w, 200, health)
 	})
 	mux.HandleFunc("GET /api/v1/server", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, f.server)
@@ -126,7 +135,8 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 		f.mu.Lock()
 		f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 		f.mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer "+testToken {
+		// Health is the one unauthenticated endpoint, as on the real agent.
+		if r.URL.Path != "/api/v1/health" && r.Header.Get("Authorization") != "Bearer "+testToken {
 			respondError(w, 401, api.Error{Code: api.CodeUnauthorized, Message: "missing or invalid API token"})
 			return
 		}
@@ -166,13 +176,14 @@ func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 		env[k] = v
 	}
 	c, root := newRoot(Options{
-		In:     strings.NewReader(""),
+		In:     strings.NewReader(f.stdin),
 		Out:    &out,
 		Err:    &errOut,
 		Getenv: func(k string) string { return env[k] },
 	})
 	c.pollInterval = time.Millisecond
 	c.now = func() time.Time { return fixedNow }
+	c.upgrade = f.upgrade
 	root.SetArgs(args)
 	err := root.ExecuteContext(context.Background())
 	return out.String(), errOut.String(), err

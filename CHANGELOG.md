@@ -16,6 +16,88 @@ says so under **Changed** and explains how to upgrade.
   application or a container outside Shipwick uses.
 - winget manifests for the CLI under `packaging/winget/`, generated from a
   release's checksums.
+- **`publish`** in `deploy.yaml`: a container port published on a port of the
+  server itself, for services the proxy cannot serve because they are not
+  HTTP — a database reached from a laptop, a game server. TCP or UDP, on one
+  address of the server or on all; needs the recreate strategy and one replica.
+  A port the agent, the proxy or another application already holds is refused
+  before anything is started.
+- **Several hostnames per application.** `aliases` lists hostnames served
+  exactly like `domain`; `redirects` lists hostnames answered with a `308` to
+  `https://<domain>` with the same path and query — `www.example.com`, an old
+  domain. Redirects work while the application is stopped. A hostname in use
+  anywhere, in any role, is refused, and the error names the offending line
+  (`aliases[1]`).
+- **Health checks for applications that are not HTTP.** `health.tcp: 5432`
+  counts a replica healthy when the port accepts a connection;
+  `health.command: ["pg_isready", "-U", "postgres"]` runs the command inside
+  the replica and reads its exit code. `path`, `tcp` and `command` are
+  alternatives; `interval`, `timeout` and `retries` apply to all three. A
+  failed command check reports the exit code and the last line it printed.
+- **`env` values are encrypted in the database.** Every deployment's environment
+  values are stored as AES-256-GCM ciphertext; names, images and everything else
+  stay readable. A copy of `shipwick.db` without the key reveals no secrets. The
+  values of deployments made by earlier releases are encrypted on the first
+  start after upgrading. The key comes from `SHIPWICK_ENCRYPTION_KEY` (64 hex
+  characters) when set.
+- **`entrypoint`, `command` and `user`** in `deploy.yaml` replace what the image
+  declares, for running a worker or a second program from the same image. A
+  string is one argument, a list is several; nothing goes through a shell.
+- **`logging`** in `deploy.yaml` ships replica logs through a Docker logging
+  driver (`gelf`, `syslog`, `fluentd`, `awslogs`, `splunk`, `journald` or
+  `local`) instead of the server's disk. `shipwick logs` keeps working through
+  the local copy Docker keeps.
+- **Several API tokens, with roles.** `shipwick token create ci --role deploy`
+  makes a token that can deploy, roll back, stop and start but not delete
+  applications or manage tokens; `read` only looks; `admin` does everything.
+  The token from the installer is the root token, admin, and stays as it was.
+  `shipwick token ls` shows when each token was last used, `shipwick token
+  revoke` ends it. A token asked to do more than its role allows is told which
+  role it needs.
+- Deployments record which token made them (`by` in the API and the dashboard's
+  history), and a stop or start by a token other than root says so in the
+  application's events.
+- **`shipwick upgrade`** replaces the CLI with the latest release, verified
+  against the release's checksums, and says when the server is behind (the
+  server is still upgraded by running the installer there). A CLI installed
+  with Homebrew or winget is left to the package manager; the command prints
+  the line to run. `--check` only reports.
+- **Several servers.** `shipwick login --context staging` saves a second server
+  under a name; `--context` or `SHIPWICK_CONTEXT` picks one for a command, and
+  `shipwick context ls | use | rm | current` manage them. An existing config
+  file keeps working as the context `default`.
+- **Volume backups.** `shipwick backup` downloads an application's volumes as
+  tar archives, `shipwick restore` puts one back into a stopped application.
+  The agent reads and writes the volume through the replica's container, so
+  nothing needs to be installed on the server. New endpoints
+  `GET`/`PUT /applications/:name/volumes/:volume/archive` and
+  `GET /applications/:name/volumes`; a restore of a running application is
+  `409 APPLICATION_RUNNING`.
+- **Notifications.** Set `SHIPWICK_WEBHOOK_URL` on the agent and it posts
+  every deployment's outcome — succeeded, failed, rolled back — and every
+  application that goes down or recovers to a Slack or Discord webhook, or as
+  JSON to any HTTPS endpoint; `SHIPWICK_WEBHOOK_SECRET` signs the requests.
+  `shipwick server status` shows whether one is configured.
+- **Metrics history.** The agent records the CPU and memory of every running
+  replica every 30 seconds and keeps a week; `GET
+  /applications/:name/metrics/history?since=1h|24h|7d` serves it per replica,
+  aggregated to chart size, for the dashboard to draw.
+- **`pre_deploy`** in `deploy.yaml`: a command run from the new image, with the
+  application's environment, before any replica of the new version starts —
+  database migrations. If it fails, the deployment fails before anything was
+  touched, and its last output lines are shown with the error.
+- **`jobs`** in `deploy.yaml`: commands on a cron schedule (UTC), each in a
+  one-off container from the application's image. `shipwick jobs` lists them
+  with their last and next run, `shipwick jobs run` starts one now,
+  `shipwick jobs logs` shows a run's output.
+- **`shipwick run <app> -- <command>`** runs a command in a one-off container
+  of the application, prints its output and exits with its exit code.
+
+### Changed
+
+- The agent creates `encryption.key` in its data directory on first start; back
+  it up together with `shipwick.db`. Without it the database cannot be read, and
+  the agent refuses to start against it.
 
 ### Fixed
 

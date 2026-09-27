@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/config"
 	"github.com/shipwick/shipwick/agent/internal/deploy"
 	"github.com/shipwick/shipwick/agent/internal/docker"
+	"github.com/shipwick/shipwick/agent/internal/notify"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
 	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/version"
@@ -96,10 +98,18 @@ func run() error {
 		printGeneratedToken(generated)
 	}
 
+	encryptionKey, created, err := config.ResolveEncryptionKey(cfg)
+	if err != nil {
+		return err
+	}
+	if created {
+		log.Info("created the key that encrypts env values in the database; back it up together with shipwick.db", "file", cfg.EncryptionKeyPath())
+	}
+
 	startCtx, cancelStart := context.WithTimeout(ctx, startupTimeout)
 	defer cancelStart()
 
-	st, err := store.Open(startCtx, cfg.DatabasePath())
+	st, err := store.Open(startCtx, cfg.DatabasePath(), store.Options{EncryptionKey: encryptionKey, Logger: log})
 	if err != nil {
 		return err
 	}
@@ -130,7 +140,7 @@ func run() error {
 			"applications with a health check will fail to deploy. Run the agent in a container (docker compose up)")
 	}
 
-	opts := deploy.Options{Logger: log}
+	opts := deploy.Options{Logger: log, ReservedHostPorts: reservedHostPorts(cfg.ListenAddr)}
 	if cfg.CaddyAdmin != "" {
 		caddy, err := proxy.NewCaddy(cfg.CaddyAdmin)
 		if err != nil {
@@ -152,6 +162,18 @@ func run() error {
 	} else {
 		log.Warn("no reverse proxy configured: applications with a domain will not be reachable", "set", config.EnvCaddyAdmin)
 	}
+	if cfg.WebhookURL != "" {
+		info, _ := rt.Info(startCtx)
+		hook, err := notify.NewWebhook(notify.Options{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret, Server: info.Hostname, Logger: log})
+		if err != nil {
+			return fmt.Errorf("%s: %w", config.EnvWebhookURL, err)
+		}
+		// Closed after the engine has shut down (deferred, so last), which
+		// is when the outcome of an interrupted deployment is known.
+		defer hook.Close()
+		opts.Notifier = hook
+		log.Info("notifications go to a webhook", "host", hook.Host())
+	}
 
 	engine := deploy.New(st, rt, opts)
 	if err := engine.Recover(startCtx); err != nil {
@@ -165,7 +187,7 @@ func run() error {
 	// After Recover: the supervisor must only ever see settled state.
 	engine.StartSupervisor()
 
-	apiServer := api.New(engine, tokenHash, log)
+	apiServer := api.New(engine, st, tokenHash, log)
 	srv := &http.Server{
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -210,6 +232,19 @@ func run() error {
 
 	log.Info("shutdown complete")
 	return errors.Join(httpErr, engineErr)
+}
+
+// reservedHostPorts are the server ports an application may not publish: the
+// agent's own, and the ones the compose files publish the proxy on — 80 and
+// 443 in production, 8080 and 8443 in development.
+func reservedHostPorts(listenAddr string) []int {
+	ports := []int{80, 443, 8080, 8443}
+	if _, port, err := net.SplitHostPort(listenAddr); err == nil {
+		if n, err := strconv.Atoi(port); err == nil {
+			ports = append(ports, n)
+		}
+	}
+	return ports
 }
 
 // ownAddress is where the reverse proxy can reach this agent. In a container

@@ -24,7 +24,7 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	st, err := store.Open(context.Background(), ":memory:")
+	st, err := store.Open(context.Background(), ":memory:", store.Options{EncryptionKey: []byte("an-encryption-key-of-32-bytes!!!")})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

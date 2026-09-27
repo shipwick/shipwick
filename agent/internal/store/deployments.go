@@ -40,6 +40,8 @@ type Deployment struct {
 	// the deployment whose stored spec a redeploy or rollback re-used.
 	Kind     string
 	SourceID *int64
+	// Actor is the name of the token that started the deployment.
+	Actor string
 }
 
 type Replica struct {
@@ -54,13 +56,18 @@ type Replica struct {
 // CreateDeployment registers the application if it is new and appends a
 // PENDING deployment with the next sequence number.
 func (s *Store) CreateDeployment(ctx context.Context, app spec.App, now time.Time) (Deployment, error) {
-	return s.CreateDeploymentFrom(ctx, app, api.KindDeploy, nil, now)
+	return s.CreateDeploymentFrom(ctx, app, api.KindDeploy, nil, "", now)
 }
 
 // CreateDeploymentFrom is CreateDeployment for a deployment that re-uses the
-// stored spec of an earlier one: a redeploy or a rollback.
-func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind string, sourceID *int64, now time.Time) (Deployment, error) {
-	specJSON, err := json.Marshal(app)
+// stored spec of an earlier one: a redeploy or a rollback. actor is the name
+// of the token the deployment is made with.
+func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind string, sourceID *int64, actor string, now time.Time) (Deployment, error) {
+	sealed, err := s.sealSpec(app)
+	if err != nil {
+		return Deployment{}, fmt.Errorf("encrypt environment values: %w", err)
+	}
+	specJSON, err := json.Marshal(sealed)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("encode spec: %w", err)
 	}
@@ -74,6 +81,7 @@ func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind str
 		StartedAt:   now.UTC(),
 		Kind:        kind,
 		SourceID:    sourceID,
+		Actor:       actor,
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		ts := formatTime(now)
@@ -94,9 +102,9 @@ func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind str
 			return err
 		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO deployments (application_id, sequence, version, image, spec, status, started_at, kind, source_deployment_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			d.ApplicationID, d.Sequence, d.Version, d.Image, string(specJSON), string(d.Status), ts, kind, sourceID)
+			`INSERT INTO deployments (application_id, sequence, version, image, spec, status, started_at, kind, source_deployment_id, actor)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			d.ApplicationID, d.Sequence, d.Version, d.Image, string(specJSON), string(d.Status), ts, kind, sourceID, actor)
 		if err != nil {
 			return err
 		}
@@ -197,7 +205,7 @@ func (s *Store) ActivateDeployment(ctx context.Context, id int64, now time.Time)
 		}
 
 		if prevID.Valid {
-			p, err := scanDeployment(tx.QueryRowContext(ctx, deploymentSelect+` WHERE d.id = ?`, prevID.Int64))
+			p, err := s.scanDeployment(tx.QueryRowContext(ctx, deploymentSelect+` WHERE d.id = ?`, prevID.Int64))
 			if err != nil {
 				return err
 			}
@@ -213,14 +221,14 @@ func (s *Store) ActivateDeployment(ctx context.Context, id int64, now time.Time)
 
 const deploymentSelect = `
 	SELECT d.id, d.application_id, a.name, d.sequence, d.version, d.image, d.spec,
-	       d.status, d.error, d.started_at, d.completed_at, d.kind, d.source_deployment_id
+	       d.status, d.error, d.started_at, d.completed_at, d.kind, d.source_deployment_id, d.actor
 	FROM deployments d JOIN applications a ON a.id = d.application_id`
 
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanDeployment(row rowScanner) (Deployment, error) {
+func (s *Store) scanDeployment(row rowScanner) (Deployment, error) {
 	var (
 		d         Deployment
 		specJSON  string
@@ -230,7 +238,7 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 		source    sql.NullInt64
 	)
 	err := row.Scan(&d.ID, &d.ApplicationID, &d.Application, &d.Sequence, &d.Version, &d.Image,
-		&specJSON, &status, &d.Error, &started, &completed, &d.Kind, &source)
+		&specJSON, &status, &d.Error, &started, &completed, &d.Kind, &source, &d.Actor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Deployment{}, ErrNotFound
 	} else if err != nil {
@@ -243,6 +251,9 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 	if err := json.Unmarshal([]byte(specJSON), &d.Spec); err != nil {
 		return Deployment{}, fmt.Errorf("decode spec of deployment %d: %w", d.ID, err)
 	}
+	if err := s.openSpec(&d.Spec); err != nil {
+		return Deployment{}, fmt.Errorf("decode spec of deployment %d: %w", d.ID, err)
+	}
 	if d.StartedAt, err = parseTime(started); err != nil {
 		return Deployment{}, err
 	}
@@ -253,7 +264,7 @@ func scanDeployment(row rowScanner) (Deployment, error) {
 }
 
 func (s *Store) GetDeployment(ctx context.Context, id int64) (Deployment, error) {
-	return scanDeployment(s.db.QueryRowContext(ctx, deploymentSelect+` WHERE d.id = ?`, id))
+	return s.scanDeployment(s.db.QueryRowContext(ctx, deploymentSelect+` WHERE d.id = ?`, id))
 }
 
 // DeploymentFilter narrows ListDeployments. Zero values mean "no filter".
@@ -297,7 +308,7 @@ func (s *Store) ListDeployments(ctx context.Context, f DeploymentFilter) ([]Depl
 
 	var out []Deployment
 	for rows.Next() {
-		d, err := scanDeployment(rows)
+		d, err := s.scanDeployment(rows)
 		if err != nil {
 			return nil, err
 		}

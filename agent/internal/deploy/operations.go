@@ -32,7 +32,7 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 				return fmt.Errorf("replica %d: %w", replicas[i].Index, err)
 			}
 		}
-		e.appEvent(ctx, app, "Application stopped")
+		e.appEvent(ctx, app, byActor(ctx, "Application stopped"))
 		return nil
 	})
 }
@@ -62,7 +62,7 @@ func (e *Engine) Start(ctx context.Context, name string) error {
 			return err
 		}
 		e.syncProxyBestEffort(ctx, app.Name)
-		e.appEvent(ctx, app, "Application started")
+		e.appEvent(ctx, app, byActor(ctx, "Application started"))
 		return nil
 	})
 }
@@ -118,7 +118,8 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 	}
 	e.syncProxyBestEffort(ctx, name)
 	removed := e.pruneImages(ctx, images)
-	e.log.Info("application deleted", "app", name, "containers", len(containers), "images", removed)
+	// Its history goes with it, so the log is the only record of who did this.
+	e.log.Info("application deleted", "app", name, "by", actorFrom(ctx), "containers", len(containers), "images", removed)
 	return nil
 }
 
@@ -142,6 +143,13 @@ func (e *Engine) Recover(ctx context.Context) error {
 			return err
 		}
 	}
+	// Likewise the jobs: whoever was waiting on them is gone, and so are
+	// their containers below.
+	if n, err := e.store.MarkJobRunsInterrupted(ctx, time.Now()); err != nil {
+		return err
+	} else if n > 0 {
+		e.log.Warn("found interrupted job runs", "runs", n)
+	}
 
 	apps, err := e.store.ListApplications(ctx)
 	if err != nil {
@@ -161,7 +169,7 @@ func (e *Engine) Recover(ctx context.Context) error {
 	}
 	var leftovers []docker.Container
 	for _, c := range containers {
-		if activeID, known := active[c.App]; known && c.DeploymentID != activeID {
+		if activeID, known := active[c.App]; known && (c.Job != "" || c.DeploymentID != activeID) {
 			e.log.Warn("removing leftover container", "container", c.Name, "app", c.App, "deployment", c.DeploymentID)
 			leftovers = append(leftovers, c)
 			continue

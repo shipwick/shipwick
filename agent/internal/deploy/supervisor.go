@@ -44,6 +44,10 @@ type supervisor struct {
 
 	probes       sync.WaitGroup // in-flight health probes
 	inlineProbes bool           // tests only
+
+	// down lists the applications reported down and not yet recovered, by
+	// name: see noteAvailability.
+	down map[string]bool
 }
 
 type replicaState struct {
@@ -69,7 +73,7 @@ type recreateState struct {
 }
 
 func newSupervisor(e *Engine) *supervisor {
-	return &supervisor{e: e, states: map[string]*replicaState{}, recreate: map[int64]*recreateState{}}
+	return &supervisor{e: e, states: map[string]*replicaState{}, recreate: map[int64]*recreateState{}, down: map[string]bool{}}
 }
 
 // StartSupervisor runs the supervisor until the engine shuts down.
@@ -92,9 +96,11 @@ func (e *Engine) StartSupervisor() {
 				return
 			case now := <-ticker.C:
 				e.sup.tick(e.baseCtx, now)
+				e.scheduleJobs(e.baseCtx, now)
 			}
 		}
 	}()
+	e.startSampler()
 }
 
 // tick performs one supervision pass. Time is a parameter so that tests can
@@ -121,6 +127,7 @@ func (s *supervisor) tick(ctx context.Context, now time.Time) {
 		s.e.unlock(app.Name)
 	}
 	s.forgetGone(ctx, active)
+	s.forgetDown(apps)
 
 	// Routing follows readiness: a replica that just died or turned unhealthy
 	// leaves the rotation here, one that recovered rejoins it. Syncing is a
@@ -211,6 +218,9 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 	// Containers of any other deployment are leftovers — of a cleanup that was
 	// interrupted, say. With the lock held, no deployment can be in flight.
 	for _, c := range containers {
+		if c.Job != "" {
+			continue
+		}
 		if c.DeploymentID != d.ID {
 			if err := s.e.retireContainer(ctx, c.ID); err == nil {
 				s.event(ctx, app, api.LevelWarn, "Removed leftover container %s", c.Name)
@@ -242,6 +252,7 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 	if len(missing) > 0 {
 		s.recreateReplicas(ctx, now, app, d, missing)
 	}
+	s.noteAvailability(ctx, app, d, replicas, byID)
 }
 
 // noteDisappeared retires the record of a replica whose container no longer
@@ -362,7 +373,7 @@ func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app st
 		}
 		if !restartUnhealthy && !st.probing && c.IP != "" && now.Sub(st.lastProbe) >= every {
 			st.probing, st.lastProbe = true, now
-			probe = func() { s.probe(ctx, now, app, d, r, c.IP) }
+			probe = func() { s.probe(ctx, now, app, d, r, c) }
 		}
 	}
 	s.mu.Unlock()
@@ -393,9 +404,9 @@ func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app st
 // probe runs one health check and folds the result into the replica's state.
 // now is the tick that launched it; a probe's own duration is noise next to
 // the budgets it is compared against.
-func (s *supervisor) probe(ctx context.Context, now time.Time, app store.Application, d store.Deployment, r store.Replica, ip string) {
+func (s *supervisor) probe(ctx context.Context, now time.Time, app store.Application, d store.Deployment, r store.Replica, c docker.Container) {
 	h := d.Spec.Health
-	err := s.e.opts.Probe(ctx, ip, d.Spec.Port, h.Path, h.Timeout.Std())
+	err := s.e.probeReplica(ctx, &d, c)
 	if ctx.Err() != nil {
 		return // shutting down: the result says nothing about the replica
 	}

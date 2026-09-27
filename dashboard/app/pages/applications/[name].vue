@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import type { AgentEvent, ApplicationDetail, Container, Deployment } from '~/types/api'
+import type { AgentEvent, ApplicationDetail, Container, Deployment, SpecVolume } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
-import { METRICS_HISTORY_SAMPLES } from '~/composables/useMetricsHistory'
+import { LIVE_METRICS_SAMPLES } from '~/composables/useLiveMetrics'
 import { formatBytes, formatCores, formatMemoryUsage, formatPercent, splitImage } from '~/utils/format'
 import { rollbackCandidates } from '~/utils/deployments'
+import { METRICS_RANGES } from '~/utils/metricsHistory'
+import { roleHint } from '~/utils/roles'
+import { tidyDuration } from '~/utils/jobs'
+import { describeHealth, describeLogging, formatArgv, formatPublish, hostnamesOf, shippedLogDriver } from '~/utils/spec'
 import { applicationStatusDisplay, containerStateDisplay, replicaHealthDisplay } from '~/utils/status'
 
 const route = useRoute()
 const router = useRouter()
 const agent = useAgent()
+const access = useAccess()
 
 const name = computed(() => String(route.params.name))
 const path = computed(() => `/applications/${encodeURIComponent(name.value)}`)
@@ -34,7 +39,8 @@ const events = usePolling<AgentEvent[]>(signal => agent.get<AgentEvent[]>(`${pat
 
 const gone = computed(() => app.error.value?.notFound === true)
 const hasActive = computed(() => Boolean(app.data.value?.active_deployment))
-const metrics = useMetricsHistory(name, () => hasActive.value && !gone.value)
+const metrics = useLiveMetrics(name, () => hasActive.value && !gone.value)
+const history = useMetricsHistory(name, () => hasActive.value && !gone.value)
 
 watch(name, () => {
   void app.reset()
@@ -74,13 +80,19 @@ function dismissProgress() {
 
 // --- actions ------------------------------------------------------------------
 
-const dialog = ref<'deploy' | 'rollback' | 'stop' | 'delete' | null>(null)
+const dialog = ref<'deploy' | 'rollback' | 'stop' | 'delete' | 'restore' | null>(null)
 const actionPending = ref(false)
 const actionError = shallowRef<AgentError | null>(null)
+const restoreVolume = ref<SpecVolume | null>(null)
 
 const busy = computed(() => Boolean(app.data.value?.deploying) || progress.active.value)
 const stopped = computed(() => app.data.value?.desired_state === 'stopped')
 const rollbackTargets = computed(() => rollbackCandidates(deployments.data.value ?? [], name.value))
+
+// What the signed-in token may do; the agent decides for real and a refusal is rendered where it happens.
+const mayDeploy = computed(() => access.can('deploy'))
+const mayAdmin = computed(() => access.can('admin'))
+const deployHint = computed(() => (mayDeploy.value ? undefined : roleHint('deploy')))
 
 async function setRunning(run: boolean) {
   actionPending.value = true
@@ -101,6 +113,17 @@ async function setRunning(run: boolean) {
 function closeDialog() {
   dialog.value = null
   actionError.value = null
+}
+
+function openRestore(volume: SpecVolume) {
+  restoreVolume.value = volume
+  dialog.value = 'restore'
+}
+
+/** The restore dialog offers to start the application; it stays stopped otherwise. */
+function startAfterRestore() {
+  closeDialog()
+  void setRunning(true)
 }
 
 // --- presentation -------------------------------------------------------------
@@ -157,11 +180,25 @@ const proxyProblem = computed(() => {
   return ''
 })
 
-const healthCheck = computed(() => {
-  const h = spec.value?.health
-  if (!h) return null
-  return `GET ${h.path} every ${h.interval}, timeout ${h.timeout}, ${h.retries} retries`
+// Every hostname the application answers on. Redirects are answered by the
+// proxy itself, so they keep working while the application is stopped.
+const hostnames = computed(() => (app.data.value ? hostnamesOf(app.data.value) : []))
+
+const healthCheck = computed(() => describeHealth(spec.value?.health))
+const published = computed(() => (spec.value?.publish ?? []).map(formatPublish))
+const process = computed(() => {
+  const s = spec.value
+  if (!s) return []
+  const lines: { label: string, value: string }[] = []
+  if (s.entrypoint?.length) lines.push({ label: 'Entrypoint', value: formatArgv(s.entrypoint) })
+  if (s.command?.length) lines.push({ label: 'Command', value: formatArgv(s.command) })
+  if (s.user) lines.push({ label: 'User', value: s.user })
+  return lines
 })
+const logging = computed(() => describeLogging(spec.value))
+const loggingOptions = computed(() => Object.entries(spec.value?.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+const shippedTo = computed(() => shippedLogDriver(spec.value))
+const volumes = computed(() => spec.value?.volumes ?? [])
 </script>
 
 <template>
@@ -171,29 +208,36 @@ const healthCheck = computed(() => {
         <UiButton
           variant="primary"
           size="sm"
-          :disabled="busy || !hasActive"
-          :title="!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : undefined"
+          :disabled="busy || !hasActive || !mayDeploy"
+          :title="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : undefined)"
           @click="dialog = 'deploy'"
         >
           Deploy
         </UiButton>
         <UiButton
           size="sm"
-          :disabled="busy || rollbackTargets.length === 0"
-          :title="rollbackTargets.length === 0 ? 'No earlier successful deployment' : undefined"
+          :disabled="busy || rollbackTargets.length === 0 || !mayDeploy"
+          :title="deployHint ?? (rollbackTargets.length === 0 ? 'No earlier successful deployment' : undefined)"
           @click="dialog = 'rollback'"
         >
           Rollback
         </UiButton>
-        <UiButton v-if="stopped" size="sm" :disabled="busy || !hasActive" :pending="actionPending && dialog === null" @click="setRunning(true)">
+        <UiButton
+          v-if="stopped"
+          size="sm"
+          :disabled="busy || !hasActive || !mayDeploy"
+          :title="deployHint"
+          :pending="actionPending && dialog === null"
+          @click="setRunning(true)"
+        >
           <UiIcon name="play" :size="12" />
           Start
         </UiButton>
-        <UiButton v-else size="sm" :disabled="busy || !hasActive" @click="dialog = 'stop'">
+        <UiButton v-else size="sm" :disabled="busy || !hasActive || !mayDeploy" :title="deployHint" @click="dialog = 'stop'">
           <UiIcon name="pause" :size="12" />
           Stop
         </UiButton>
-        <UiButton variant="danger" size="sm" :disabled="busy" @click="dialog = 'delete'">
+        <UiButton variant="danger" size="sm" :disabled="busy || !mayAdmin" :title="mayAdmin ? undefined : roleHint('admin')" @click="dialog = 'delete'">
           <UiIcon name="trash" :size="12" />
           Delete
         </UiButton>
@@ -256,19 +300,33 @@ const healthCheck = computed(() => {
                 {{ app.data.value.image || '—' }}
               </dd>
               <dt class="label pt-0.5">
-                Domain
+                {{ hostnames.length > 1 ? 'Hostnames' : 'Domain' }}
               </dt>
               <dd>
-                <a
-                  v-if="app.data.value.domain"
-                  :href="`https://${app.data.value.domain}`"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="mono link inline-flex items-center gap-1"
-                >{{ app.data.value.domain }}<UiIcon name="external" :size="12" /></a>
+                <template v-if="hostnames.length > 0">
+                  <div v-for="entry in hostnames" :key="entry.host" class="flex flex-wrap items-center gap-x-2">
+                    <a
+                      :href="`https://${entry.host}`"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="mono link inline-flex items-center gap-1"
+                      :class="entry.kind === 'redirect' ? 'text-fg-muted' : ''"
+                    >{{ entry.host }}<UiIcon name="external" :size="12" /></a>
+                    <span v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :title="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</span>
+                    <span v-else-if="entry.kind === 'alias'" class="text-xs text-fg-subtle">alias</span>
+                    <span v-if="entry.kind === 'domain' && proxyProblem" class="text-xs text-warn">{{ proxyProblem }}</span>
+                  </div>
+                </template>
                 <span v-else class="text-fg-muted">Not routed</span>
-                <span v-if="app.data.value.domain && proxyProblem" class="ml-2 text-xs text-warn">{{ proxyProblem }}</span>
               </dd>
+              <template v-if="published.length > 0">
+                <dt class="label pt-0.5">
+                  Published
+                </dt>
+                <dd class="mono" title="Reachable from outside the reverse proxy, on the server's own port">
+                  <div v-for="line in published" :key="line">{{ line }}</div>
+                </dd>
+              </template>
             </dl>
           </div>
 
@@ -285,7 +343,7 @@ const healthCheck = computed(() => {
                 label="CPU"
                 :values="cpuValues"
                 :times="sampleTimes"
-                :slots="METRICS_HISTORY_SAMPLES"
+                :slots="LIVE_METRICS_SAMPLES"
                 :ceiling="cpuCeiling"
                 :format="formatPercent"
               />
@@ -300,7 +358,7 @@ const healthCheck = computed(() => {
                 label="Memory"
                 :values="memoryValues"
                 :times="sampleTimes"
-                :slots="METRICS_HISTORY_SAMPLES"
+                :slots="LIVE_METRICS_SAMPLES"
                 :ceiling="memoryCeiling"
                 :format="formatBytes"
               />
@@ -323,6 +381,46 @@ const healthCheck = computed(() => {
           :app-status="app.data.value.status"
           @dismiss="dismissProgress"
         />
+
+        <!-- The sampled history: per replica, average CPU and peak memory per step, refreshed every 30s -->
+        <UiPanel title="History" :meta="history.history.value ? `every ${history.history.value.step}` : null">
+          <template #actions>
+            <div role="group" aria-label="Range" class="inline-flex overflow-hidden rounded-sm border border-line-strong">
+              <button
+                v-for="r in METRICS_RANGES"
+                :key="r"
+                type="button"
+                class="mono h-6 border-l border-line-strong px-2 text-xs first:border-l-0"
+                :class="history.range.value === r ? 'bg-active font-medium text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg'"
+                :aria-pressed="history.range.value === r"
+                @click="history.range.value = r"
+              >
+                {{ r }}
+              </button>
+            </div>
+          </template>
+          <EmptyState v-if="!hasActive || history.unavailable.value" title="Nothing is deployed">
+            The history starts with the first successful deployment.
+          </EmptyState>
+          <EmptyState v-else-if="history.unsupported.value" title="This agent keeps no history">
+            Metrics history needs a newer agent. Upgrade it to see CPU and memory over time.
+          </EmptyState>
+          <div v-else-if="history.loading.value && !history.history.value" class="space-y-3 px-4 py-3" aria-busy="true">
+            <span class="skeleton h-[7.5rem] w-full" />
+            <span class="skeleton h-[7.5rem] w-full" />
+          </div>
+          <ErrorState
+            v-else-if="history.error.value && !history.history.value"
+            :error="history.error.value"
+            subject="the metrics history"
+            :retrying="history.refreshing.value"
+            @retry="history.refresh()"
+          />
+          <div v-else-if="history.history.value" class="divide-y divide-line">
+            <MetricsHistoryChart :history="history.history.value" metric="cpu_percent" :range="history.range.value" label="CPU" :format="formatPercent" />
+            <MetricsHistoryChart :history="history.history.value" metric="memory_bytes" :range="history.range.value" label="Memory" :format="formatBytes" />
+          </div>
+        </UiPanel>
 
         <UiPanel title="Replicas" :meta="app.data.value.containers.length">
           <EmptyState v-if="app.data.value.containers.length === 0" title="No containers">
@@ -392,7 +490,12 @@ const healthCheck = computed(() => {
                 Health check
               </dt>
               <dd class="mono mt-0.5">
-                {{ healthCheck ?? 'None: replicas only need to stay up' }}
+                <template v-if="healthCheck">
+                  {{ healthCheck.check }} <span class="text-fg-muted">{{ healthCheck.schedule }}</span>
+                </template>
+                <template v-else>
+                  None: replicas only need to stay up
+                </template>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -427,12 +530,42 @@ const healthCheck = computed(() => {
                 {{ spec.deploy.strategy }}
               </dd>
             </div>
-            <div v-if="spec.volumes?.length" class="bg-bg px-4 py-2.5">
+            <div v-if="process.length > 0" class="bg-bg px-4 py-2.5">
               <dt class="label">
-                Volumes
+                Process
+              </dt>
+              <dd class="mt-0.5 space-y-0.5">
+                <div v-for="line in process" :key="line.label" class="flex gap-2">
+                  <span class="w-20 shrink-0 text-fg-muted">{{ line.label }}</span>
+                  <span class="mono min-w-0 break-all">{{ line.value }}</span>
+                </div>
+              </dd>
+            </div>
+            <div v-if="spec.pre_deploy" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Pre-deploy
+              </dt>
+              <dd class="mono mt-0.5 break-all" title="Runs in a one-off container before any replica is replaced; the deployment fails if it does">
+                {{ formatArgv(spec.pre_deploy.command) }} <span class="text-fg-muted">timeout {{ tidyDuration(spec.pre_deploy.timeout) }}</span>
+              </dd>
+            </div>
+            <div v-if="logging" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Logging
               </dt>
               <dd class="mono mt-0.5">
-                <div v-for="v in spec.volumes" :key="v.name">{{ v.name }} <span class="text-fg-muted">at</span> {{ v.path }}</div>
+                {{ logging }}
+                <details v-if="loggingOptions.length > 0" class="mt-1 font-sans text-xs">
+                  <summary class="cursor-pointer select-none text-fg-subtle hover:text-fg">
+                    Options
+                  </summary>
+                  <dl class="mono mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5">
+                    <template v-for="[key, value] in loggingOptions" :key="key">
+                      <dt class="text-fg-muted">{{ key }}</dt>
+                      <dd class="break-all">{{ value }}</dd>
+                    </template>
+                  </dl>
+                </details>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -444,6 +577,26 @@ const healthCheck = computed(() => {
               </dd>
             </div>
           </dl>
+        </UiPanel>
+
+        <JobsSection
+          v-if="spec && hasActive && !gone"
+          :application="name"
+          :spec="spec"
+          :image="app.data.value.image"
+          :may-deploy="mayDeploy"
+          :busy="busy"
+        />
+
+        <UiPanel v-if="volumes.length > 0" title="Volumes" :meta="volumes.length">
+          <VolumesPanel
+            :application="name"
+            :volumes="volumes"
+            :admin="mayAdmin"
+            :stopped="stopped && app.data.value.replicas.running === 0"
+            :busy="busy"
+            @restore="openRestore"
+          />
         </UiPanel>
 
         <UiPanel title="Deployments">
@@ -491,7 +644,7 @@ const healthCheck = computed(() => {
               Open in Logs
             </NuxtLink>
           </template>
-          <LogViewer v-if="app.data.value.containers.length > 0" :application="name" height-class="h-80" />
+          <LogViewer v-if="app.data.value.containers.length > 0" :application="name" height-class="h-80" :shipped-to="shippedTo" />
           <div v-else class="rounded-sm border border-line">
             <EmptyState title="No logs">
               There are no containers to read logs from.
@@ -522,10 +675,18 @@ const healthCheck = computed(() => {
         @confirm="setRunning(false)"
       >
         All replicas are stopped<template v-if="app.data.value.domain">
-          and <span class="mono text-fg">{{ app.data.value.domain }}</span> stops answering
+          and <span class="mono text-fg">{{ app.data.value.domain }}</span> stops answering<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>
         </template>. The application stays stopped, across agent restarts too, until you start it again. Nothing is deleted.
       </ConfirmDialog>
       <DeleteDialog :open="dialog === 'delete'" :name="name" @close="closeDialog" @deleted="router.replace('/applications')" />
+      <RestoreDialog
+        :open="dialog === 'restore'"
+        :application="name"
+        :volume="restoreVolume"
+        @close="closeDialog"
+        @restored="refreshAll"
+        @start="startAfterRestore"
+      />
     </template>
   </div>
 </template>

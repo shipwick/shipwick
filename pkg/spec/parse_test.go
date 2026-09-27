@@ -103,6 +103,46 @@ func TestParseHealthDefaults(t *testing.T) {
 	}
 }
 
+func TestParseHealthKinds(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		kind   string
+		check  func(h *Health) bool
+	}{
+		{"http", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n", HealthHTTP,
+			func(h *Health) bool { return h.Path == "/up" && h.TCP == 0 && h.Command == nil }},
+		// Neither a TCP nor a command check needs `port`: the one names its
+		// own, the other has no port at all.
+		{"tcp", "name: db\nimage: postgres:16\nhealth:\n  tcp: 5432\n", HealthTCP,
+			func(h *Health) bool { return h.TCP == 5432 && h.Path == "" }},
+		{"command", "name: db\nimage: postgres:16\nhealth:\n  command: [pg_isready, -U, postgres]\n  timeout: 5s\n", HealthCommand,
+			func(h *Health) bool {
+				return len(h.Command) == 3 && h.Command[0] == "pg_isready" && h.Command[2] == "postgres" && h.Timeout.Std() == 5*time.Second
+			}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, err := Parse([]byte(tt.config))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if app.Health == nil || app.Health.Kind() != tt.kind || !tt.check(app.Health) {
+				t.Fatalf("Health = %+v, want kind %s", app.Health, tt.kind)
+			}
+			// The agent stores the spec as JSON and reads it back for every probe.
+			data, _ := json.Marshal(app)
+			var back App
+			if err := json.Unmarshal(data, &back); err != nil {
+				t.Fatal(err)
+			}
+			if back.Health.Kind() != tt.kind || !tt.check(back.Health) {
+				t.Errorf("after a JSON round trip: %+v", back.Health)
+			}
+		})
+	}
+}
+
 func TestParseAcceptsJSON(t *testing.T) {
 	app, err := Parse([]byte(`{"name":"my-api","image":"nginx:1.27","port":80,"resources":{"cpu":0.5,"memory":"256mb"}}`))
 	if err != nil {
@@ -140,8 +180,16 @@ func TestParseValidationErrors(t *testing.T) {
 		{"negative cpu", "name: a\nimage: nginx\nresources:\n  cpu: -1\n", "resources.cpu", "must be between"},
 		{"bad restart policy", "name: a\nimage: nginx\nrestart:\n  policy: sometimes\n", "restart.policy", `invalid value "sometimes"`},
 		{"bad strategy", "name: a\nimage: nginx\ndeploy:\n  strategy: yolo\n", "deploy.strategy", `invalid value "yolo"`},
-		{"health without path", "name: a\nimage: nginx\nport: 80\nhealth:\n  interval: 5s\n", "health.path", "is required"},
+		{"health without a check", "name: a\nimage: nginx\nport: 80\nhealth:\n  interval: 5s\n", "health", "one of path, tcp or command is required"},
+		{"health with path and tcp", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  tcp: 80\n", "health", "path and tcp are set"},
+		{"health with every kind", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  tcp: 80\n  command: [true]\n", "health", "path and tcp and command are set"},
 		{"health without port", "name: a\nimage: nginx\nhealth:\n  path: /up\n", "port", "required when health is set"},
+		{"health tcp zero", "name: a\nimage: nginx\nhealth:\n  tcp: 0\n", "health.tcp", "invalid value 0"},
+		{"health tcp too large", "name: a\nimage: nginx\nhealth:\n  tcp: 70000\n", "health.tcp", "invalid value 70000"},
+		{"health empty command", "name: a\nimage: nginx\nhealth:\n  command: []\n", "health.command", "must not be empty"},
+		{"health command with empty argument", "name: a\nimage: nginx\nhealth:\n  command: [pg_isready, \"\"]\n", "health.command[1]", "must not be empty"},
+		{"health command with NUL", "name: a\nimage: nginx\nhealth:\n  command: [pg_isready, \"-U\\x00postgres\"]\n", "health.command[1]", "NUL"},
+		{"health command too long", "name: a\nimage: nginx\nhealth:\n  command: [" + strings.Repeat("x, ", MaxHealthCommandArgs) + "x]\n", "health.command", "too many arguments (65)"},
 		{"health relative path", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: health\n", "health.path", "must start with /"},
 		{"health path with newline", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: \"/up\\r\\nHost: evil\"\n", "health.path", "control characters"},
 		{"bad interval", "name: a\nimage: nginx\nport: 80\nhealth:\n  path: /up\n  interval: soon\n", "health.interval", `invalid value "soon"`},

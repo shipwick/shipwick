@@ -27,6 +27,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, msg)
 		}
 		stop()
-		os.Exit(1)
+		os.Exit(commands.ExitCode(err))
 	}
 }

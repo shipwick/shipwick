@@ -247,7 +247,7 @@ SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
       # Settings given for this run have to outlive it: the next run, an
       # upgrade, must not quietly move the proxy back to the default ports.
-      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE; do
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET; do
           eval "value=\${$name:-}"
           [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
       done

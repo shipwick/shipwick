@@ -41,6 +41,39 @@ type ContainerSpec struct {
 	// volumes are created with the first container that mounts them and
 	// belong to the application: no container's removal removes them.
 	Mounts []Mount
+	// Publish maps container ports to ports on the host, for services that
+	// cannot go through the proxy. Empty for almost every application.
+	Publish []PortBinding
+	// Entrypoint, Command and User override the image. Nil and "" keep the
+	// image's own.
+	Entrypoint []string
+	Command    []string
+	User       string
+	// LogDriver and LogOptions select a Docker logging driver; empty means
+	// Shipwick's default, json-file capped at 3 x 10 MB.
+	LogDriver  string
+	LogOptions map[string]string
+	// Job is set for a one-off container run from the application's image —
+	// a pre-deploy hook, a scheduled job, `shipwick run` — instead of a
+	// replica. It gets its own name and labels, so that nothing that looks
+	// for replicas ever finds it.
+	Job *JobSpec
+}
+
+// PortBinding publishes a container port on the host.
+type PortBinding struct {
+	Port     int    // inside the container
+	HostPort int    // on the host
+	Address  string // host address to bind; empty = all
+	Protocol string // "tcp" or "udp"
+}
+
+// JobSpec identifies a one-off container: the job's name from deploy.yaml
+// ("pre-deploy" for the hook, "run" for an ad-hoc command) and the run it
+// belongs to.
+type JobSpec struct {
+	Name  string
+	RunID int64
 }
 
 // Mount is a named volume of an application at a path inside its containers.
@@ -66,6 +99,9 @@ type Container struct {
 	State        string // created, running, paused, restarting, removing, exited, dead
 	Running      bool
 	IP           string // address on the Shipwick network; empty unless running
+	// Job is the job's name for a one-off container (LabelJob) and empty for
+	// a replica. Everything that manages replicas skips containers with a Job.
+	Job string
 
 	// The fields below are only populated by InspectContainer.
 	ExitCode  int
@@ -254,8 +290,9 @@ func (r *Runtime) RemoveImage(ctx context.Context, image string) error {
 }
 
 // CreateContainer creates (but does not start) a replica container attached
-// to the Shipwick network. Containers publish no host ports: the reverse proxy
-// reaches them over the network.
+// to the Shipwick network. Containers publish no host ports unless deploy.yaml
+// publishes some, and then only those: the reverse proxy reaches them over the
+// network.
 func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, name string, err error) {
 	env := make([]string, 0, len(spec.Env))
 	for k, v := range spec.Env {
@@ -280,35 +317,39 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 	}
 
 	name = ContainerName(spec.App, spec.Sequence, spec.Replica)
-	res, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
-		Name: name,
-		Config: &container.Config{
-			Image:  spec.Image,
-			Env:    env,
-			Labels: containerLabels(spec.App, spec.DeploymentID, spec.Replica),
+	cfg := &container.Config{
+		Image:  spec.Image,
+		Env:    env,
+		Labels: containerLabels(spec.App, spec.DeploymentID, spec.Replica),
+	}
+	host := &container.HostConfig{
+		NetworkMode: container.NetworkMode(r.network),
+		// Restarts are owned by Shipwick's supervisor, which applies
+		// backoff and crash-loop detection; Docker must not compete.
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled},
+		Resources: container.Resources{
+			NanoCPUs: spec.NanoCPUs,
+			Memory:   spec.MemoryBytes,
+			// Equal to Memory: the limit is a hard cap, swap does not extend it.
+			MemorySwap: spec.MemoryBytes,
 		},
-		HostConfig: &container.HostConfig{
-			NetworkMode: container.NetworkMode(r.network),
-			// Restarts are owned by Shipwick's supervisor, which applies
-			// backoff and crash-loop detection; Docker must not compete.
-			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled},
-			Resources: container.Resources{
-				NanoCPUs: spec.NanoCPUs,
-				Memory:   spec.MemoryBytes,
-				// Equal to Memory: the limit is a hard cap, swap does not extend it.
-				MemorySwap: spec.MemoryBytes,
-			},
-			// Named volumes only: never a path on the host.
-			Mounts:      mounts,
-			Privileged:  false,
-			SecurityOpt: []string{"no-new-privileges:true"},
-			// Bounded logs: a chatty app must not fill the server's disk.
-			LogConfig: container.LogConfig{
-				Type:   "json-file",
-				Config: map[string]string{"max-size": "10m", "max-file": "3"},
-			},
+		// Named volumes only: never a path on the host.
+		Mounts:      mounts,
+		Privileged:  false,
+		SecurityOpt: []string{"no-new-privileges:true"},
+		// Bounded logs: a chatty app must not fill the server's disk.
+		LogConfig: container.LogConfig{
+			Type:   "json-file",
+			Config: map[string]string{"max-size": "10m", "max-file": "3"},
 		},
-	})
+	}
+	configureProcess(spec, cfg)
+	configurePublish(spec, cfg, host)
+	configureLogging(spec, host)
+	if spec.Job != nil {
+		name = configureJob(spec, cfg)
+	}
+	res, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Name: name, Config: cfg, HostConfig: host})
 	if err != nil {
 		return "", "", fmt.Errorf("create container %s: %w", name, err)
 	}
@@ -470,6 +511,7 @@ func (c *Container) applyLabels(labels map[string]string) {
 	c.App = labels[LabelApp]
 	c.DeploymentID, _ = strconv.ParseInt(labels[LabelDeployment], 10, 64)
 	c.Replica, _ = strconv.Atoi(labels[LabelReplica])
+	c.Job = labels[LabelJob]
 }
 
 // Logs returns the last `tail` log lines of a container, oldest first.

@@ -41,7 +41,11 @@ func (c *cli) serverCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c.ui.Println(c.ui.Styled(ui.Bold, cl.URL()) + "  " + c.ui.Styled(ui.Green, "● reachable"))
+			where := c.ui.Styled(ui.Bold, cl.URL())
+			if c.severalContexts && c.target.Context != "" {
+				where += c.ui.Styled(ui.Dim, "  context "+c.target.Context)
+			}
+			c.ui.Println(where + "  " + c.ui.Styled(ui.Green, "● reachable"))
 			c.ui.Println()
 
 			info, err := cl.Server(ctx)
@@ -50,7 +54,7 @@ func (c *cli) serverCommand() *cobra.Command {
 				c.ui.Println()
 				return err
 			}
-			c.ui.Fields([][2]string{
+			fields := [][2]string{
 				{"Agent", info.AgentVersion},
 				{"CLI", version.Version},
 				{"Host", info.Hostname},
@@ -61,7 +65,13 @@ func (c *cli) serverCommand() *cobra.Command {
 				{"Applications", fmt.Sprint(info.Applications)},
 				{"Containers", fmt.Sprintf("%d running", info.Containers)},
 				{"Proxy", c.describeProxy(info.Proxy)},
-			})
+				{"Notifications", c.describeNotifications(info.Notifications)},
+			}
+			// An agent from before tokens had names leaves this empty.
+			if info.Token.Name != "" {
+				fields = append(fields, [2]string{"Token", fmt.Sprintf("%s (%s)", info.Token.Name, info.Token.Role)})
+			}
+			c.ui.Fields(fields)
 			return nil
 		},
 	})
@@ -80,6 +90,13 @@ func (c *cli) describeProxy(p api.ProxyStatus) string {
 	return c.ui.Styled(ui.Green, "ok") + fmt.Sprintf("  serving %d domains", p.Routes)
 }
 
+func (c *cli) describeNotifications(n api.NotificationStatus) string {
+	if n.Webhook {
+		return "webhook configured"
+	}
+	return "none" + c.ui.Styled(ui.Dim, "  (set SHIPWICK_WEBHOOK_URL on the agent)")
+}
+
 func (c *cli) loginCommand() *cobra.Command {
 	var tokenStdin bool
 	cmd := &cobra.Command{
@@ -93,7 +110,13 @@ a config file only you can read. In scripts, pipe it in:
   printf %s "$TOKEN" | shipwick login --url https://agent.example.com --token-stdin
 
 CI jobs usually need no login at all: set SHIPWICK_AGENT_URL and
-SHIPWICK_AGENT_TOKEN instead.`,
+SHIPWICK_AGENT_TOKEN instead.
+
+A second server gets a name of its own and becomes the current one:
+
+  shipwick login --context staging --url https://staging.example.com
+
+Later commands take --context, or SHIPWICK_CONTEXT, to pick one.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := cliconfig.Path(c.getenv)
@@ -104,10 +127,24 @@ SHIPWICK_AGENT_TOKEN instead.`,
 			if err != nil {
 				return err
 			}
+			name := cliconfig.ContextName(c.flagContext, c.getenv, saved)
+			if name == "" {
+				name = cliconfig.DefaultContext
+			}
 
-			// Only the URL is resolved from the environment; the token must
-			// be given afresh, that being the point of logging in.
-			url := cliconfig.Resolve(c.flagURL, c.getenv, saved).URL
+			// Only the URL is resolved from the environment and the context
+			// being (re)created; the token must be given afresh, that being
+			// the point of logging in.
+			url := saved.Contexts[name].URL
+			if url == "" {
+				url = cliconfig.DefaultURL
+			}
+			if v := c.getenv(cliconfig.EnvURL); v != "" {
+				url = v
+			}
+			if c.flagURL != "" {
+				url = c.flagURL
+			}
 			interactive := isTerminal(c.in)
 			if c.flagURL == "" && interactive {
 				c.ui.Printf("Agent URL [%s]: ", url)
@@ -137,11 +174,12 @@ SHIPWICK_AGENT_TOKEN instead.`,
 				return err
 			}
 
-			if err := cliconfig.Save(path, cliconfig.Config{URL: cl.URL(), Token: token}); err != nil {
+			saved.Set(name, cliconfig.Context{URL: cl.URL(), Token: token})
+			if err := cliconfig.Save(path, saved); err != nil {
 				return err
 			}
 			c.ui.Success("Logged in to %s (%s, agent %s)", cl.URL(), info.Hostname, info.AgentVersion)
-			c.ui.Println(c.ui.Styled(ui.Dim, "  saved to "+path))
+			c.ui.Println(c.ui.Styled(ui.Dim, fmt.Sprintf("  saved as context %s in %s", name, path)))
 			return nil
 		},
 	}

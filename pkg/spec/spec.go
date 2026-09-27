@@ -51,13 +51,23 @@ type App struct {
 	Image     string            `json:"image"`
 	Port      int               `json:"port,omitempty"`
 	Domain    string            `json:"domain,omitempty"`
+	Aliases   []string          `json:"aliases,omitempty"`   // more hostnames served exactly like Domain
+	Redirects []string          `json:"redirects,omitempty"` // hostnames redirected to Domain
 	Replicas  int               `json:"replicas"`
 	Env       map[string]string `json:"env,omitempty"`
 	Health    *Health           `json:"health,omitempty"`
 	Resources Resources         `json:"resources"`
 	Volumes   []Volume          `json:"volumes,omitempty"`
-	Restart   Restart           `json:"restart"`
-	Deploy    Deploy            `json:"deploy"`
+	Publish   []Publish         `json:"publish,omitempty"`
+	// Entrypoint, Command and User override what the image declares.
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Command    []string `json:"command,omitempty"`
+	User       string   `json:"user,omitempty"`
+	PreDeploy  *Hook    `json:"pre_deploy,omitempty"`
+	Jobs       []Job    `json:"jobs,omitempty"`
+	Logging    *Logging `json:"logging,omitempty"`
+	Restart    Restart  `json:"restart"`
+	Deploy     Deploy   `json:"deploy"`
 }
 
 // Volume is a named Docker volume mounted into every replica. It belongs to
@@ -68,9 +78,13 @@ type Volume struct {
 	Path string `json:"path"` // absolute path inside the container
 }
 
-// Health configures the HTTP health check run against every replica.
+// Health configures the health check run against every replica: an HTTP GET
+// of Path, a TCP connection to port TCP, or Command run inside the replica
+// and expected to exit 0. Exactly one of the three is set; Kind says which.
 type Health struct {
-	Path     string   `json:"path"`
+	Path     string   `json:"path,omitempty"`
+	TCP      int      `json:"tcp,omitempty"`
+	Command  []string `json:"command,omitempty"`
 	Interval Duration `json:"interval"`
 	Timeout  Duration `json:"timeout"`
 	Retries  int      `json:"retries"`
@@ -93,6 +107,47 @@ type Restart struct {
 
 type Deploy struct {
 	Strategy string `json:"strategy"`
+}
+
+// Health check kinds, derived from which of Health's fields is set.
+const (
+	HealthHTTP    = "http"
+	HealthTCP     = "tcp"
+	HealthCommand = "command"
+)
+
+// Publish maps a container port to a port on the server itself, for services
+// that are not HTTP and so cannot go through the proxy: a database reached
+// from outside, a game server. The application must use the recreate
+// strategy with one replica: a host port cannot be shared.
+type Publish struct {
+	Port     int    `json:"port"`              // inside the container
+	Host     int    `json:"host"`              // on the server
+	Address  string `json:"address,omitempty"` // server address to bind; empty = all
+	Protocol string `json:"protocol"`          // tcp or udp
+}
+
+// Hook is a command run in a one-off container from the application's image,
+// with its environment, before its replicas are replaced.
+type Hook struct {
+	Command []string `json:"command"`
+	Timeout Duration `json:"timeout"`
+}
+
+// Job is a command run on a schedule in a one-off container from the
+// application's image, with its environment.
+type Job struct {
+	Name     string   `json:"name"`
+	Schedule string   `json:"schedule"` // five-field cron expression
+	Command  []string `json:"command"`
+	Timeout  Duration `json:"timeout"`
+}
+
+// Logging selects the Docker logging driver for the replicas, for shipping
+// their logs to a collector instead of the server's disk.
+type Logging struct {
+	Driver  string            `json:"driver"`
+	Options map[string]string `json:"options,omitempty"`
 }
 
 // Redacted returns a copy that is safe to expose through the API: environment
@@ -131,4 +186,15 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	}
 	*d = Duration(v)
 	return nil
+}
+
+// Kind reports which check Health describes.
+func (h Health) Kind() string {
+	switch {
+	case len(h.Command) > 0:
+		return HealthCommand
+	case h.TCP != 0:
+		return HealthTCP
+	}
+	return HealthHTTP
 }

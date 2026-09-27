@@ -31,6 +31,9 @@ services:
       SHIPWICK_AGENT_DOMAIN: ${SHIPWICK_AGENT_DOMAIN:-}
       # Optional: serve the dashboard through Caddy too, e.g. dashboard.localhost
       SHIPWICK_DASHBOARD_DOMAIN: ${SHIPWICK_DASHBOARD_DOMAIN:-}
+      # Optional: a webhook told about deployment outcomes
+      SHIPWICK_WEBHOOK_URL: ${SHIPWICK_WEBHOOK_URL:-}
+      SHIPWICK_WEBHOOK_SECRET: ${SHIPWICK_WEBHOOK_SECRET:-}
     ports:
       # Loopback only: the API is plain HTTP and must not face the network.
       - "127.0.0.1:9000:9000"

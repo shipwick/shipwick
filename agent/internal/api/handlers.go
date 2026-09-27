@@ -36,6 +36,7 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request) {
 		s.writeEngineError(w, r, err)
 		return
 	}
+	server.Token = principalFrom(r.Context())
 	writeJSON(w, http.StatusOK, server)
 }
 

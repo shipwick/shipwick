@@ -102,7 +102,7 @@ const errorTitle = computed(() => {
         <span class="mono text-fg">docker logs shipwick-agent</span>
       </p>
       <p>
-        It is kept in an httpOnly cookie and is never readable by scripts in this page. It grants full control of the server; sign out on shared machines.
+        A token created with <span class="mono text-fg">shipwick token create</span> works too, with what its role allows. It is kept in an httpOnly cookie and is never readable by scripts in this page; sign out on shared machines.
       </p>
     </div>
   </div>

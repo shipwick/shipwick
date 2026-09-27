@@ -11,7 +11,9 @@ const props = withDefaults(defineProps<{
   /** Tailwind height classes of the scrolling area. */
   heightClass?: string
   initialTail?: number
-}>(), { heightClass: 'h-[28rem]', initialTail: 100 })
+  /** The logging driver the replicas ship their output to (gelf, syslog, ...), when it is not Docker's local one. */
+  shippedTo?: string | null
+}>(), { heightClass: 'h-[28rem]', initialTail: 100, shippedTo: null })
 
 const TAIL_OPTIONS = [50, 100, 500, 1000, 5000]
 
@@ -195,6 +197,11 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
         </UiButton>
       </div>
     </div>
+
+    <p v-if="props.shippedTo" class="flex items-start gap-2 border-b border-line px-3 py-1.5 text-xs text-fg-muted" role="note">
+      <UiIcon name="alert" :size="14" class="mt-0.5 shrink-0 text-fg-subtle" />
+      <span>Logs are shipped to <span class="mono text-fg">{{ props.shippedTo }}</span>. This view shows Docker's local copy, which is empty if the daemon's dual logging is off.</span>
+    </p>
 
     <!-- Replica filter -->
     <div v-if="replicas.length > 1" class="flex flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5" role="group" aria-label="Replicas">

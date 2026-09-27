@@ -29,6 +29,8 @@ const (
 type metricsCache struct {
 	mu      sync.Mutex
 	samples map[string]docker.StatsSample // by container ID
+
+	lastPrune time.Time // when the sampler last removed old history
 }
 
 func newMetricsCache() *metricsCache {

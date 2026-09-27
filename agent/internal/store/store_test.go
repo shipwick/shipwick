@@ -11,9 +11,11 @@ import (
 	"github.com/shipwick/shipwick/pkg/spec"
 )
 
+var testOptions = Options{EncryptionKey: []byte("an-encryption-key-of-32-bytes!!!")}
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(context.Background(), ":memory:")
+	s, err := Open(context.Background(), ":memory:", testOptions)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -51,7 +53,7 @@ func TestOpenPersistsAcrossReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "nested", "shipwick.db")
 
-	s, err := Open(ctx, path)
+	s, err := Open(ctx, path, testOptions)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -60,7 +62,7 @@ func TestOpenPersistsAcrossReopen(t *testing.T) {
 	}
 	s.Close()
 
-	s, err = Open(ctx, path) // migrations must be a no-op the second time
+	s, err = Open(ctx, path, testOptions) // migrations must be a no-op the second time
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -336,7 +338,7 @@ func TestMigrationsUpgradeAnExistingDatabase(t *testing.T) {
 	// rows written with the columns that existed then.
 	all := migrations
 	migrations = all[:1]
-	old, err := Open(ctx, path)
+	old, err := Open(ctx, path, testOptions)
 	migrations = all
 	if err != nil {
 		t.Fatalf("Open v1: %v", err)
@@ -356,7 +358,7 @@ func TestMigrationsUpgradeAnExistingDatabase(t *testing.T) {
 	}
 	old.Close()
 
-	s, err := Open(ctx, path)
+	s, err := Open(ctx, path, testOptions)
 	if err != nil {
 		t.Fatalf("Open with newer migrations: %v", err)
 	}
@@ -375,11 +377,11 @@ func TestMigrationsUpgradeAnExistingDatabase(t *testing.T) {
 func TestOpenRefusesNewerSchema(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "shipwick.db")
-	s, _ := Open(ctx, path)
+	s, _ := Open(ctx, path, testOptions)
 	s.db.ExecContext(ctx, "PRAGMA user_version = 999")
 	s.Close()
 
-	if _, err := Open(ctx, path); err == nil {
+	if _, err := Open(ctx, path, testOptions); err == nil {
 		t.Error("an agent must not run against a schema from its future")
 	}
 }
@@ -458,7 +460,7 @@ func TestCreateDeploymentFromRecordsItsOrigin(t *testing.T) {
 	s := openTest(t)
 	first, _ := s.CreateDeployment(ctx, testApp("api", "nginx:1"), time.Now())
 
-	rollback, err := s.CreateDeploymentFrom(ctx, testApp("api", "nginx:1"), api.KindRollback, &first.ID, time.Now())
+	rollback, err := s.CreateDeploymentFrom(ctx, testApp("api", "nginx:1"), api.KindRollback, &first.ID, "root", time.Now())
 	if err != nil {
 		t.Fatalf("CreateDeploymentFrom: %v", err)
 	}

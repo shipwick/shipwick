@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import type { Readable } from 'node:stream'
 import type { H3Event } from 'h3'
 
 /** Name of the httpOnly cookie that carries the agent token. */
@@ -100,7 +101,14 @@ export interface AgentRequestOptions {
   search?: string
   token: string
   headers?: Record<string, string>
-  body?: Buffer
+  /** A buffered body, or a stream that is piped to the agent as it arrives (an archive upload). */
+  body?: Buffer | Readable
+  /**
+   * How long the agent may take to answer with headers. For a streamed body
+   * the clock starts once the last byte has been sent, so a slow upload is
+   * never mistaken for a silent agent. Default HEADERS_TIMEOUT_MS.
+   */
+  headersTimeoutMs?: number
   /** Aborts the upstream request, e.g. when the browser went away. */
   signal?: AbortSignal
 }
@@ -128,6 +136,9 @@ export function agentRequest(options: AgentRequestOptions): Promise<IncomingMess
   }
 
   const send = target.protocol === 'https:' ? httpsRequest : httpRequest
+  const body = options.body
+  const streamed = body !== undefined && !Buffer.isBuffer(body)
+  const timeoutMs = options.headersTimeoutMs ?? HEADERS_TIMEOUT_MS
 
   return new Promise<IncomingMessage>((resolve, reject) => {
     const req = send(target, {
@@ -137,20 +148,23 @@ export function agentRequest(options: AgentRequestOptions): Promise<IncomingMess
         ...options.headers,
         'authorization': `Bearer ${options.token}`,
         'user-agent': 'shipwick-dashboard',
-        ...(options.body ? { 'content-length': String(options.body.length) } : {}),
+        ...(Buffer.isBuffer(body) ? { 'content-length': String(body.length) } : {}),
       },
     })
 
-    const timer = setTimeout(() => {
-      req.destroy(new AgentProxyError(504, 'AGENT_TIMEOUT', `The Shipwick agent at ${base} did not answer within ${HEADERS_TIMEOUT_MS / 1000}s`, { agent_url: base }))
-    }, HEADERS_TIMEOUT_MS)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const armTimer = () => {
+      timer = setTimeout(() => {
+        req.destroy(new AgentProxyError(504, 'AGENT_TIMEOUT', `The Shipwick agent at ${base} did not answer within ${timeoutMs / 1000}s`, { agent_url: base }))
+      }, timeoutMs)
+    }
 
     req.once('response', (res) => {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       resolve(res)
     })
     req.once('error', (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       if (error instanceof AgentProxyError || error.name === 'AbortError') return reject(error)
       // Report the cause by its code only. Never serialize the request: its headers hold the token.
       reject(new AgentProxyError(502, 'AGENT_UNREACHABLE', `Cannot reach the Shipwick agent at ${base}`, {
@@ -159,7 +173,16 @@ export function agentRequest(options: AgentRequestOptions): Promise<IncomingMess
       }))
     })
 
-    req.end(options.body)
+    if (streamed) {
+      // The browser's upload flows straight through; the agent may answer early (a refusal) and then the pipe simply ends.
+      body.once('error', () => req.destroy(new AgentProxyError(400, 'INVALID_REQUEST', 'The upload was interrupted')))
+      req.once('finish', armTimer)
+      body.pipe(req)
+    }
+    else {
+      armTimer()
+      req.end(body)
+    }
   })
 }
 

@@ -47,7 +47,12 @@ type rollout struct {
 }
 
 func (e *Engine) run(d store.Deployment) {
-	ctx, cancel := context.WithTimeout(e.baseCtx, e.opts.DeployTimeout)
+	timeout := e.opts.DeployTimeout
+	if d.Spec.PreDeploy != nil {
+		// The hook has its own budget, on top of the deployment's.
+		timeout += d.Spec.PreDeploy.Timeout.Std()
+	}
+	ctx, cancel := context.WithTimeout(e.baseCtx, timeout)
 	defer cancel()
 
 	r := &rollout{e: e, d: &d, old: map[int]store.Replica{}}
@@ -61,9 +66,10 @@ func (e *Engine) run(d store.Deployment) {
 	case e.baseCtx.Err() != nil:
 		err = errors.New("agent shut down during deployment")
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		err = fmt.Errorf("deployment timed out after %s", shortDuration(e.opts.DeployTimeout))
+		err = fmt.Errorf("deployment timed out after %s", shortDuration(timeout))
 	}
 	r.abort(err)
+	e.notifyAborted(r)
 }
 
 func (r *rollout) execute(ctx context.Context) error {
@@ -74,6 +80,11 @@ func (r *rollout) execute(ctx context.Context) error {
 	}
 	if err := e.pullImage(ctx, d); err != nil {
 		return err
+	}
+	if d.Spec.PreDeploy != nil {
+		if err := e.runHook(ctx, d); err != nil {
+			return err
+		}
 	}
 
 	if err := e.transition(ctx, d, api.StatusStarting); err != nil {
@@ -144,6 +155,7 @@ func (r *rollout) execute(ctx context.Context) error {
 		}
 	}
 	e.step(sweepCtx, d, "Deployment successful")
+	e.notifySucceeded(sweepCtx, d, previous)
 	return nil
 }
 
@@ -176,7 +188,7 @@ func (r *rollout) loadPrevious(ctx context.Context) error {
 	if app.DesiredState != api.DesiredRunning {
 		r.serving = nil
 	}
-	e.routeVia(d.Application, routeOverride{domain: prev.Spec.Domain, members: r.serving, desired: r.desired()})
+	e.routeVia(d.Application, routeOverride{hosts: hostnamesOf(prev.Spec), members: r.serving, desired: r.desired()})
 	return nil
 }
 
@@ -257,7 +269,7 @@ func (r *rollout) swap(ctx context.Context, ready []store.Replica) error {
 	// DNS drops them by itself. Taking the names away first would mean taking
 	// them off the network, and cut the requests they are serving.
 	r.serving = serving
-	e.routeVia(d.Application, routeOverride{domain: d.Spec.Domain, members: serving, desired: r.desired()})
+	e.routeVia(d.Application, routeOverride{hosts: hostnamesOf(d.Spec), members: serving, desired: r.desired()})
 	if err := e.SyncProxy(ctx); err != nil {
 		what := d.Application
 		if d.Spec.Domain != "" {
@@ -358,7 +370,7 @@ func (r *rollout) stopPrevious(ctx context.Context) error {
 	// Out of the proxy first, so that nobody is sent to a replica that is
 	// about to stop.
 	r.serving = nil
-	e.routeVia(d.Application, routeOverride{domain: prev.Spec.Domain, desired: r.desired()})
+	e.routeVia(d.Application, routeOverride{hosts: hostnamesOf(prev.Spec), desired: r.desired()})
 	if err := e.SyncProxy(ctx); err != nil {
 		return fmt.Errorf("could not take %s out of service: %w", d.Application, err)
 	}
@@ -391,7 +403,7 @@ func (r *rollout) rollBackRecreate(ctx context.Context, cause error) {
 		return
 	}
 	r.serving = nil
-	e.routeVia(d.Application, routeOverride{domain: prev.Spec.Domain, desired: r.desired()})
+	e.routeVia(d.Application, routeOverride{hosts: hostnamesOf(prev.Spec), desired: r.desired()})
 	e.syncProxyBestEffort(ctx, d.Application)
 	for _, rep := range r.fresh {
 		if err := e.retireContainer(ctx, rep.ContainerID); err != nil {
@@ -537,6 +549,22 @@ func (r *rollout) rollBack(ctx context.Context, cause error) {
 // replicas created so far are returned even on error, for the caller to
 // clean up.
 func (e *Engine) ensureReplicas(ctx context.Context, d store.Deployment, indexes []int) ([]store.Replica, error) {
+	created, err := e.createReplicas(ctx, d, indexes)
+	if err != nil {
+		return created, err
+	}
+	for _, rep := range created {
+		if err := e.rt.StartContainer(ctx, rep.ContainerID); err != nil {
+			return created, fmt.Errorf("replica %d: %w", rep.Index, err)
+		}
+	}
+	return created, nil
+}
+
+// createReplicas is the creating half of ensureReplicas: containers that
+// exist and are recorded, but do not run yet. A volume restore uses it alone,
+// for a container whose volume must be filled before its process ever sees it.
+func (e *Engine) createReplicas(ctx context.Context, d store.Deployment, indexes []int) ([]store.Replica, error) {
 	var created []store.Replica
 	for _, i := range indexes {
 		cspec := docker.ContainerSpec{
@@ -551,6 +579,13 @@ func (e *Engine) ensureReplicas(ctx context.Context, d store.Deployment, indexes
 		}
 		for _, v := range d.Spec.Volumes {
 			cspec.Mounts = append(cspec.Mounts, docker.Mount{Volume: v.Name, Path: v.Path})
+		}
+		for _, p := range d.Spec.Publish {
+			cspec.Publish = append(cspec.Publish, docker.PortBinding{Port: p.Port, HostPort: p.Host, Address: p.Address, Protocol: p.Protocol})
+		}
+		cspec.Entrypoint, cspec.Command, cspec.User = d.Spec.Entrypoint, d.Spec.Command, d.Spec.User
+		if l := d.Spec.Logging; l != nil {
+			cspec.LogDriver, cspec.LogOptions = l.Driver, l.Options
 		}
 		id, name, err := e.rt.CreateContainer(ctx, cspec)
 		if err != nil {
@@ -572,11 +607,6 @@ func (e *Engine) ensureReplicas(ctx context.Context, d store.Deployment, indexes
 			return created, err
 		}
 		created = append(created, rep)
-	}
-	for _, rep := range created {
-		if err := e.rt.StartContainer(ctx, rep.ContainerID); err != nil {
-			return created, fmt.Errorf("replica %d: %w", rep.Index, err)
-		}
 	}
 	return created, nil
 }

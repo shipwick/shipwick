@@ -1,4 +1,5 @@
-// Package health implements the HTTP health check run against replicas.
+// Package health implements the HTTP and TCP health checks run against
+// replicas. Command checks run inside the replica, through the runtime.
 package health
 
 import (

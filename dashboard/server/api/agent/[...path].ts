@@ -5,17 +5,28 @@
  * takes it from the httpOnly session cookie and adds the Authorization header.
  *
  * - Status code and body pass through untouched (the JSON envelope is the agent's).
- * - The body is piped, never buffered: `logs?follow=true` arrives line by line.
+ * - The response body is piped, never buffered: `logs?follow=true` arrives line
+ *   by line and a volume archive is downloaded as it streams from the agent.
  * - Only an allowlist of request headers is forwarded. Cookies never are.
- * - POST/DELETE require the X-Shipwick-Request header (CSRF).
+ * - POST/PUT/DELETE require the X-Shipwick-Request header (CSRF).
+ * - A PUT body (a volume archive, gigabytes) is streamed to the agent as it
+ *   arrives, without a size limit of its own: the agent enforces 10 GB.
  */
 
-const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'DELETE'])
-const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type'] as const
-const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length'] as const
+import type { Readable } from 'node:stream'
 
-/** The agent refuses bodies over 64 KB; leave it a little room to say so itself. */
+const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE'])
+const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type'] as const
+const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition'] as const
+
+/** The agent refuses JSON bodies over 64 KB; leave it a little room to say so itself. */
 const MAX_BODY_BYTES = 128 * 1024
+
+/**
+ * How long the agent may take to answer a streamed upload once the last byte
+ * has been sent: it extracts the archive into the volume before it answers.
+ */
+const UPLOAD_ANSWER_TIMEOUT_MS = 10 * 60_000
 
 /** Path segments the agent uses are names, numbers and fixed words: nothing else gets through. */
 const SAFE_SEGMENT = /^[\w.~-]+$/
@@ -43,12 +54,21 @@ export default defineEventHandler(async (event) => {
       if (value) headers[name] = value
     }
 
-    let body: Buffer | undefined
+    let body: Buffer | Readable | undefined
+    let headersTimeoutMs: number | undefined
     if (method === 'POST') {
       if (Number(getRequestHeader(event, 'content-length') ?? 0) > MAX_BODY_BYTES) throw bodyTooLarge()
       body = await readRawBody(event, false)
       if (body && body.length > MAX_BODY_BYTES) throw bodyTooLarge()
       if (body && body.length === 0) body = undefined
+    }
+    else if (method === 'PUT') {
+      // Never buffered: the only PUT is a volume archive. The agent wants the
+      // length to refuse an oversized upload before reading it.
+      body = event.node.req
+      const length = getRequestHeader(event, 'content-length')
+      if (length) headers['content-length'] = length
+      headersTimeoutMs = UPLOAD_ANSWER_TIMEOUT_MS
     }
 
     // If the browser goes away (tab closed, log stream stopped), stop the upstream request too.
@@ -56,7 +76,7 @@ export default defineEventHandler(async (event) => {
     const res = event.node.res
     res.once('close', () => abort.abort())
 
-    const upstream = await agentRequest({ method, path, search, token, headers, body, signal: abort.signal })
+    const upstream = await agentRequest({ method, path, search, token, headers, body, headersTimeoutMs, signal: abort.signal })
     const status = upstream.statusCode ?? 502
 
     // The agent no longer accepts this token: the session is over.

@@ -8,7 +8,23 @@
 // crash-looping, logs flow, metrics wander.
 //
 // Deployments roll, like the real agent's: one replica at a time, each new one
-// taking over from its predecessor.
+// taking over from its predecessor. POST …/deploy takes the deploy.yaml as
+// JSON (the agent accepts JSON too; there is no YAML parser here), validates
+// the hostnames, ports and health block, and refuses a hostname or server port
+// another application holds with the agent's INVALID_CONFIG shape.
+//
+// Also served, with the agent's shapes: tokens (GET/POST /tokens, DELETE
+// /tokens/:name; a token created here signs in with its role), roles (403
+// FORBIDDEN with {role, required}), `by` on deployments, volumes and their
+// archives (GET streams a small real tar; PUT needs a stopped application),
+// metrics history (since=1h|24h|7d with the agent's step, sparse series with
+// gaps, limits), `token` and `notifications` on GET /server, and jobs: GET
+// …/jobs (last and next run, cron read in UTC), GET …/runs?job=&limit=, GET
+// …/runs/:id with output, POST …/jobs/:job/run (202; a run finishes by itself
+// after a few seconds, 409 JOB_ALREADY_RUNNING while one is going) and POST
+// …/run {"command": [...]}. A run whose command mentions "fail" fails with exit
+// 1, "timeout" times out, anything else succeeds; failures add a `job` event.
+// A deployment with `pre_deploy` records the two hook steps and a hook run.
 //
 // Magic image tags for POST /applications/:name/redeploy {"image": ...}:
 //   *:fail      replica 1 crashes: FAILED, nothing of the old version was touched
@@ -16,18 +32,32 @@
 //               RESTORING → ROLLED_BACK (needs an application with 2+ replicas;
 //               with one replica it behaves like *:fail)
 //   *:local     the pull fails but a local copy exists (a `warn` step)
+//   *:hookfail  the pre-deploy command exits 1: FAILED with its output as a
+//               `log` event, no replica touched (needs an app with pre_deploy)
 //
 // Environment:
 //   MOCK_PORT (9100), MOCK_HOST (127.0.0.1), MOCK_TOKEN
+//   MOCK_ROLE=read|deploy|admin  the role of MOCK_TOKEN (default admin, as the
+//                    root token); endpoints above it answer 403 FORBIDDEN
+//   MOCK_WEBHOOK=1   server.notifications.webhook is true
 //   MOCK_NO_PROXY=1  server.proxy.enabled is false, and deploying an application
 //                    with a domain produces the "No reverse proxy" warn step
 
 import { createServer } from 'node:http'
+import { randomBytes } from 'node:crypto'
 
 const PORT = Number(process.env.MOCK_PORT || 9100)
 const HOST = process.env.MOCK_HOST || '127.0.0.1'
 const TOKEN = process.env.MOCK_TOKEN || 'mock-token-0123456789abcdef'
 const PROXY_ENABLED = process.env.MOCK_NO_PROXY !== '1'
+const WEBHOOK = process.env.MOCK_WEBHOOK === '1'
+const ROLES = ['read', 'deploy', 'admin']
+const ROLE = ROLES.includes(process.env.MOCK_ROLE) ? process.env.MOCK_ROLE : 'admin'
+// The configured token is the root token when it is admin; a lesser role gets a plausible name.
+const TOKEN_IDENTITY = { name: ROLE === 'admin' ? 'root' : ROLE === 'deploy' ? 'ci' : 'viewer', role: ROLE }
+// Hostnames and server ports Shipwick itself holds: the dashboard's route, the proxy's and the agent's ports.
+const OWN_HOSTNAMES = ['shipwick.example.com']
+const RESERVED_PORTS = [80, 443, 8080, 8443, 9000]
 const VERSION = '0.1.0-mock'
 const LOG_BUFFER = 5000
 const MASK = '********'
@@ -57,9 +87,17 @@ const logBuffers = new Map()
 const followers = new Map()
 /** container name → {cpu, mem} random-walk state */
 const metricState = new Map()
+/** name → stored token {id, name, role, created_at, last_used_at, value}; the value stays here only so it can sign in */
+const tokens = new Map()
+/** run id → run of a job, hook or one-off command, with its output */
+const runs = new Map()
+/** `${app}/${job}` → the minute the schedule was last looked at */
+const scheduleSeen = new Map()
 
 let nextDeploymentId = 1
 let nextEventId = 1
+let nextTokenId = 1
+let nextRunId = 1
 
 function spec(name, image, extra = {}) {
   return {
@@ -88,7 +126,9 @@ function addApp(name, createdAt) {
   return app
 }
 
-function addDeployment(app, sp, { status, startedAtMs, durationMs, error = '', events = [], kind = 'deploy', sourceId = null }) {
+// `by` is the token that started the deployment; null leaves it out, as the
+// agent does for deployments recorded before tokens had names.
+function addDeployment(app, sp, { status, startedAtMs, durationMs, error = '', events = [], kind = 'deploy', sourceId = null, by = 'root' }) {
   const id = nextDeploymentId++
   const sequence = [...deployments.values()].filter(d => d.application === app.name).length + 1
   const d = {
@@ -103,6 +143,7 @@ function addDeployment(app, sp, { status, startedAtMs, durationMs, error = '', e
     completed_at: durationMs === null ? null : iso(startedAtMs + durationMs),
     kind,
     source_deployment_id: sourceId,
+    ...(by ? { by } : {}),
     spec: structuredClone(sp),
     events: [],
   }
@@ -132,6 +173,8 @@ function successEvents(sp, previousVersion) {
   const events = [
     ['state', 'BUILDING', 'info', 50],
     ['step', `Pulled image ${sp.image}`, 'info', 1900],
+    // The hook runs after the pull and before any replica is touched.
+    ...(sp.pre_deploy ? [['step', 'Running pre-deploy command', 'info', 200], ['step', 'Pre-deploy command finished (12s)', 'info', 11800]] : []),
     ['state', 'STARTING', 'info', 20],
   ]
   if (!previousVersion) {
@@ -247,20 +290,26 @@ function seed() {
       env: { DATABASE_URL: MASK, REDIS_URL: MASK, SENTRY_DSN: MASK, LOG_LEVEL: MASK },
       health: { path: '/health', interval: '10s', timeout: '3s', retries: 3 },
       resources: { cpu: 1, memory_bytes: 1024 ** 3 },
+      pre_deploy: { command: ['dotnet', 'Migrate.dll'], timeout: '10m0s' },
+      jobs: [
+        { name: 'nightly-report', schedule: '0 3 * * *', command: ['node', 'report.js'], timeout: '1h0m0s' },
+        { name: 'cleanup-sessions', schedule: '*/15 * * * *', command: ['node', 'cleanup.js', '--older-than', '30d'], timeout: '5m0s' },
+      ],
       ...extra,
     })
-    // tag, age, previous version, kind, index (in this list) of the deployment whose configuration was re-used
+    // tag, age, previous version, kind, index (in this list) of the deployment whose configuration was re-used, token
+    // The three oldest predate named tokens and carry no `by`.
     const history = [
-      ['1.3.8', 41 * DAY, null, 'deploy', null],
-      ['1.3.9', 27 * DAY, '1.3.8', 'deploy', null],
-      ['1.4.0', 12 * DAY, '1.3.9', 'deploy', null],
-      ['1.4.1', 8 * DAY, '1.4.0', 'deploy', null],
+      ['1.3.8', 41 * DAY, null, 'deploy', null, null],
+      ['1.3.9', 27 * DAY, '1.3.8', 'deploy', null, null],
+      ['1.4.0', 12 * DAY, '1.3.9', 'deploy', null, null],
+      ['1.4.1', 8 * DAY, '1.4.0', 'deploy', null, 'ci'],
       // 1.4.1 misbehaved: rolled back to #3, then redeployed once the image had been rebuilt under the same tag.
-      ['1.4.0', 8 * DAY - 3 * HOUR, '1.4.1', 'rollback', 2],
-      ['1.4.1', 5 * DAY, '1.4.0', 'redeploy', 4],
+      ['1.4.0', 8 * DAY - 3 * HOUR, '1.4.1', 'rollback', 2, 'root'],
+      ['1.4.1', 5 * DAY, '1.4.0', 'redeploy', 4, 'ci'],
     ]
     const made = []
-    for (const [tag, age, prev, kind, sourceIndex] of history) {
+    for (const [tag, age, prev, kind, sourceIndex, by] of history) {
       const sp = base(tag)
       made.push(addDeployment(app, sp, {
         status: 'SUPERSEDED',
@@ -269,28 +318,79 @@ function seed() {
         events: successEvents(sp, prev),
         kind,
         sourceId: sourceIndex === null ? null : made[sourceIndex].id,
+        by,
       }))
     }
+    // The release candidate's migration failed: the pre-deploy hook exited 1 and no replica was touched.
     const bad = base('1.4.2-rc1')
-    addDeployment(app, bad, {
+    const hookOutput = 'Applying migration 20260301_AddInvoiceIndex...\nNpgsql.PostgresException (0x80004005): 42P07: relation "ix_invoices_customer_id" already exists\n   at Npgsql.Internal.NpgsqlConnector.ReadMessageLong(...)\n   at Microsoft.EntityFrameworkCore.Migrations.Internal.Migrator.Migrate(String targetMigration)\nFailed to apply 1 of 1 migrations.'
+    const badDeployment = addDeployment(app, bad, {
       status: 'FAILED',
       startedAtMs: startedAt - 26 * HOUR,
       durationMs: 5200,
-      error: 'replica 1 exited with code 1 shortly after start',
-      events: failureEvents(bad, 'replica 1 exited with code 1 shortly after start',
-        'time=2026-03-01T10:00:01Z level=info msg="starting my-api" version=1.4.2-rc1\ntime=2026-03-01T10:00:01Z level=info msg="running migrations"\npanic: DATABASE_URL is not set\n\ngoroutine 1 [running]:\nmain.mustEnv(...)\n\t/src/cmd/api/main.go:41 +0x9c\nmain.main()\n\t/src/cmd/api/main.go:18 +0x2f\nexit status 2'),
+      error: 'pre-deploy command exited 1',
+      events: [
+        ['state', 'BUILDING', 'info', 50],
+        ['step', `Pulled image ${bad.image}`, 'info', 1700],
+        ['step', 'Running pre-deploy command', 'info', 200],
+        ['log', `Last output of the pre-deploy command:\n${hookOutput}`, 'error', 3100],
+        ['state', 'FAILED: pre-deploy command exited 1', 'error', 30],
+      ],
+      by: 'ci',
     })
     const sp = base('1.4.2')
-    const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 2 * HOUR, durationMs: 6100, events: successEvents(sp, '1.4.1') })
+    const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 2 * HOUR, durationMs: 18100, events: successEvents(sp, '1.4.1'), by: 'ci' })
     app.active_deployment_id = active.id
     app.updated_at = active.completed_at
     app.containers = makeContainers(app, active)
-    // A database: one replica, named volumes, recreate strategy.
+
+    // Runs: the hook of every deployment, the schedule's own with every outcome, and a few by hand.
+    const hook = (d, status, exitCode, output, durationMs = 11800) => addRun(app, {
+      job: 'pre-deploy', kind: 'hook', command: ['dotnet', 'Migrate.dll'], deploymentId: d.id,
+      startedAtMs: Date.parse(d.started_at) + 2000, durationMs, status, exitCode, output,
+    })
+    for (const d of made) hook(d, 'succeeded', 0, 'Applying migration...\nDone. 1 migration applied.')
+    hook(badDeployment, 'failed', 1, hookOutput, 3100)
+    hook(active, 'succeeded', 0, 'No pending migrations.', 2400)
+    const reportOutput = n => `Collecting invoices for the last 24h...\n${n} invoices, ${Math.round(n * 0.37)} customers\nReport written to s3://acme-reports/my-api/${iso(startedAt).slice(0, 10)}.pdf`
+    for (let daysAgo = 6; daysAgo >= 1; daysAgo--) {
+      const at = new Date(startedAt - daysAgo * DAY)
+      at.setUTCHours(3, 0, 0, 0)
+      const started = at.getTime()
+      if (daysAgo === 4) {
+        addRun(app, { job: 'nightly-report', kind: 'scheduled', command: ['node', 'report.js'], deploymentId: made[4]?.id ?? null, startedAtMs: started, durationMs: HOUR, status: 'timed_out', output: 'Collecting invoices for the last 24h...\nWaiting for the warehouse connection (attempt 12)...' })
+        addAppEvent('my-api', 'warn', 'job', 'Job nightly-report timed out after 1h', started + HOUR)
+      }
+      else if (daysAgo === 2) {
+        addRun(app, { job: 'nightly-report', kind: 'scheduled', command: ['node', 'report.js'], deploymentId: made[5].id, startedAtMs: started, durationMs: 12000, status: 'failed', exitCode: 1, output: 'Collecting invoices for the last 24h...\nError: connect ECONNREFUSED 10.0.4.12:5432\n    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1555:16)\nnpm error code 1' })
+        addAppEvent('my-api', 'warn', 'job', 'Job nightly-report failed (exit 1)', started + 12000)
+      }
+      else {
+        addRun(app, { job: 'nightly-report', kind: 'scheduled', command: ['node', 'report.js'], deploymentId: made[Math.min(5, 6 - daysAgo)].id, startedAtMs: started, durationMs: 40000 + daysAgo * 2100, status: 'succeeded', exitCode: 0, output: reportOutput(800 + daysAgo * 37) })
+      }
+    }
+    for (let i = 8; i >= 1; i--) {
+      const started = Math.floor((startedAt - i * 15 * MINUTE) / (15 * MINUTE)) * 15 * MINUTE
+      addRun(app, { job: 'cleanup-sessions', kind: 'scheduled', command: ['node', 'cleanup.js', '--older-than', '30d'], deploymentId: active.id, startedAtMs: started, durationMs: 1800 + i * 90, status: 'succeeded', exitCode: 0, output: `Deleted ${3 + i * 2} expired sessions.` })
+    }
+    // The agent was restarted while one ran, five days ago.
+    addRun(app, { job: 'cleanup-sessions', kind: 'scheduled', command: ['node', 'cleanup.js', '--older-than', '30d'], deploymentId: made[5].id, startedAtMs: startedAt - 5 * DAY, durationMs: 4000, status: 'interrupted', output: '' })
+    addRun(app, { job: 'run', kind: 'manual', command: ['node', 'scripts/reindex.js', '--all'], deploymentId: made[5].id, startedAtMs: startedAt - 27 * HOUR, durationMs: 83000, status: 'failed', exitCode: 3, output: 'Reindexing customers... done (12,408)\nReindexing invoices...\nError: index invoices_v2 is read-only\nexit status 3' })
+    addAppEvent('my-api', 'warn', 'job', 'Command node failed (exit 3)', startedAt - 27 * HOUR + 83000)
+    addRun(app, { job: 'run', kind: 'manual', command: ['node', '-e', 'console.log(process.version)'], deploymentId: active.id, startedAtMs: startedAt - 3 * HOUR, durationMs: 900, status: 'succeeded', exitCode: 0, output: 'v22.12.0' })
+    // One still running when the dashboard opens; it finishes shortly after.
+    const running = addRun(app, { job: 'cleanup-sessions', kind: 'scheduled', command: ['node', 'cleanup.js', '--older-than', '30d'], deploymentId: active.id, startedAtMs: startedAt - 20 * SECOND, status: 'running' })
+    setTimeout(() => finishRun(app, running, 'succeeded', '5m0s'), 8 * SECOND).unref()
+    // A database: one replica, a named volume, the recreate strategy, a TCP
+    // health check, and its port published on one of the server's addresses.
     const db = addApp('postgres', ago(20 * DAY))
     const dbSpec = spec('postgres', 'postgres:17', {
       port: 5432,
       env: { POSTGRES_USER: MASK, POSTGRES_PASSWORD: MASK, POSTGRES_DB: MASK },
+      health: { tcp: 5432, interval: '10s', timeout: '3s', retries: 3 },
+      resources: { memory_bytes: 2 * 1024 ** 3 },
       volumes: [{ name: 'data', path: '/var/lib/postgresql/data' }],
+      publish: [{ port: 5432, host: 15432, address: '10.0.0.5', protocol: 'tcp' }],
       deploy: { strategy: 'recreate' },
     })
     const dbActive = addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
@@ -304,11 +404,14 @@ function seed() {
   }
 
   // DEGRADED: three replicas desired, one of them is down and being restarted.
+  // Several hostnames: the domain, an alias served alike, two redirects to the domain.
   {
     const app = addApp('web', ago(30 * DAY))
     const base = tag => spec('web', `ghcr.io/acme/web:${tag}`, {
       port: 3000,
-      domain: 'www.example.com',
+      domain: 'example.com',
+      aliases: ['app.example.com'],
+      redirects: ['www.example.com', 'example.net'],
       replicas: 3,
       env: { API_URL: MASK, SESSION_SECRET: MASK },
       health: { path: '/healthz', interval: '15s', timeout: '2s', retries: 3 },
@@ -342,6 +445,7 @@ function seed() {
   }
 
   // CRASH_LOOP: replica 2 never turns healthy, restarts are rate-limited.
+  // Its image's entrypoint, command and user are overridden, and its logs go to a GELF collector.
   {
     const app = addApp('worker', ago(19 * DAY))
     const base = tag => spec('worker', `registry.example.com:5000/acme/worker:${tag}`, {
@@ -350,6 +454,10 @@ function seed() {
       env: { QUEUE_URL: MASK, DATABASE_URL: MASK, CONCURRENCY: MASK },
       health: { path: '/ready', interval: '10s', timeout: '3s', retries: 3 },
       resources: { cpu: 2 },
+      entrypoint: ['/app/worker'],
+      command: ['--queue', 'default', '--log-format', 'json lines'],
+      user: '1000:1000',
+      logging: { driver: 'gelf', options: { 'gelf-address': 'udp://logs.example.com:12201', 'tag': '{{.Name}}' } },
       restart: { policy: 'on-failure' },
     })
     const first = base('0.9.0')
@@ -380,8 +488,12 @@ function seed() {
     app.desired_state = 'stopped'
     app.updated_at = ago(6 * DAY)
     app.containers = makeContainers(app, active, { 1: { state: 'exited', exit_code: 0, started_at: ago(60 * DAY) } })
-    addAppEvent('docs', 'info', 'app', 'Application stopped on request', startedAt - 6 * DAY)
+    addAppEvent('docs', 'info', 'app', 'Application stopped by ci', startedAt - 6 * DAY)
   }
+
+  // Tokens besides root: one for CI, one read-only, never used yet.
+  addToken('ci', 'deploy', startedAt - 20 * DAY, startedAt - 2 * HOUR)
+  addToken('viewer', 'read', startedAt - 3 * DAY, null)
 
   // DEPLOYING: first deployment in flight, waiting on a slow starter. It gives up after 15 minutes.
   {
@@ -493,6 +605,8 @@ function appSummary(app) {
     image: active ? active.image : '',
     version: active ? active.version : '',
     domain: active ? active.spec.domain ?? '' : '',
+    ...(active?.spec.aliases?.length ? { aliases: active.spec.aliases } : {}),
+    ...(active?.spec.redirects?.length ? { redirects: active.spec.redirects } : {}),
     replicas: { desired, running, healthy },
     deploying: Boolean(flying),
     in_flight_deployment_id: flying ? flying.id : null,
@@ -534,9 +648,9 @@ function pushDeploymentEvent(d, type, message, level = 'info') {
  * dies at replica 2, after replica 1 was replaced, so the retired replica of
  * the previous version is restored: FAILED → ROLLBACK → RESTORING → ROLLED_BACK.
  */
-function startDeployment(app, sp, { kind, sourceId }) {
+function startDeployment(app, sp, { kind, sourceId, by }) {
   const previous = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
-  const d = addDeployment(app, sp, { status: 'PENDING', startedAtMs: Date.now(), durationMs: null, kind, sourceId })
+  const d = addDeployment(app, sp, { status: 'PENDING', startedAtMs: Date.now(), durationMs: null, kind, sourceId, by })
   const tag = d.version
   const n = sp.replicas
   const failAt = tag === 'fail' ? 1 : tag === 'rollback' ? Math.min(2, n) : 0
@@ -568,8 +682,33 @@ function startDeployment(app, sp, { kind, sourceId }) {
   then(1100, () => {
     if (tag === 'local') pushDeploymentEvent(d, 'step', `Could not pull ${sp.image}: registry unreachable. Using the local copy`, 'warn')
     else pushDeploymentEvent(d, 'step', `Pulled image ${sp.image}`)
-    state('STARTING')
+    if (!sp.pre_deploy) state('STARTING')
   })
+
+  // The hook runs after the pull, before any replica is touched; its failure is the deployment's.
+  if (sp.pre_deploy) {
+    let hookRun
+    then(200, () => {
+      pushDeploymentEvent(d, 'step', 'Running pre-deploy command')
+      hookRun = addRun(app, { job: 'pre-deploy', kind: 'hook', command: sp.pre_deploy.command, deploymentId: d.id, startedAtMs: Date.now(), status: 'running' })
+    })
+    if (tag === 'hookfail') {
+      then(1800, () => {
+        finishRun(app, hookRun, 'failed', sp.pre_deploy.timeout, true)
+        pushDeploymentEvent(d, 'log', `Last output of the pre-deploy command:\n${hookRun.output}`, 'error')
+        d.status = 'FAILED'
+        d.error = 'pre-deploy command exited 1'
+        pushDeploymentEvent(d, 'state', `FAILED: ${d.error}`, 'error')
+      })
+      then(400, complete)
+      return d
+    }
+    then(2200, () => {
+      finishRun(app, hookRun, 'succeeded', sp.pre_deploy.timeout, true)
+      pushDeploymentEvent(d, 'step', 'Pre-deploy command finished (2s)')
+      state('STARTING')
+    })
+  }
 
   const crash = (i) => {
     const reason = `replica ${i} exited with code 1 shortly after start`
@@ -788,6 +927,477 @@ function metrics(app) {
 }
 
 // ---------------------------------------------------------------------------
+// Metrics history: what the sampler would have written down, generated on the
+// fly and deterministic per bucket, so a refresh redraws the same past.
+// ---------------------------------------------------------------------------
+
+const HISTORY_WINDOWS = { '1h': [HOUR, 30 * SECOND, '30s'], '24h': [DAY, 5 * MINUTE, '5m'], '7d': [7 * DAY, HOUR, '1h'] }
+
+/** A stable pseudo-random number in [0, 1) for a (string, number) pair. */
+function noise(key, n) {
+  let h = 2166136261
+  for (const ch of `${key}:${n}`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619)
+  return ((h >>> 0) % 10007) / 10007
+}
+
+function metricsHistory(app, since) {
+  const active = requireActive(app)
+  const [windowMs, stepMs, step] = HISTORY_WINDOWS[since]
+  const now = Date.now()
+  const start = now - windowMs
+  const limits = active.spec.resources
+  const cpuCeiling = (limits.cpu || 2) * 100
+  const memCeiling = limits.memory_bytes || 768 * 1024 ** 2
+  // Samples belong to the application, across its deployments: they start with its first one.
+  const activeSince = Date.parse(app.created_at)
+  // The application was stopped at some point: nothing was sampled after that.
+  const stoppedAt = app.desired_state === 'stopped' ? Date.parse(app.updated_at) : Infinity
+  // One outage of the agent itself, a while ago: every series has the same hole.
+  const outageStart = now - windowMs * 0.35
+  const outageEnd = outageStart + Math.max(2 * stepMs, windowMs * 0.03)
+
+  const series = []
+  for (let r = 1; r <= active.spec.replicas; r++) {
+    const container = app.containers.find(c => c.replica === r)
+    const key = `${app.name}/${r}`
+    const points = []
+    let cpu = 8 + noise(key, -1) * 25
+    let mem = memCeiling * (0.3 + noise(key, -2) * 0.25)
+    for (let t = Math.ceil(start / stepMs) * stepMs; t < now; t += stepMs) {
+      const bucket = t / stepMs
+      cpu = clamp(cpu + (noise(key, bucket) - 0.5) * 8 + Math.sin(bucket / 9) * 2, 0.5, cpuCeiling * 0.92)
+      mem = clamp(mem + (noise(key, bucket + 0.5) - 0.48) * memCeiling * 0.01, memCeiling * 0.1, memCeiling * 0.95)
+      if (t + stepMs <= activeSince || t >= stoppedAt) continue
+      if (t >= outageStart && t < outageEnd) continue
+      // A flapping replica (web's third) is down for a stretch every so often; a crash-looping one barely runs.
+      if (container?.oom_killed && Math.floor(bucket / 6) % 3 === 2) continue
+      if (container?.crash_loop && noise(key, bucket + 0.25) < 0.7) continue
+      points.push({ at: iso(t), cpu_percent: round1(container?.crash_loop ? cpu * 0.2 : cpu), memory_bytes: Math.round(mem) })
+    }
+    if (points.length > 0) series.push({ replica: r, points })
+  }
+  return {
+    application: app.name,
+    since: iso(start),
+    step,
+    series,
+    limits: { cpu: limits.cpu || 0, memory_bytes: limits.memory_bytes || 0 },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Jobs: the hook, the schedule and one-off commands, all as runs
+// ---------------------------------------------------------------------------
+
+const JOB_NAME = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/
+
+function addRun(app, { job, kind, command, deploymentId = null, startedAtMs, durationMs = null, status, exitCode = null, output = '' }) {
+  const run = {
+    id: nextRunId++,
+    application: app.name,
+    job,
+    kind,
+    command,
+    status,
+    exit_code: exitCode,
+    deployment_id: deploymentId,
+    started_at: iso(startedAtMs),
+    finished_at: durationMs === null ? null : iso(startedAtMs + durationMs),
+    output,
+  }
+  runs.set(run.id, run)
+  return run
+}
+
+/** Runs of one application, newest first; `job` narrows them (a name, "pre-deploy" or "run"). The last 50 per job are kept. */
+function runsOf(app, job = '') {
+  const all = [...runs.values()].filter(r => r.application === app.name).sort((a, b) => b.started_at.localeCompare(a.started_at) || b.id - a.id)
+  const seen = new Map()
+  const kept = all.filter((r) => {
+    const n = (seen.get(r.job) ?? 0) + 1
+    seen.set(r.job, n)
+    if (n > 50) runs.delete(r.id)
+    return n <= 50
+  })
+  return job === '' ? kept : kept.filter(r => r.job === job)
+}
+
+/** A run as it appears in lists: without its output. */
+function runView(run) {
+  if (!run) return null
+  const { output: _output, ...rest } = run
+  return rest
+}
+
+/**
+ * Starts a run that finishes by itself after a few seconds. The outcome comes
+ * from the command, so it can be provoked: "fail" fails, "timeout" times out.
+ */
+function startRun(app, active, { job, kind, command, timeout }) {
+  const run = addRun(app, { job, kind, command, deploymentId: active.id, startedAtMs: Date.now(), status: 'running' })
+  const text = command.join(' ')
+  const outcome = /fail|false/.test(text) ? 'failed' : /timeout|sleep/.test(text) ? 'timed_out' : 'succeeded'
+  const wait = outcome === 'timed_out' ? 6 * SECOND : 2500 + (run.id % 3) * 800
+  setTimeout(() => finishRun(app, run, outcome, timeout), wait).unref()
+  return run
+}
+
+/** Settles a run: exit code, output, and the `job` event a failure leaves behind (a hook's failure is the deployment's, not an event). */
+function finishRun(app, run, outcome, timeout = '10m0s', hook = false) {
+  if (!runs.has(run.id) || run.finished_at) return
+  run.finished_at = iso(Date.now())
+  run.status = outcome
+  const argv = run.command.join(' ')
+  const subject = run.job === 'run' ? `Command ${run.command[0] ?? ''}` : `Job ${run.job}`
+  if (outcome === 'succeeded') {
+    run.exit_code = 0
+    run.output = run.job === 'cleanup-sessions' ? `Deleted ${1 + (run.id % 7)} expired sessions.` : run.job === 'nightly-report' ? 'Collecting invoices for the last 24h...\n912 invoices, 337 customers\nReport written.' : run.job === 'pre-deploy' ? 'No pending migrations.' : `$ ${argv}\nok`
+  }
+  else if (outcome === 'failed') {
+    run.exit_code = 1
+    run.output = `$ ${argv}\nError: the command failed\nexit status 1`
+    if (!hook) addAppEvent(app.name, 'warn', 'job', `${subject} failed (exit 1)`)
+  }
+  else {
+    run.exit_code = null
+    run.output = `$ ${argv}\nstill working...`
+    if (!hook) addAppEvent(app.name, 'warn', 'job', `${subject} timed out after ${timeout.replace(/(?<!\d)0[ms]/g, '') || timeout}`)
+  }
+}
+
+// --- cron, five fields, UTC ---------------------------------------------------
+
+function cronField(field, min, max) {
+  const set = new Set()
+  for (const part of field.split(',')) {
+    const [range, stepText] = part.split('/')
+    const step = stepText ? Number(stepText) : 1
+    let lo
+    let hi
+    if (range === '*') [lo, hi] = [min, max]
+    else if (range.includes('-')) [lo, hi] = range.split('-').map(Number)
+    else [lo, hi] = [Number(range), stepText ? max : Number(range)]
+    if (![lo, hi, step].every(Number.isInteger) || step < 1) return null
+    for (let v = lo; v <= hi; v += step) set.add(max === 7 && v === 7 ? 0 : v)
+  }
+  return set
+}
+
+/** The next firing after `fromMs`, in epoch milliseconds; null when the expression never fires within a year. */
+function cronNext(expr, fromMs) {
+  const fields = expr.trim().split(/\s+/)
+  if (fields.length !== 5) return null
+  const [minute, hour, dom, month, dow] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]].map(([lo, hi], i) => cronField(fields[i], lo, hi))
+  if (!minute || !hour || !dom || !month || !dow) return null
+  const anyDom = fields[2] === '*'
+  const anyDow = fields[4] === '*'
+  let t = Math.floor(fromMs / MINUTE) * MINUTE + MINUTE
+  const end = t + 366 * DAY
+  while (t < end) {
+    const d = new Date(t)
+    if (!month.has(d.getUTCMonth() + 1)) {
+      t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)
+      continue
+    }
+    // Vixie cron: when both day fields are restricted, either one matching is enough.
+    const dayOk = anyDom && anyDow ? true : anyDom ? dow.has(d.getUTCDay()) : anyDow ? dom.has(d.getUTCDate()) : dom.has(d.getUTCDate()) || dow.has(d.getUTCDay())
+    if (!dayOk) {
+      t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)
+      continue
+    }
+    if (!hour.has(d.getUTCHours())) {
+      t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours() + 1)
+      continue
+    }
+    if (minute.has(d.getUTCMinutes())) return t
+    t += MINUTE
+  }
+  return null
+}
+
+function jobsView(app) {
+  const active = requireActive(app)
+  return (active.spec.jobs ?? []).map((j) => {
+    const next = app.desired_state === 'stopped' ? null : cronNext(j.schedule, Date.now())
+    return { name: j.name, schedule: j.schedule, command: j.command, timeout: j.timeout, last_run: runView(runsOf(app, j.name)[0]), next_run_at: next === null ? null : iso(next) }
+  })
+}
+
+/** The scheduler's tick: a job fires once for a minute its schedule names, one run at a time, never while a deployment holds the application. */
+function runSchedules() {
+  const minute = Math.floor(Date.now() / MINUTE) * MINUTE
+  for (const app of apps.values()) {
+    const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+    for (const j of active?.spec.jobs ?? []) {
+      const key = `${app.name}/${j.name}`
+      const seen = scheduleSeen.get(key) ?? minute
+      scheduleSeen.set(key, minute)
+      if (app.desired_state !== 'running' || inFlight(app.name)) continue
+      const due = cronNext(j.schedule, seen)
+      if (due === null || due > Date.now()) continue
+      if (!runsOf(app, j.name).some(r => r.status === 'running')) startRun(app, active, { job: j.name, kind: 'scheduled', command: j.command, timeout: j.timeout })
+    }
+  }
+}
+
+function validateCommand(command) {
+  if (command === undefined) throw new HttpError(400, 'INVALID_REQUEST', 'command is required, e.g. {"command": ["rails", "db:migrate"]}')
+  if (!Array.isArray(command)) throw new HttpError(400, 'INVALID_REQUEST', 'command must be a list of arguments, not a shell string')
+  if (command.length === 0) throw new HttpError(400, 'INVALID_REQUEST', 'command must not be empty')
+  if (command.length > 256) throw new HttpError(400, 'INVALID_REQUEST', `command has too many arguments (${command.length}); at most 256`)
+  for (const [i, arg] of command.entries()) {
+    if (typeof arg !== 'string') throw new HttpError(400, 'INVALID_REQUEST', `command[${i}] must be a string`)
+    if (Buffer.byteLength(arg) > 4096) throw new HttpError(400, 'INVALID_REQUEST', `command[${i}] is longer than 4 KB`)
+    if (/[\n\0]/.test(arg)) throw new HttpError(400, 'INVALID_REQUEST', `command[${i}] must not contain a newline or NUL`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+
+const TOKEN_NAME = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/
+
+function addToken(name, role, createdAtMs, lastUsedAtMs, value = newTokenValue()) {
+  const t = { id: nextTokenId++, name, role, created_at: iso(createdAtMs), last_used_at: lastUsedAtMs === null ? null : iso(lastUsedAtMs), value }
+  tokens.set(name, t)
+  return t
+}
+
+/** `swk_` + 32 random bytes as unpadded base64url, the agent's format; the prefix is not part of the secret. */
+function newTokenValue() {
+  return `swk_${randomBytes(32).toString('base64url')}`
+}
+
+function tokenView(t) {
+  const { value: _value, ...rest } = t
+  return rest
+}
+
+/** Who a bearer value is: the configured token, or one created here and not revoked since. */
+function identify(authorization) {
+  const value = typeof authorization === 'string' && authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
+  if (value === '') return null
+  if (value === TOKEN) return TOKEN_IDENTITY
+  for (const t of tokens.values()) {
+    if (t.value === value) {
+      // Kept to the minute, as the agent does: it says whether the token is still in use.
+      t.last_used_at = iso(Math.floor(Date.now() / MINUTE) * MINUTE)
+      return { name: t.name, role: t.role }
+    }
+  }
+  return null
+}
+
+const roleCovers = (have, required) => ROLES.indexOf(have) >= ROLES.indexOf(required)
+
+function forbiddenMessage(have, required) {
+  const need = required === 'deploy' ? 'deploying needs deploy or admin' : `this needs ${required}`
+  return `this token has the ${have} role; ${need}`
+}
+
+// ---------------------------------------------------------------------------
+// Volumes: the archive is a real (small) tar, built here byte by byte.
+// ---------------------------------------------------------------------------
+
+/** Contents of the postgres volume, relative to its mount point. */
+const VOLUME_FILES = [
+  ['PG_VERSION', '17\n'],
+  ['postgresql.conf', '# mock data directory\nlisten_addresses = \'*\'\nmax_connections = 100\nshared_buffers = 128MB\n'],
+  ['base/', null],
+  ['base/1/', null],
+  ['base/1/pg_filenode.map', 'mock relation map\n'],
+  ['global/', null],
+  ['global/pg_control', 'mock control file\n'],
+]
+
+function tarHeader(name, size, type) {
+  const header = Buffer.alloc(512)
+  header.write(name, 0, 100, 'utf8')
+  header.write(type === '5' ? '0000755\0' : '0000644\0', 100, 8, 'ascii')
+  header.write('0000000\0', 108, 8, 'ascii')
+  header.write('0000000\0', 116, 8, 'ascii')
+  header.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii')
+  header.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, '0')}\0`, 136, 12, 'ascii')
+  header.write('        ', 148, 8, 'ascii')
+  header.write(type, 156, 1, 'ascii')
+  header.write('ustar\0', 257, 6, 'ascii')
+  header.write('00', 263, 2, 'ascii')
+  let sum = 0
+  for (const byte of header) sum += byte
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii')
+  return header
+}
+
+function tarArchive(files) {
+  const blocks = []
+  for (const [name, content] of files) {
+    if (content === null) {
+      blocks.push(tarHeader(name, 0, '5'))
+      continue
+    }
+    const data = Buffer.from(content, 'utf8')
+    blocks.push(tarHeader(name, data.length, '0'), data, Buffer.alloc((512 - (data.length % 512)) % 512))
+  }
+  blocks.push(Buffer.alloc(1024))
+  return Buffer.concat(blocks)
+}
+
+function requireVolume(app, name) {
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name ?? '')) {
+    throw new HttpError(400, 'INVALID_REQUEST', 'volume: lowercase letters, digits and dashes only')
+  }
+  const active = requireActive(app)
+  const volume = (active.spec.volumes ?? []).find(v => v.name === name)
+  if (!volume) throw new HttpError(404, 'NOT_FOUND', 'the application has no volume by that name')
+  return volume
+}
+
+function formatSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${unit === 0 ? value : value.toFixed(1).replace(/\.0$/, '')} ${units[unit]}`
+}
+
+// ---------------------------------------------------------------------------
+// Validation of a submitted configuration, and the conflicts with what runs
+// ---------------------------------------------------------------------------
+
+const HOSTNAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/
+
+/** Errors in the shape of pkg/spec's, all of them at once. */
+const configError = fields => new HttpError(400, 'INVALID_CONFIG', 'invalid deploy.yaml', { fields })
+
+/**
+ * Turns a deploy.yaml sent as JSON into a stored spec: defaults filled in,
+ * hostnames lowercased, the health block checked for exactly one kind. Far
+ * from the agent's whole validation, but the same fields and wording where it
+ * checks at all.
+ */
+function parseSpec(name, body) {
+  if (body.name !== undefined && body.name !== name) {
+    throw new HttpError(400, 'INVALID_REQUEST', `the configuration names ${JSON.stringify(body.name)} but the URL names ${JSON.stringify(name)}`)
+  }
+  const fields = []
+  const problem = (field, message, expected) => fields.push({ field, message, ...(expected ? { expected } : {}) })
+  if (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image)) problem('image', 'is required', 'ghcr.io/org/app:1.0.0')
+
+  const hosts = (field, list) => {
+    if (list === undefined) return undefined
+    if (!Array.isArray(list)) problem(field, 'must be a list of hostnames')
+    else if (list.length > 20) problem(field, `too many (${list.length})`, 'at most 20')
+    else if (!body.domain) problem(field, `requires domain: ${field} are served next to it`)
+    return Array.isArray(list) ? list.map(h => String(h ?? '').trim().toLowerCase()) : []
+  }
+  const domain = body.domain ? String(body.domain).trim().toLowerCase() : undefined
+  if (domain !== undefined && !HOSTNAME.test(domain)) problem('domain', `invalid value "${domain}": not a valid hostname`)
+  const aliases = hosts('aliases', body.aliases)
+  const redirects = hosts('redirects', body.redirects)
+  const seen = new Map(domain ? [[domain, 'domain']] : [])
+  for (const [field, list] of [['aliases', aliases], ['redirects', redirects]]) {
+    for (const [i, host] of (list ?? []).entries()) {
+      if (host === '') problem(`${field}[${i}]`, 'is empty')
+      else if (!HOSTNAME.test(host)) problem(`${field}[${i}]`, `invalid value "${host}": not a valid hostname`)
+      else if (seen.has(host)) problem(`${field}[${i}]`, `"${host}" is already listed under ${seen.get(host)}`)
+      else seen.set(host, `${field}[${i}]`)
+    }
+  }
+
+  let health
+  if (body.health !== undefined && body.health !== null) {
+    const h = body.health
+    const kinds = ['path', 'tcp', 'command'].filter(k => h[k] !== undefined && h[k] !== null && h[k] !== '')
+    if (kinds.length === 0) problem('health', 'one of path, tcp or command is required', 'path: /health')
+    else if (kinds.length > 1) problem('health', `${kinds.join(' and ')} are set; a health check is one of path, tcp or command`, 'path: /health for an HTTP application, tcp: 5432 for a database')
+    if (h.tcp !== undefined && (!Number.isInteger(h.tcp) || h.tcp < 1 || h.tcp > 65535)) problem('health.tcp', `invalid value ${JSON.stringify(h.tcp)}`, 'the port your application listens on, e.g. 5432')
+    if (h.command !== undefined) {
+      const command = Array.isArray(h.command) ? h.command : [h.command]
+      if (command.length === 0) problem('health.command', 'must not be empty', '["pg_isready", "-U", "postgres"]')
+      else if (command.length > 64) problem('health.command', `too many arguments (${command.length})`, 'at most 64')
+      for (const [i, arg] of command.entries()) if (arg === '') problem(`health.command[${i}]`, 'must not be empty', '["pg_isready", "-U", "postgres"]')
+      h.command = command
+    }
+    health = { ...(h.path ? { path: h.path } : {}), ...(h.tcp ? { tcp: h.tcp } : {}), ...(h.command ? { command: h.command } : {}), interval: h.interval ?? '10s', timeout: h.timeout ?? '3s', retries: h.retries ?? 3 }
+  }
+
+  let publish
+  if (body.publish !== undefined) {
+    if (!Array.isArray(body.publish)) problem('publish', 'must be a list')
+    else {
+      publish = body.publish.map((p, i) => {
+        const entry = { port: p?.port, host: p?.host ?? p?.port, ...(p?.address ? { address: String(p.address) } : {}), protocol: p?.protocol ?? 'tcp' }
+        if (!Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) problem(`publish[${i}].port`, 'is required', '1-65535')
+        if (!Number.isInteger(entry.host) || entry.host < 1 || entry.host > 65535) problem(`publish[${i}].host`, 'must be a port', '1-65535')
+        else if (entry.host === 80 || entry.host === 443) problem(`publish[${i}].host`, `port ${entry.host} belongs to the proxy`, 'another port, or a domain')
+        if (entry.protocol !== 'tcp' && entry.protocol !== 'udp') problem(`publish[${i}].protocol`, `invalid value "${entry.protocol}"`, 'tcp or udp')
+        return entry
+      })
+      if (publish.length > 0 && (body.deploy?.strategy ?? 'rolling') !== 'recreate') problem('deploy.strategy', 'must be recreate when ports are published', 'recreate')
+      if (publish.length > 0 && (body.replicas ?? 1) !== 1) problem('replicas', 'must be 1 when ports are published', '1')
+    }
+  }
+
+  if (fields.length > 0) throw configError(fields)
+  return spec(name, body.image, {
+    ...(body.port ? { port: body.port } : {}),
+    ...(domain ? { domain } : {}),
+    ...(aliases?.length ? { aliases } : {}),
+    ...(redirects?.length ? { redirects } : {}),
+    replicas: body.replicas ?? 1,
+    ...(body.env ? { env: Object.fromEntries(Object.keys(body.env).map(k => [k, MASK])) } : {}),
+    ...(health ? { health } : {}),
+    resources: body.resources ?? {},
+    ...(body.volumes?.length ? { volumes: body.volumes } : {}),
+    ...(publish?.length ? { publish } : {}),
+    ...(body.entrypoint ? { entrypoint: [].concat(body.entrypoint) } : {}),
+    ...(body.command ? { command: [].concat(body.command) } : {}),
+    ...(body.user ? { user: body.user } : {}),
+    ...(body.logging ? { logging: body.logging } : {}),
+    restart: body.restart ?? { policy: 'always' },
+    deploy: body.deploy ?? { strategy: 'rolling' },
+  })
+}
+
+const hostnamesOf = sp => [...(sp.domain ? [sp.domain] : []), ...(sp.aliases ?? []), ...(sp.redirects ?? [])]
+
+/**
+ * What the agent checks before it records anything, for deploy, redeploy and
+ * rollback alike: a hostname or a server port another application's active
+ * configuration holds, or one Shipwick itself uses. One entry per offending line.
+ */
+function checkConflicts(app, sp) {
+  const fields = []
+  const others = [...apps.values()].filter(a => a !== app && a.active_deployment_id).map(a => [a.name, deployments.get(a.active_deployment_id).spec])
+  const hostLines = [
+    ...(sp.domain ? [['domain', sp.domain]] : []),
+    ...(sp.aliases ?? []).map((h, i) => [`aliases[${i}]`, h]),
+    ...(sp.redirects ?? []).map((h, i) => [`redirects[${i}]`, h]),
+  ]
+  for (const [field, host] of hostLines) {
+    if (OWN_HOSTNAMES.includes(host)) fields.push({ field, message: 'already served by Shipwick itself (the agent or the dashboard)' })
+    else {
+      const owner = others.find(([, other]) => hostnamesOf(other).includes(host))
+      if (owner) fields.push({ field, message: `already served by application "${owner[0]}"` })
+    }
+  }
+  for (const [i, p] of (sp.publish ?? []).entries()) {
+    if (RESERVED_PORTS.includes(p.host)) {
+      fields.push({ field: `publish[${i}].host`, message: 'already published by Shipwick itself (the agent or the proxy)' })
+      continue
+    }
+    // "Every address" collides with any specific address, and the other way round.
+    const owner = others.find(([, other]) => (other.publish ?? []).some(q => q.host === p.host && q.protocol === p.protocol && (!q.address || !p.address || q.address === p.address)))
+    if (owner) fields.push({ field: `publish[${i}].host`, message: `already published by application "${owner[0]}"` })
+  }
+  if (fields.length > 0) throw configError(fields)
+}
+
+// ---------------------------------------------------------------------------
 // Background activity
 // ---------------------------------------------------------------------------
 
@@ -796,6 +1406,10 @@ function startBackground() {
   setInterval(() => {
     for (const app of apps.values()) generateLogLine(app)
   }, 700).unref()
+
+  // The scheduler looks at every job's schedule a few times a minute.
+  runSchedules()
+  setInterval(runSchedules, 20 * SECOND).unref()
 
   // The crash-looping replica gets its slow retry; here every 45s instead of every 5m.
   setInterval(() => {
@@ -840,10 +1454,11 @@ function sendError(res, status, code, message, details = {}) {
 }
 
 class HttpError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = {}) {
     super(message)
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -881,13 +1496,36 @@ async function readJSON(req, allowed) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('not an object')
   }
   catch {
-    throw new HttpError(400, 'INVALID_REQUEST', 'request body must be a JSON object')
+    throw new HttpError(400, 'INVALID_REQUEST', allowed ? 'request body must be a JSON object' : 'the mock agent reads deploy.yaml as JSON only; send the document as a JSON object')
   }
   // Like the agent: a typo such as "imgae" must not quietly redeploy the old image.
   for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) throw new HttpError(400, 'INVALID_REQUEST', `json: unknown field ${JSON.stringify(key)}`)
+    if (allowed && !allowed.includes(key)) throw new HttpError(400, 'INVALID_REQUEST', `json: unknown field ${JSON.stringify(key)}`)
   }
   return value
+}
+
+/**
+ * Reads an archive upload: the content type must say tar, the first block
+ * must be a tar header, and the rest is counted, not kept. Answers the size.
+ */
+async function readArchive(req) {
+  const [type] = String(req.headers['content-type'] ?? '').split(';')
+  if (type.trim() !== 'application/x-tar') {
+    throw new HttpError(400, 'INVALID_REQUEST', 'the body must be a tar archive sent as Content-Type: application/x-tar')
+  }
+  if (Number(req.headers['content-length'] ?? 0) > 10 * 1024 ** 3) throw new HttpError(413, 'INVALID_REQUEST', 'the archive exceeds 10 GB')
+  let size = 0
+  let head = Buffer.alloc(0)
+  for await (const chunk of req) {
+    size += chunk.length
+    if (head.length < 512) head = Buffer.concat([head, chunk]).subarray(0, 512)
+    if (size > 10 * 1024 ** 3) throw new HttpError(413, 'INVALID_REQUEST', 'the archive exceeds 10 GB')
+  }
+  if (head.length < 512 || head.toString('ascii', 257, 262) !== 'ustar') {
+    throw new HttpError(400, 'INVALID_REQUEST', 'the archive is not a tar file')
+  }
+  return size
 }
 
 function requireApp(name) {
@@ -910,6 +1548,38 @@ function requireActive(app) {
 
 const IMAGE_PATTERN = /^[a-z0-9]+([._\-/:][a-z0-9]+)*(:[\w][\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$/i
 
+// Every endpoint and the role it needs, the agent's own table (docs/api.md).
+// A route that is not here is ENDPOINT_NOT_FOUND, answered before the token is looked at.
+const ROUTES = {
+  'GET /server': 'read',
+  'GET /applications': 'read',
+  'GET /applications/:p': 'read',
+  'DELETE /applications/:p': 'admin',
+  'POST /applications/:p/deploy': 'deploy',
+  'POST /applications/:p/redeploy': 'deploy',
+  'POST /applications/:p/rollback': 'deploy',
+  'POST /applications/:p/stop': 'deploy',
+  'POST /applications/:p/start': 'deploy',
+  'GET /applications/:p/logs': 'read',
+  'GET /applications/:p/events': 'read',
+  'GET /applications/:p/metrics': 'read',
+  'GET /applications/:p/metrics/history': 'read',
+  'GET /applications/:p/volumes': 'read',
+  'GET /applications/:p/volumes/:x/archive': 'admin',
+  'PUT /applications/:p/volumes/:x/archive': 'admin',
+  'GET /applications/:p/jobs': 'read',
+  'GET /applications/:p/runs': 'read',
+  'GET /applications/:p/runs/:x': 'read',
+  // Starting a container from the application's image is deploying, in effect.
+  'POST /applications/:p/jobs/:x/run': 'deploy',
+  'POST /applications/:p/run': 'deploy',
+  'GET /deployments': 'read',
+  'GET /deployments/:p': 'read',
+  'GET /tokens': 'admin',
+  'POST /tokens': 'admin',
+  'DELETE /tokens/:p': 'admin',
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
   const method = req.method ?? 'GET'
@@ -919,13 +1589,26 @@ async function handle(req, res) {
     return sendJSON(res, 200, { status: 'ok', version: VERSION })
   }
 
-  if (path.startsWith('/api/v1/') && req.headers.authorization !== `Bearer ${TOKEN}`) {
+  const segments = path.startsWith('/api/v1/') ? path.split('/').filter(Boolean).slice(2).map(decodeURIComponent) : []
+  const collection = ['applications', 'deployments', 'tokens'].includes(segments[0])
+  const route = `${method} /${segments.map((s, i) => (collection && i === 1 ? ':p' : collection && i === 3 && ['volumes', 'runs', 'jobs'].includes(segments[2]) ? ':x' : s)).join('/')}`
+  const param = segments[1]
+  const required = ROUTES[route]
+
+  if (!required) {
+    // The agent has no such operation, as opposed to NOT_FOUND: unknown application or deployment.
+    return sendError(res, 404, 'ENDPOINT_NOT_FOUND', `no such endpoint: ${method} ${path}`)
+  }
+  const who = identify(req.headers.authorization)
+  if (!who) {
+    res.setHeader('www-authenticate', 'Bearer realm="shipwick"')
     return sendError(res, 401, 'UNAUTHORIZED', 'missing or invalid API token')
   }
-
-  const segments = path.split('/').filter(Boolean).slice(2).map(decodeURIComponent)
-  const route = `${method} /${segments.map((s, i) => (i === 1 && (segments[0] === 'applications' || segments[0] === 'deployments') ? ':p' : s)).join('/')}`
-  const param = segments[1]
+  if (!roleCovers(who.role, required)) {
+    return sendError(res, 403, 'FORBIDDEN', forbiddenMessage(who.role, required), { role: who.role, required })
+  }
+  // Stop/start events name the actor unless it is root, as the agent does.
+  const byWho = who.name === 'root' ? '' : ` by ${who.name}`
 
   switch (route) {
     case 'GET /server': {
@@ -942,6 +1625,8 @@ async function handle(req, res) {
         applications: apps.size,
         containers: [...apps.values()].reduce((n, a) => n + a.containers.filter(c => c.state === 'running').length, 0),
         proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0 },
+        token: who,
+        notifications: { webhook: WEBHOOK },
       })
     }
 
@@ -959,13 +1644,22 @@ async function handle(req, res) {
       appEvents.delete(app.name)
       logBuffers.delete(app.name)
       for (const d of [...deployments.values()]) if (d.application === app.name) deployments.delete(d.id)
+      for (const r of [...runs.values()]) if (r.application === app.name) runs.delete(r.id)
       res.writeHead(204)
       return res.end()
     }
 
-    case 'POST /applications/:p/deploy':
-      // The dashboard never deploys a raw spec (it only ever sees masked env values).
-      throw new HttpError(400, 'INVALID_REQUEST', 'the mock agent does not accept deploy.yaml; use /redeploy or /rollback')
+    case 'POST /applications/:p/deploy': {
+      // The dashboard never deploys a raw spec; the CLI would. JSON only: see the header.
+      if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
+      const body = await readJSON(req, null)
+      const sp = parseSpec(param, body)
+      const app = apps.get(param) ?? addApp(param, iso(Date.now()))
+      requireIdle(app)
+      checkConflicts(app, sp)
+      const d = startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name })
+      return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
+    }
 
     case 'POST /applications/:p/redeploy': {
       const app = requireApp(param)
@@ -979,7 +1673,9 @@ async function handle(req, res) {
         }
         sp.image = body.image
       }
-      const d = startDeployment(app, sp, { kind: 'redeploy', sourceId: active.id })
+      // A stored configuration's hostnames and ports may have been taken since.
+      checkConflicts(app, sp)
+      const d = startDeployment(app, sp, { kind: 'redeploy', sourceId: active.id, by: who.name })
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -999,7 +1695,8 @@ async function handle(req, res) {
       }
       const target = wanted ? candidates.find(d => d.id === wanted) : candidates[0]
       if (!target) throw new HttpError(409, 'NO_ROLLBACK_TARGET', 'no earlier successful deployment to roll back to')
-      const d = startDeployment(app, structuredClone(target.spec), { kind: 'rollback', sourceId: target.id })
+      checkConflicts(app, target.spec)
+      const d = startDeployment(app, structuredClone(target.spec), { kind: 'rollback', sourceId: target.id, by: who.name })
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -1011,7 +1708,7 @@ async function handle(req, res) {
         app.desired_state = 'stopped'
         for (const c of app.containers) Object.assign(c, { state: 'exited', exit_code: 0, oom_killed: false, crash_loop: false })
         app.updated_at = iso(Date.now())
-        addAppEvent(app.name, 'info', 'app', 'Application stopped on request')
+        addAppEvent(app.name, 'info', 'app', `Application stopped${byWho}`)
         endFollowers(app.name)
       }
       return sendJSON(res, 200, appDetail(app))
@@ -1027,9 +1724,124 @@ async function handle(req, res) {
           Object.assign(c, { state: 'running', exit_code: 0, health: active.spec.health ? 'healthy' : '', restarts: 0, started_at: iso(Date.now()) })
         }
         app.updated_at = iso(Date.now())
-        addAppEvent(app.name, 'info', 'app', 'Application started on request')
+        addAppEvent(app.name, 'info', 'app', `Application started${byWho}`)
       }
       return sendJSON(res, 200, appDetail(app))
+    }
+
+    case 'GET /applications/:p/metrics/history': {
+      const app = requireApp(param)
+      const since = url.searchParams.get('since') || '1h'
+      if (!HISTORY_WINDOWS[since]) throw new HttpError(400, 'INVALID_REQUEST', 'since must be 1h, 24h or 7d')
+      return sendJSON(res, 200, metricsHistory(app, since))
+    }
+
+    case 'GET /applications/:p/volumes': {
+      const app = requireApp(param)
+      const active = requireActive(app)
+      return sendJSON(res, 200, (active.spec.volumes ?? []).map(v => ({ name: v.name, path: v.path })))
+    }
+
+    case 'GET /applications/:p/jobs':
+      return sendJSON(res, 200, jobsView(requireApp(param)))
+
+    case 'GET /applications/:p/runs': {
+      const app = requireApp(param)
+      const limit = intParam(url, 'limit', 50, 1, 500)
+      const job = url.searchParams.get('job') ?? ''
+      if (job !== '' && !JOB_NAME.test(job)) throw new HttpError(400, 'INVALID_REQUEST', 'job: lowercase letters, digits and dashes only')
+      return sendJSON(res, 200, runsOf(app, job).slice(0, limit).map(runView))
+    }
+
+    case 'GET /applications/:p/runs/:x': {
+      const app = requireApp(param)
+      const id = Number(segments[3])
+      if (!Number.isInteger(id) || id < 1) throw new HttpError(400, 'INVALID_REQUEST', 'run id must be a positive number')
+      const run = runs.get(id)
+      if (!run || run.application !== app.name) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      return sendJSON(res, 200, run)
+    }
+
+    case 'POST /applications/:p/jobs/:x/run': {
+      const app = requireApp(param)
+      const name = segments[3]
+      if (!JOB_NAME.test(name ?? '')) throw new HttpError(400, 'INVALID_REQUEST', 'job: lowercase letters, digits and dashes only')
+      requireIdle(app)
+      const active = requireActive(app)
+      const job = (active.spec.jobs ?? []).find(j => j.name === name)
+      if (!job) throw new HttpError(404, 'NOT_FOUND', `${app.name} has no job named ${JSON.stringify(name)}`)
+      if (runsOf(app, name).some(r => r.status === 'running')) {
+        throw new HttpError(409, 'JOB_ALREADY_RUNNING', `a run of job ${JSON.stringify(name)} has not finished yet`)
+      }
+      const run = startRun(app, active, { job: name, kind: 'manual', command: job.command, timeout: job.timeout })
+      return sendJSON(res, 202, run, { location: `/api/v1/applications/${app.name}/runs/${run.id}` })
+    }
+
+    case 'POST /applications/:p/run': {
+      const app = requireApp(param)
+      const body = await readJSON(req, ['command'])
+      validateCommand(body.command)
+      requireIdle(app)
+      const active = requireActive(app)
+      const run = startRun(app, active, { job: 'run', kind: 'manual', command: body.command, timeout: '10m0s' })
+      return sendJSON(res, 202, run, { location: `/api/v1/applications/${app.name}/runs/${run.id}` })
+    }
+
+    case 'GET /applications/:p/volumes/:x/archive': {
+      const app = requireApp(param)
+      const volume = requireVolume(app, segments[3])
+      requireIdle(app)
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
+      const archive = tarArchive(VOLUME_FILES)
+      res.writeHead(200, {
+        'content-type': 'application/x-tar',
+        'content-disposition': `attachment; filename="${app.name}-${volume.name}-${stamp}.tar"`,
+        'content-length': archive.length,
+      })
+      return res.end(archive)
+    }
+
+    case 'PUT /applications/:p/volumes/:x/archive': {
+      const app = requireApp(param)
+      const volume = requireVolume(app, segments[3])
+      requireIdle(app)
+      if (app.desired_state !== 'stopped' || app.containers.some(c => c.state === 'running')) {
+        throw new HttpError(409, 'APPLICATION_RUNNING', 'the application is running; stop it first with: shipwick stop')
+      }
+      const size = await readArchive(req)
+      // The replica is created again around the fresh volume, and stays stopped.
+      const active = requireActive(app)
+      app.containers = makeContainers(app, active, { 1: { state: 'created', started_at: null, health: active.spec.health ? 'unknown' : '' } })
+      app.updated_at = iso(Date.now())
+      addAppEvent(app.name, 'info', 'app', `Volume ${volume.name} restored from a backup (${formatSize(size)})`)
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /tokens':
+      return sendJSON(res, 200, [...tokens.values()].sort((a, b) => a.id - b.id).map(tokenView))
+
+    case 'POST /tokens': {
+      const body = await readJSON(req, ['name', 'role'])
+      if (body.name === undefined || body.name === '') throw new HttpError(400, 'INVALID_REQUEST', 'name is required, e.g. {"name": "ci", "role": "deploy"}')
+      if (body.role === undefined || body.role === '') throw new HttpError(400, 'INVALID_REQUEST', 'role is required: read, deploy or admin')
+      if (typeof body.name !== 'string' || !TOKEN_NAME.test(body.name)) {
+        throw new HttpError(400, 'INVALID_REQUEST', `invalid token name ${JSON.stringify(body.name)}: use lowercase letters, digits and dashes (max 40 characters), e.g. ci`)
+      }
+      if (body.name === 'root') throw new HttpError(400, 'INVALID_REQUEST', '"root" is the name of the token the agent is configured with; choose another')
+      if (!ROLES.includes(body.role)) throw new HttpError(400, 'INVALID_REQUEST', `invalid role ${JSON.stringify(body.role)}: use read, deploy or admin`)
+      if (tokens.has(body.name)) throw new HttpError(409, 'TOKEN_EXISTS', `a token named ${JSON.stringify(body.name)} exists`)
+      const t = addToken(body.name, body.role, Date.now(), null)
+      const { last_used_at: _unused, ...created } = tokenView(t)
+      return sendJSON(res, 201, { ...created, token: t.value })
+    }
+
+    case 'DELETE /tokens/:p': {
+      if (param === 'root') throw new HttpError(400, 'INVALID_REQUEST', 'the root token is the one the agent is configured with; change it on the agent, not here')
+      if (!TOKEN_NAME.test(param ?? '')) throw new HttpError(400, 'INVALID_REQUEST', `invalid token name ${JSON.stringify(param)}: use lowercase letters, digits and dashes (max 40 characters), e.g. ci`)
+      if (!tokens.delete(param)) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      res.writeHead(204)
+      return res.end()
     }
 
     case 'GET /applications/:p/events': {
@@ -1090,7 +1902,6 @@ async function handle(req, res) {
     }
 
     default:
-      // The agent has no such operation, as opposed to NOT_FOUND: unknown application or deployment.
       return sendError(res, 404, 'ENDPOINT_NOT_FOUND', `no such endpoint: ${method} ${path}`)
   }
 }
@@ -1101,7 +1912,7 @@ startBackground()
 const server = createServer((req, res) => {
   handle(req, res).catch((error) => {
     if (res.headersSent) return res.destroy()
-    if (error instanceof HttpError) return sendError(res, error.status, error.code, error.message)
+    if (error instanceof HttpError) return sendError(res, error.status, error.code, error.message, error.details)
     console.error(error)
     sendError(res, 500, 'INTERNAL_ERROR', String(error?.message ?? error))
   })
@@ -1109,7 +1920,7 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Shipwick mock agent on http://${HOST}:${PORT}/api/v1`)
-  console.log(`token: ${TOKEN}`)
+  console.log(`token: ${TOKEN} (${TOKEN_IDENTITY.name}, ${TOKEN_IDENTITY.role})`)
 })
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

@@ -9,6 +9,13 @@ name: my-api
 # Pin a version tag: deployments are recorded by it (1.4.2 here).
 image: ghcr.io/company/my-api:1.4.2
 
+# Run something other than the image's default: these replace its ENTRYPOINT,
+# CMD and USER. A string is one argument; use a list for several. Nothing is
+# split on spaces or passed through a shell.
+# entrypoint: ["dotnet"]
+# command: ["App.dll", "--urls", "http://0.0.0.0:8080"]
+# user: "1000:1000"
+
 # The port your application listens on inside the container. It is never
 # published on the host; the reverse proxy reaches it over a private network.
 # Required when `domain` or `health` is set.
@@ -16,6 +23,11 @@ port: 8080
 
 # Public hostname. Shipwick configures Caddy to serve it over HTTPS.
 domain: api.example.com
+
+# More hostnames served exactly like `domain`, and hostnames redirected to it
+# (308, same path and query) — www, an old domain. Each gets a certificate.
+# aliases: [api2.example.com]
+# redirects: [www.api.example.com]
 
 # Number of identical containers to run. Default: 1.
 replicas: 2
@@ -35,6 +47,10 @@ env:
 # Slow starter? Raise retries.
 #
 # Running: a replica that fails `retries` checks in a row is restarted.
+#
+# Not HTTP? Use exactly one of path, tcp or command:
+#   tcp: 5432                                  # the port accepts a connection
+#   command: ["pg_isready", "-U", "postgres"]  # exit 0 inside the replica
 health:
   path: /health
   interval: 10s # default 10s
@@ -63,8 +79,48 @@ deploy:
 #   - name: data
 #     path: /var/lib/postgresql/data
 
+# Ports that are not HTTP, published on the server itself: a database reached
+# from outside the server, a game server. Needs replicas: 1 and the recreate
+# strategy: a server port has one holder. Published ports bypass the host
+# firewall on most distributions; bind to a private address where you can.
+# publish:
+#   - port: 5432        # inside the container
+#     host: 15432       # on the server; default: the same as port
+#     address: 10.0.0.5 # default: every address of the server
+#     protocol: tcp     # or udp
+
 # rolling (default): replicas are replaced one at a time, the application keeps
 # serving. recreate: the running version is stopped before the new one starts;
-# required with volumes.
+# required with volumes and publish.
 # deploy:
 #   strategy: recreate
+
+# Ship logs to a collector instead of the server's disk: json-file (default),
+# local, syslog, journald, gelf, fluentd, awslogs or splunk, with the driver's
+# own options. Addresses are scheme://host:port; no sockets or files on the
+# server. `shipwick logs` keeps working through the copy Docker keeps locally.
+# logging:
+#   driver: gelf
+#   options:
+#     gelf-address: udp://logs.example.com:12201
+#     tag: "{{.Name}}"
+
+# Run from the new image, with the env above, after the pull and before any
+# replica of the new version starts — database migrations. A non-zero exit
+# fails the deployment before anything was touched. It runs next to the version
+# still serving, so what it does must be compatible with that version.
+# pre_deploy:
+#   command: ["dotnet", "Migrate.dll"]
+#   timeout: 10m # default 10m, up to 1h
+
+# Commands on a schedule, each in a one-off container from this image with the
+# env above (no volumes). Five cron fields, read in UTC. One run of a job at a
+# time; `shipwick jobs` shows how they are doing.
+# jobs:
+#   - name: nightly-report
+#     schedule: "0 3 * * *"
+#     command: ["node", "report.js"]
+#     timeout: 1h # default 1h, up to 24h
+#   - name: cleanup
+#     schedule: "*/15 * * * *"
+#     command: ["sh", "-c", "find /tmp/cache -mmin +60 -delete"]

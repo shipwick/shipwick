@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import type { Application } from '~/types/api'
+import type { Application, ApplicationDetail } from '~/types/api'
+import { shippedLogDriver } from '~/utils/spec'
 import { applicationStatusDisplay } from '~/utils/status'
 
 useHead({ title: 'Logs' })
@@ -27,6 +28,15 @@ const options = computed(() => {
 
 const selected = computed(() => (apps.data.value ?? []).find(a => a.name === application.value) ?? null)
 
+// The list items carry no spec; the detail says whether the logs are shipped
+// to a remote driver, in which case the viewer warns that it shows Docker's copy.
+const detail = usePolling<ApplicationDetail | null>(
+  signal => (application.value ? agent.get<ApplicationDetail>(`/applications/${encodeURIComponent(application.value)}`, { signal }) : Promise.resolve(null)),
+  { interval: 60_000, enabled: () => application.value !== '' },
+)
+watch(application, () => void detail.reset())
+const shippedTo = computed(() => shippedLogDriver(detail.data.value?.spec))
+
 // With a single application there is nothing to choose.
 watch(() => apps.data.value, (list) => {
   if (!application.value && list && list.length === 1 && list[0]) application.value = list[0].name
@@ -52,7 +62,7 @@ watch(() => apps.data.value, (list) => {
       </div>
 
       <template v-else>
-        <LogViewer v-if="application" :key="application" :application="application" height-class="h-[calc(100dvh-14rem)] min-h-64" :initial-tail="100">
+        <LogViewer v-if="application" :key="application" :application="application" height-class="h-[calc(100dvh-14rem)] min-h-64" :initial-tail="100" :shipped-to="shippedTo">
           <template #leading>
             <label class="flex items-center gap-1.5 text-xs text-fg-muted">
               <span class="sr-only">Application</span>

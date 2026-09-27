@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Server } from '~/types/api'
+import type { Server, TokenIdentity } from '~/types/api'
 import { formatBytes, pluralize } from '~/utils/format'
 import type { Tone } from '~/utils/status'
 
@@ -18,6 +18,11 @@ interface ServerEntry {
 }
 
 const servers = computed<ServerEntry[]>(() => (polling.data.value ? [{ id: polling.data.value.hostname, server: polling.data.value }] : []))
+
+/** Who this session is. An agent from before tokens had roles knows a single admin token. */
+function tokenOf(server: Server): TokenIdentity {
+  return server.token ?? { name: 'root', role: 'admin' }
+}
 
 function proxyDisplay(server: Server): { tone: Tone, label: string, detail: string } {
   const p = server.proxy
@@ -120,13 +125,36 @@ function proxyDisplay(server: Server): { tone: Tone, label: string, detail: stri
                 {{ entry.server.containers }}
               </dd>
             </div>
-            <div class="bg-bg px-4 py-2.5 sm:col-span-2 lg:col-span-4">
+            <div class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
                 Reverse proxy (Caddy)
               </dt>
               <dd class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
                 <StatusBadge :tone="proxyDisplay(entry.server).tone" :label="proxyDisplay(entry.server).label" />
                 <span class="text-fg-muted">{{ proxyDisplay(entry.server).detail }}</span>
+              </dd>
+            </div>
+            <div class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Notifications
+              </dt>
+              <dd class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                <template v-if="entry.server.notifications?.webhook">
+                  <StatusBadge tone="ok" label="Webhook configured" />
+                  <span class="text-fg-muted">Deployment outcomes and outages are posted to it.</span>
+                </template>
+                <template v-else>
+                  <StatusBadge tone="muted" label="None" />
+                  <span class="text-fg-muted">Set <span class="mono text-fg">SHIPWICK_WEBHOOK_URL</span> on the agent.</span>
+                </template>
+              </dd>
+            </div>
+            <div class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Signed in as
+              </dt>
+              <dd class="mono mt-0.5" :title="tokenOf(entry.server).name === 'root' ? 'The token the agent is configured with' : undefined">
+                {{ tokenOf(entry.server).name }} <span class="text-fg-muted">· {{ tokenOf(entry.server).role }}</span>
               </dd>
             </div>
           </dl>

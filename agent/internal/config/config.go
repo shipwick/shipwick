@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/shipwick/shipwick/agent/internal/notify"
 	"github.com/shipwick/shipwick/pkg/spec"
 )
 
@@ -31,6 +32,10 @@ const (
 
 	EnvDashboardDomain   = "SHIPWICK_DASHBOARD_DOMAIN"
 	EnvDashboardUpstream = "SHIPWICK_DASHBOARD_UPSTREAM"
+
+	EnvEncryptionKey = "SHIPWICK_ENCRYPTION_KEY"
+	EnvWebhookURL    = "SHIPWICK_WEBHOOK_URL"
+	EnvWebhookSecret = "SHIPWICK_WEBHOOK_SECRET"
 )
 
 // MinTokenLength rejects tokens that are trivially guessable.
@@ -58,6 +63,16 @@ type Config struct {
 	// Token is the raw value of SHIPWICK_AGENT_TOKEN, if set. It is consumed
 	// by ResolveToken and must never be logged.
 	Token string
+	// EncryptionKey is the raw value of SHIPWICK_ENCRYPTION_KEY, if set: the
+	// key environment values are encrypted with, as hex. It is consumed by
+	// ResolveEncryptionKey and must never be logged.
+	EncryptionKey string
+	// WebhookURL, when set, receives a notification for every deployment
+	// outcome and every application that goes down or recovers. Like the
+	// token, it is a credential and must never be logged; WebhookSecret
+	// signs each request.
+	WebhookURL    string
+	WebhookSecret string
 }
 
 func (c Config) DatabasePath() string {
@@ -77,6 +92,10 @@ func Load(getenv func(string) string) (Config, error) {
 
 		DashboardDomain:   strings.ToLower(strings.TrimSpace(getenv(EnvDashboardDomain))),
 		DashboardUpstream: valueOr(getenv(EnvDashboardUpstream), "dashboard:3000"),
+
+		EncryptionKey: strings.TrimSpace(getenv(EnvEncryptionKey)),
+		WebhookURL:    strings.TrimSpace(getenv(EnvWebhookURL)),
+		WebhookSecret: getenv(EnvWebhookSecret),
 	}
 	if cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		return Config{}, fmt.Errorf("%s: invalid value %q (expected text or json)", EnvLogFormat, cfg.LogFormat)
@@ -116,6 +135,20 @@ func Load(getenv func(string) string) (Config, error) {
 		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 			return Config{}, fmt.Errorf("%s: invalid port in %q", EnvDashboardUpstream, cfg.DashboardUpstream)
 		}
+	}
+	if cfg.EncryptionKey != "" {
+		// The value is a secret: the error names the rule, not the value.
+		if _, err := decodeEncryptionKey(cfg.EncryptionKey); err != nil {
+			return Config{}, fmt.Errorf("%s: %w (%d random bytes; generate one with: openssl rand -hex %d)", EnvEncryptionKey, err, EncryptionKeySize, EncryptionKeySize)
+		}
+	}
+	if cfg.WebhookURL != "" {
+		// The error never repeats the URL: it carries the webhook's token.
+		if err := notify.ValidateURL(cfg.WebhookURL); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvWebhookURL, err)
+		}
+	} else if cfg.WebhookSecret != "" {
+		return Config{}, fmt.Errorf("%s is set but %s is not", EnvWebhookSecret, EnvWebhookURL)
 	}
 	return cfg, nil
 }

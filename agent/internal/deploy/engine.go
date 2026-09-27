@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/agent/internal/health"
+	"github.com/shipwick/shipwick/agent/internal/notify"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
 	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/api"
@@ -51,6 +53,15 @@ type Runtime interface {
 	FollowLogs(ctx context.Context, id string, tail int, emit func(docker.LogEntry)) error
 	Stats(ctx context.Context, id string, withPrevious bool) (docker.StatsSample, error)
 	Info(ctx context.Context) (docker.Info, error)
+	// Exec runs cmd inside a running container: its exit code and the tail of
+	// its output, bounded by timeout. Command health checks use it.
+	Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (exitCode int, output string, err error)
+	// WaitContainer blocks until the container stops and returns its exit code.
+	WaitContainer(ctx context.Context, id string) (int, error)
+	// ExportPath streams a tar archive of a path inside the container;
+	// ImportPath extracts one into it. Volume backups use them.
+	ExportPath(ctx context.Context, id, path string) (io.ReadCloser, error)
+	ImportPath(ctx context.Context, id, path string, archive io.Reader) error
 }
 
 type Options struct {
@@ -99,6 +110,24 @@ type Options struct {
 	ExtraRoutes []proxy.Route
 
 	Logger *slog.Logger
+
+	// ReservedHostPorts are server ports an application may not publish: the
+	// ones the agent and the proxy listen on.
+	ReservedHostPorts []int
+	// ProbeTCP performs one TCP health check: a connection to the port is
+	// accepted, or not. Command checks need no option; they run through the
+	// Runtime.
+	ProbeTCP func(ctx context.Context, ip string, port int, timeout time.Duration) error
+
+	// Notifier is told about deployment outcomes and about applications
+	// going down and recovering. Nil: nobody is told.
+	Notifier notify.Notifier
+
+	// SampleInterval is how often the resource usage of every running
+	// replica is recorded for the metrics history; MetricsRetention is how
+	// long those samples are kept.
+	SampleInterval   time.Duration
+	MetricsRetention time.Duration
 }
 
 // ProbeFunc checks one replica once. A nil error means healthy.
@@ -110,6 +139,9 @@ func (o *Options) applyDefaults() {
 	}
 	if o.Probe == nil {
 		o.Probe = health.New().Check
+	}
+	if o.ProbeTCP == nil {
+		o.ProbeTCP = health.CheckTCP
 	}
 	if o.StartupPollInterval == 0 {
 		o.StartupPollInterval = time.Second
@@ -141,6 +173,12 @@ func (o *Options) applyDefaults() {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
+	if o.SampleInterval == 0 {
+		o.SampleInterval = 30 * time.Second
+	}
+	if o.MetricsRetention == 0 {
+		o.MetricsRetention = 7 * 24 * time.Hour
+	}
 }
 
 // cleanupTimeout bounds work that must happen even when the triggering
@@ -171,6 +209,7 @@ type Engine struct {
 
 	sup     *supervisor
 	metrics *metricsCache
+	jobs    *jobRunner
 
 	// routing serializes syncRouting and everything else that renames replicas.
 	routing    sync.Mutex
@@ -207,6 +246,7 @@ func New(st *store.Store, rt Runtime, opts Options) *Engine {
 	e.idle = sync.NewCond(&e.mu)
 	e.sup = newSupervisor(e)
 	e.metrics = newMetricsCache()
+	e.jobs = newJobRunner()
 	return e
 }
 
@@ -314,11 +354,15 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 	}
 	app := o.spec
 	// Refused up front, as a config error: nothing is recorded, pulled or started.
-	if err := e.checkDomain(ctx, app.Name, app.Domain); err != nil {
+	if err := e.checkDomain(ctx, app); err != nil {
 		e.unlock(name)
 		return store.Deployment{}, err
 	}
-	d, err := e.store.CreateDeploymentFrom(ctx, app, o.kind, o.sourceID, time.Now())
+	if err := e.checkPublish(ctx, app.Name, app.Publish); err != nil {
+		e.unlock(name)
+		return store.Deployment{}, err
+	}
+	d, err := e.store.CreateDeploymentFrom(ctx, app, o.kind, o.sourceID, actorFrom(ctx), time.Now())
 	if err != nil {
 		e.unlock(name)
 		return store.Deployment{}, err
@@ -470,7 +514,7 @@ func (e *Engine) awaitHealthy(ctx context.Context, d *store.Deployment, replicas
 				stillPending = append(stillPending, r)
 				continue
 			}
-			if err := e.opts.Probe(ctx, c.IP, d.Spec.Port, h.Path, h.Timeout.Std()); err != nil {
+			if err := e.probeReplica(ctx, d, c); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -487,8 +531,8 @@ func (e *Engine) awaitHealthy(ctx context.Context, d *store.Deployment, replicas
 		case <-deadline.C:
 			r := pending[0]
 			e.captureLogs(ctx, d, r)
-			return fmt.Errorf("replica %d did not become healthy within %s: GET %s on port %d: %v",
-				r.Index, shortDuration(budget), h.Path, d.Spec.Port, lastErr[r.Index])
+			return fmt.Errorf("replica %d did not become healthy within %s: %v",
+				r.Index, shortDuration(budget), withCheck(h, d.Spec.Port, lastErr[r.Index]))
 		case <-poll.C:
 		case <-ctx.Done():
 			return ctx.Err()
@@ -528,6 +572,9 @@ func (e *Engine) retireOthers(ctx context.Context, d *store.Deployment, previous
 	}
 	var old []docker.Container
 	for _, c := range containers {
+		if c.Job != "" {
+			continue // a job of the old version runs to its end
+		}
 		if c.DeploymentID != d.ID {
 			old = append(old, c)
 		}

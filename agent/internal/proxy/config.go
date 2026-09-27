@@ -26,6 +26,13 @@ import (
 type Route struct {
 	// Domain is a validated hostname (see pkg/spec); never user-formatted text.
 	Domain string
+	// Aliases are more hostnames served exactly like Domain: the same
+	// handler, the same replicas.
+	Aliases []string
+	// Redirects are hostnames answered with a permanent redirect to Domain,
+	// path and query kept. They need no backend, so they are served whether
+	// or not anything is.
+	Redirects []string
 	// Backends are names on the services network, resolved for every request:
 	// the replicas of an application that are ready. A name must be listed
 	// only while at least one replica carries it — Docker's DNS forwards names
@@ -87,10 +94,21 @@ func render(adminListen string, routes []Route, markerID string) ([]byte, error)
 	caddyRoutes := make([]any, 0, len(routes)+1)
 	for _, r := range routes {
 		caddyRoutes = append(caddyRoutes, obj{
-			"match":    []any{obj{"host": []string{r.Domain}}},
+			"match":    []any{obj{"host": append([]string{r.Domain}, r.Aliases...)}},
 			"handle":   []any{handlerFor(r)},
 			"terminal": true,
 		})
+		if len(r.Redirects) > 0 {
+			// A route of its own: the redirect hostnames appear in a host
+			// matcher on :443 like any other, which is what gets them a
+			// certificate — https://www.example.com has to be answered
+			// before it can be redirected.
+			caddyRoutes = append(caddyRoutes, obj{
+				"match":    []any{obj{"host": r.Redirects}},
+				"handle":   []any{redirectTo(r.Domain)},
+				"terminal": true,
+			})
+		}
 	}
 	// The last route doubles as the fingerprint marker (looked up by @id) and
 	// as the catch-all: without one, Caddy answers unmatched requests with an
@@ -143,6 +161,17 @@ func unavailable() obj {
 		"status_code": 503,
 		"headers":     obj{"Content-Type": []string{"text/plain; charset=utf-8"}, "Retry-After": []string{"5"}},
 		"body":        "503 Service Unavailable: no healthy replica.\n",
+	}
+}
+
+// redirectTo sends the request to the same path and query on domain. 308
+// rather than 301: the method is kept, so a POST to the old hostname does not
+// turn into a GET.
+func redirectTo(domain string) obj {
+	return obj{
+		"handler":     "static_response",
+		"status_code": 308,
+		"headers":     obj{"Location": []string{"https://" + domain + "{http.request.uri}"}},
 	}
 }
 
@@ -225,7 +254,11 @@ func normalize(routes []Route) []Route {
 			}
 			return backends[a].Port < backends[b].Port
 		})
-		out[i] = Route{Domain: r.Domain, Backends: backends, Upstreams: ups, Streaming: r.Streaming}
+		aliases := append([]string(nil), r.Aliases...)
+		sort.Strings(aliases)
+		redirects := append([]string(nil), r.Redirects...)
+		sort.Strings(redirects)
+		out[i] = Route{Domain: r.Domain, Aliases: aliases, Redirects: redirects, Backends: backends, Upstreams: ups, Streaming: r.Streaming}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
 	return out

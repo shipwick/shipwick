@@ -53,7 +53,8 @@ a dashboard change, and the race detector for anything that touches
 - **Proxy configuration is data.** It is built as Go values and marshalled to
   JSON; never assemble Caddy configuration from strings.
 - **Containers are unprivileged**: never privileged, `no-new-privileges`, no
-  host mounts, no published host ports.
+  host mounts, no published host ports unless `publish` in deploy.yaml asks
+  for them, and then only what it lists.
 - **No new runtime dependencies** — external database, queue, cache — and no
   new Go or npm dependency without a reason the standard library cannot answer.
 - **Deployment records are immutable.** A status changes only along the

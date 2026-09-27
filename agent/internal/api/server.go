@@ -2,8 +2,8 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -21,17 +21,26 @@ import (
 
 type Server struct {
 	engine    *deploy.Engine
+	store     *store.Store
 	tokenHash [sha256.Size]byte
 	log       *slog.Logger
+	now       func() time.Time
 
 	closing   chan struct{} // closed by Close; ends long-lived streams
 	closeOnce sync.Once
+
+	// lastUsed is when each stored token's use was last written down, so
+	// that it is written at most once a minute: see recordUse.
+	usedMu   sync.Mutex
+	lastUsed map[int64]time.Time
 }
 
-// New creates the API server. tokenHash is the SHA-256 of the bearer token;
-// the server never sees or stores the token itself.
-func New(engine *deploy.Engine, tokenHash [sha256.Size]byte, log *slog.Logger) *Server {
-	return &Server{engine: engine, tokenHash: tokenHash, log: log, closing: make(chan struct{})}
+// New creates the API server. tokenHash is the SHA-256 of the root token;
+// the server never sees or stores the token itself. Further tokens live in
+// the store.
+func New(engine *deploy.Engine, st *store.Store, tokenHash [sha256.Size]byte, log *slog.Logger) *Server {
+	return &Server{engine: engine, store: st, tokenHash: tokenHash, log: log, now: time.Now,
+		closing: make(chan struct{}), lastUsed: map[int64]time.Time{}}
 }
 
 // Close ends long-lived responses (log streams). Call it before
@@ -47,23 +56,25 @@ func (s *Server) Handler() http.Handler {
 	// `shipwick server status`. It reveals nothing beyond the version.
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
-	authed := func(pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, s.authenticate(h))
-	}
-	authed("GET /api/v1/server", s.handleServer)
-	authed("GET /api/v1/applications", s.handleListApplications)
-	authed("GET /api/v1/applications/{name}", s.withName(s.handleGetApplication))
-	authed("DELETE /api/v1/applications/{name}", s.withName(s.handleDeleteApplication))
-	authed("POST /api/v1/applications/{name}/deploy", s.withName(s.handleDeploy))
-	authed("POST /api/v1/applications/{name}/redeploy", s.withName(s.handleRedeploy))
-	authed("POST /api/v1/applications/{name}/rollback", s.withName(s.handleRollback))
-	authed("POST /api/v1/applications/{name}/stop", s.withName(s.handleStop))
-	authed("POST /api/v1/applications/{name}/start", s.withName(s.handleStart))
-	authed("GET /api/v1/applications/{name}/logs", s.withName(s.handleLogs))
-	authed("GET /api/v1/applications/{name}/events", s.withName(s.handleEvents))
-	authed("GET /api/v1/applications/{name}/metrics", s.withName(s.handleMetrics))
-	authed("GET /api/v1/deployments", s.handleListDeployments)
-	authed("GET /api/v1/deployments/{id}", s.handleGetDeployment)
+	routes := routeTable{mux: mux, s: s}
+	routes.read("GET /api/v1/server", s.handleServer)
+	routes.read("GET /api/v1/applications", s.handleListApplications)
+	routes.read("GET /api/v1/applications/{name}", s.withName(s.handleGetApplication))
+	routes.admin("DELETE /api/v1/applications/{name}", s.withName(s.handleDeleteApplication))
+	routes.deploy("POST /api/v1/applications/{name}/deploy", s.withName(s.handleDeploy))
+	routes.deploy("POST /api/v1/applications/{name}/redeploy", s.withName(s.handleRedeploy))
+	routes.deploy("POST /api/v1/applications/{name}/rollback", s.withName(s.handleRollback))
+	routes.deploy("POST /api/v1/applications/{name}/stop", s.withName(s.handleStop))
+	routes.deploy("POST /api/v1/applications/{name}/start", s.withName(s.handleStart))
+	routes.read("GET /api/v1/applications/{name}/logs", s.withName(s.handleLogs))
+	routes.read("GET /api/v1/applications/{name}/events", s.withName(s.handleEvents))
+	routes.read("GET /api/v1/applications/{name}/metrics", s.withName(s.handleMetrics))
+	routes.read("GET /api/v1/deployments", s.handleListDeployments)
+	routes.read("GET /api/v1/deployments/{id}", s.handleGetDeployment)
+	s.jobRoutes(routes)
+	s.volumeRoutes(routes)
+	s.tokenRoutes(routes)
+	s.metricsRoutes(routes)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, api.CodeEndpointNotFound, "no such endpoint: "+r.Method+" "+r.URL.Path, nil)
@@ -72,19 +83,40 @@ func (s *Server) Handler() http.Handler {
 	return s.recoverPanics(s.logRequests(securityHeaders(mux)))
 }
 
-// authenticate requires "Authorization: Bearer <token>". Both sides are
-// hashed before the constant-time comparison, so neither the token's content
-// nor its length leaks through timing.
-func (s *Server) authenticate(next http.Handler) http.Handler {
+// routeTable registers authenticated endpoints by the role they require.
+type routeTable struct {
+	mux *http.ServeMux
+	s   *Server
+}
+
+func (t routeTable) read(pattern string, h http.HandlerFunc)   { t.handle(pattern, api.RoleRead, h) }
+func (t routeTable) deploy(pattern string, h http.HandlerFunc) { t.handle(pattern, api.RoleDeploy, h) }
+func (t routeTable) admin(pattern string, h http.HandlerFunc)  { t.handle(pattern, api.RoleAdmin, h) }
+
+func (t routeTable) handle(pattern string, role api.Role, h http.HandlerFunc) {
+	t.mux.Handle(pattern, t.s.authenticate(role, h))
+}
+
+// authenticate requires "Authorization: Bearer <token>" and a token whose
+// role covers the endpoint's. The token is hashed before it is compared or
+// looked up (see identify), so neither its content nor its length leaks
+// through timing. The handler learns who called through the context.
+func (s *Server) authenticate(role api.Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		presented := sha256.Sum256([]byte(token))
-		if !ok || subtle.ConstantTimeCompare(presented[:], s.tokenHash[:]) != 1 {
+		who, known := s.identify(r.Context(), sha256.Sum256([]byte(token)))
+		if !ok || !known {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="shipwick"`)
 			writeError(w, http.StatusUnauthorized, api.CodeUnauthorized, "missing or invalid API token", nil)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if !who.Role.Covers(role) {
+			writeError(w, http.StatusForbidden, api.CodeForbidden, forbiddenMessage(who.Role, role),
+				map[string]any{"role": who.Role, "required": role})
+			return
+		}
+		ctx := deploy.WithActor(context.WithValue(r.Context(), principalKey{}, who), who.Name)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -173,12 +205,18 @@ func writeError(w http.ResponseWriter, status int, code, message string, details
 func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var conflict *deploy.DomainConflictError
 	var badImage *deploy.InvalidImageError
+	var portConflict *deploy.PortConflictError
+	var badCommand *deploy.InvalidCommandError
 	switch {
 	case errors.As(err, &conflict):
 		// Shaped like a validation error, because to the user it is one: a
 		// line of their deploy.yaml needs to change.
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{
-			"fields": []spec.FieldError{{Field: "domain", Message: "already served by " + conflict.Owner}},
+			"fields": []spec.FieldError{{Field: conflict.Field, Message: "already served by " + conflict.Owner}},
+		})
+	case errors.As(err, &portConflict):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{
+			"fields": []spec.FieldError{{Field: portConflict.Field(), Message: "already published by " + portConflict.Owner}},
 		})
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, api.CodeNotFound, "not found", nil)
@@ -190,8 +228,20 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusConflict, api.CodeNoRollbackTarget, err.Error(), nil)
 	case errors.As(err, &badImage):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "image: "+badImage.Reason, nil)
+	case errors.Is(err, deploy.ErrJobRunning):
+		writeError(w, http.StatusConflict, api.CodeJobAlreadyRunning, err.Error(), nil)
+	case errors.As(err, &badCommand):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, badCommand.Error(), nil)
 	case errors.Is(err, deploy.ErrShuttingDown):
 		writeError(w, http.StatusServiceUnavailable, api.CodeRuntimeUnavailable, err.Error(), nil)
+	case errors.Is(err, store.ErrTokenExists):
+		writeError(w, http.StatusConflict, api.CodeTokenExists, err.Error(), nil)
+	case errors.Is(err, deploy.ErrVolumeNotFound):
+		writeError(w, http.StatusNotFound, api.CodeNotFound, err.Error(), nil)
+	case errors.Is(err, deploy.ErrNotStopped):
+		writeError(w, http.StatusConflict, api.CodeApplicationRunning, err.Error(), nil)
+	case errors.Is(err, deploy.ErrInvalidArchive):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 	default:
 		// Callers are authenticated operators, so the cause is more useful
 		// to them than an opaque message. Errors never contain env values.

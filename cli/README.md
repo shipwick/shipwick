@@ -23,10 +23,17 @@ On Windows, download `shipwick_windows_amd64.exe` from the
 | `shipwick status [app]` | Version, CPU and memory, replica health and restart counts, recent deployments, and what the supervisor has been doing |
 | `shipwick ps` | All applications on the server |
 | `shipwick logs [app]` | `-n 100` lines, `-f` to follow, `-t` for timestamps |
+| `shipwick run [app] -- <command>` | Run a command in a one-off container of the application (its image, env and limits, no volumes), print its output, exit with its exit code |
+| `shipwick jobs [app]` | The scheduled jobs with their last and next run (UTC). `jobs run <app> <job>` starts one now and waits; `jobs logs <app> <job>` shows the last run's output, `--run N` another's |
 | `shipwick stop\|start [app]` | Stop an application / start it again |
 | `shipwick delete <app>` | Remove an application, its containers and its history. Asks for the name; `--yes` to skip |
-| `shipwick server status` | Is the agent reachable, and what does it run on |
-| `shipwick login` | Save the agent URL and token |
+| `shipwick server status` | Is the agent reachable, what does it run on, and which token and role am I using |
+| `shipwick login` | Save the agent URL and token; `--context <name>` saves them under that name and makes it current |
+| `shipwick context ls\|use\|rm\|current` | List the saved servers (`*` marks the current one), switch, forget one (`--yes` skips the question), print the current name |
+| `shipwick token create <name> --role read\|deploy\|admin` | Create a token; its value is printed once. `read` looks, `deploy` also changes what runs, `admin` does everything |
+| `shipwick token ls` | The tokens, their roles and when each was last used |
+| `shipwick token revoke <name>` | Revoke a token. Asks for the name; `--yes` to skip |
+| `shipwick upgrade` | Replace this binary with the latest release, verified against its checksums, and report whether the server is behind. `--check` only reports |
 
 Commands taking `[app]` default to the application named in `./deploy.yaml`
 (`-f`/`--file` selects another file; for `logs`, where `-f` means `--follow`,
@@ -45,8 +52,19 @@ wants the name spelled out.
 The saved token belongs to the saved URL: point `--url` at a different agent
 and the saved token is **not** sent there.
 
-The config file lives at `<user config dir>/shipwick/config.yaml`
-(`SHIPWICK_CONFIG` overrides it) and is written `0600`.
+Saved servers are *contexts*. `--context <name>`, then `SHIPWICK_CONTEXT`,
+then the current context (set by the last `login` or `context use`) decides
+which one a command means. The config file lives at
+`<user config dir>/shipwick/config.yaml` (`SHIPWICK_CONFIG` overrides it), is
+written `0600`, and looks like this — a file from before contexts existed,
+with `url` and `token` at the top level, still loads, as the context `default`:
+
+```yaml
+current: prod
+contexts:
+  prod:    { url: https://agent.example.com, token: … }
+  staging: { url: http://127.0.0.1:9000, token: … }
+```
 
 Typical setups:
 
@@ -54,6 +72,11 @@ Typical setups:
 # Your laptop → a server: keep the API on loopback and tunnel to it.
 ssh -N -L 9000:127.0.0.1:9000 user@server &
 shipwick login                      # URL defaults to the tunnel; token is asked without echo
+
+# A second server, and switching between them.
+shipwick login --context staging --url https://staging.example.com
+shipwick deploy --context prod
+shipwick context use prod
 
 # CI: no login, just two secrets.
 export SHIPWICK_AGENT_URL=https://agent.example.com
@@ -86,6 +109,12 @@ anything other than this machine.
   too). Warnings go to stderr, so stdout stays parseable.
 - **`logs -f` ends by itself** when the containers are replaced by a new
   deployment; run it again to follow the new ones.
+- **`upgrade` replaces only itself.** The new binary is written next to the
+  old one and renamed over it once its SHA-256 matches the release's
+  `checksums.txt`; a binary under Homebrew's Cellar or winget's Packages
+  directory is recognized by its path and left to the package manager. The
+  server is upgraded by the installer, on the server: it needs Docker there,
+  which the CLI does not have.
 
 ## Layout
 
@@ -93,7 +122,7 @@ anything other than this machine.
 cmd/shipwick          entrypoint: signals, exit code
 internal/commands      cobra command tree, error rendering
 internal/client        agent API client
-internal/cliconfig     URL/token resolution, config file
+internal/cliconfig     contexts: URL/token resolution, config file
 internal/ui            colors, tables, progress line
 ```
 

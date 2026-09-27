@@ -1,8 +1,13 @@
 <script setup lang="ts">
 import type { AgentError } from '~/utils/agentError'
+import { forbiddenExplanation, isRole } from '~/utils/roles'
 
 /** The result of a failed action, shown where the action was taken. */
 const props = defineProps<{ error: AgentError | null }>()
+
+// A 403 is explained from its details ("This token has the read role; deploying
+// needs deploy or admin"), which reads better than the agent's lowercase line.
+const headline = computed(() => (props.error ? forbiddenExplanation(props.error) || props.error.message : ''))
 
 const hint = computed(() => {
   const error = props.error
@@ -12,6 +17,13 @@ const hint = computed(() => {
   if (error.code === 'ENDPOINT_NOT_FOUND') return 'This agent version does not support this action. Upgrade the agent.'
   if (error.code === 'DEPLOYMENT_IN_PROGRESS') return 'Wait for the running operation to finish, then try again.'
   if (error.code === 'NO_ROLLBACK_TARGET') return 'Only earlier deployments that served successfully can be rolled back to. The list has been refreshed.'
+  if (error.code === 'FORBIDDEN') {
+    const required = error.details.required
+    return isRole(required) ? `Sign in with a token that has the ${required} role, or ask an admin for one.` : 'Sign in with a token whose role allows this.'
+  }
+  if (error.code === 'APPLICATION_RUNNING') return 'Stop the application first.'
+  if (error.code === 'JOB_ALREADY_RUNNING') return 'A run of this job has not finished yet; a job runs one at a time. Open it in the run history to follow it.'
+  if (error.code === 'TOKEN_EXISTS') return 'Choose another name, or revoke the existing token first.'
   if (error.unreachable && error.agentUrl) return `Tried ${error.agentUrl}`
   return ''
 })
@@ -20,7 +32,7 @@ const hint = computed(() => {
 <template>
   <div v-if="props.error" class="rounded-sm border border-danger-line bg-danger-bg px-3 py-2 text-xs text-danger" role="alert">
     <p class="font-medium">
-      {{ props.error.message }}
+      {{ headline }}
     </p>
     <ul v-if="props.error.fields.length > 0" class="mt-1 space-y-0.5">
       <li v-for="field in props.error.fields" :key="field.field" class="mono">

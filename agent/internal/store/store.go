@@ -3,9 +3,11 @@ package store
 
 import (
 	"context"
+	"crypto/cipher"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,12 +25,27 @@ var (
 
 type Store struct {
 	db *sql.DB
+	// aead encrypts environment values on their way in and out (crypto.go);
+	// nil only for an in-memory database, which never outlives the process.
+	aead cipher.AEAD
+}
+
+// Options configure Open.
+type Options struct {
+	// EncryptionKey is the 32-byte key environment values are encrypted with
+	// before they are written. It may be left empty for ":memory:" only.
+	EncryptionKey []byte
+	// Logger defaults to slog.Default().
+	Logger *slog.Logger
 }
 
 // Open opens (and creates, if needed) the database at path and applies any
 // pending migrations. Use ":memory:" for an ephemeral database in tests.
-func Open(ctx context.Context, path string) (*Store, error) {
+func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	if path != ":memory:" {
+		if len(opts.EncryptionKey) == 0 {
+			return nil, fmt.Errorf("refusing to open %s without an encryption key", path)
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, fmt.Errorf("create data directory: %w", err)
 		}
@@ -54,9 +71,27 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &Store{db: db}
+	if len(opts.EncryptionKey) > 0 {
+		if s.aead, err = newAEAD(opts.EncryptionKey); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
+	}
+	n, err := s.encryptLegacyEnv(ctx, path)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if n > 0 {
+		log := opts.Logger
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Info("encrypted the environment values of deployments written before encryption existed", "deployments", n)
 	}
 	return s, nil
 }
@@ -122,6 +157,47 @@ var migrations = []string{
 	// stored with source_deployment_id.
 	`ALTER TABLE deployments ADD COLUMN kind TEXT NOT NULL DEFAULT 'deploy';
 	 ALTER TABLE deployments ADD COLUMN source_deployment_id INTEGER REFERENCES deployments(id) ON DELETE SET NULL;`,
+	// 4: API tokens with roles. The token the agent is configured with is not
+	// in here: it is checked before the table is consulted.
+	`CREATE TABLE tokens (
+		id           INTEGER PRIMARY KEY,
+		name         TEXT NOT NULL UNIQUE,
+		role         TEXT NOT NULL,
+		hash         BLOB NOT NULL UNIQUE,
+		created_at   TEXT NOT NULL,
+		last_used_at TEXT
+	);`,
+	// 5: the name of the token that started each deployment; '' for
+	// deployments recorded before tokens had names.
+	`ALTER TABLE deployments ADD COLUMN actor TEXT NOT NULL DEFAULT '';`,
+	// 6: resource usage of every running replica, sampled periodically for
+	// the metrics history and pruned after the retention period.
+	`CREATE TABLE metric_samples (
+		application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+		replica        INTEGER NOT NULL,
+		at             TEXT NOT NULL,
+		cpu_percent    REAL NOT NULL,
+		memory_bytes   INTEGER NOT NULL
+	);
+	CREATE INDEX metric_samples_application_at ON metric_samples(application_id, at);`,
+	// 7: runs of one-off containers — the pre-deploy hook, scheduled jobs,
+	// `shipwick run`. AUTOINCREMENT: the run id is part of the container's
+	// name, and a pruned run's id must not come back for a container that
+	// may still be around.
+	`CREATE TABLE job_runs (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+		deployment_id  INTEGER REFERENCES deployments(id) ON DELETE SET NULL,
+		job            TEXT NOT NULL,
+		kind           TEXT NOT NULL,
+		command        TEXT NOT NULL,
+		status         TEXT NOT NULL,
+		exit_code      INTEGER,
+		output         TEXT NOT NULL DEFAULT '',
+		started_at     TEXT NOT NULL,
+		finished_at    TEXT
+	);
+	CREATE INDEX job_runs_job ON job_runs(application_id, job, id);`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

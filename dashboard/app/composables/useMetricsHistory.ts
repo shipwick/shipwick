@@ -1,69 +1,38 @@
 import type { MaybeRefOrGetter } from 'vue'
-import type { ApplicationMetrics } from '~/types/api'
-import { AgentError } from '~/utils/agentError'
+import type { MetricsHistory, MetricsRange } from '~/types/api'
 
-/** About five minutes at one sample every five seconds. */
-export const METRICS_HISTORY_SAMPLES = 60
-
-const SAMPLE_INTERVAL_MS = 5000
-/** While nothing is deployed, look again occasionally rather than every five seconds. */
-const UNAVAILABLE_RETRY_MS = 60_000
-
-export type MetricsAvailability
-  = | 'loading'
-    | 'available'
-    /** 409 NOT_DEPLOYED: the application has no active deployment. (Stopped replicas report zeros, never an error.) */
-    | 'unavailable'
-    | 'error'
+/** The agent samples every 30 seconds; asking more often would only repeat the last answer. */
+const REFRESH_INTERVAL_MS = 30_000
 
 /**
- * The metrics endpoint returns one point-in-time sample; the short history
- * behind the sparklines is built here, in memory, while the page is open.
+ * The sampled history the agent keeps (seven days, 30-second samples): one
+ * request per range change and every 30 seconds after that. The live
+ * point-in-time numbers next to it come from useLiveMetrics.
  */
 export function useMetricsHistory(application: MaybeRefOrGetter<string>, enabled: MaybeRefOrGetter<boolean> = true) {
   const agent = useAgent()
-  const samples = shallowRef<ApplicationMetrics[]>([])
-  const availability = ref<MetricsAvailability>('loading')
-  const reason = ref('')
+  const range = ref<MetricsRange>('1h')
 
-  const polling = usePolling<ApplicationMetrics | null>(async (signal) => {
-    try {
-      const sample = await agent.get<ApplicationMetrics>(`/applications/${encodeURIComponent(toValue(application))}/metrics`, { signal })
-      availability.value = 'available'
-      reason.value = ''
-      return sample
-    }
-    catch (error) {
-      if (error instanceof AgentError && error.code === 'NOT_DEPLOYED') {
-        availability.value = 'unavailable'
-        reason.value = 'Nothing is deployed'
-        return null
-      }
-      if (error instanceof AgentError) {
-        availability.value = 'error'
-        reason.value = error.message
-      }
-      throw error
-    }
-  }, {
-    interval: () => (availability.value === 'unavailable' ? UNAVAILABLE_RETRY_MS : SAMPLE_INTERVAL_MS),
-    enabled,
-  })
+  const polling = usePolling<MetricsHistory>(signal => agent.get<MetricsHistory>(
+    `/applications/${encodeURIComponent(toValue(application))}/metrics/history`,
+    { query: { since: range.value }, signal },
+  ), { interval: REFRESH_INTERVAL_MS, enabled })
 
-  watch(polling.data, (sample) => {
-    if (!sample) return
-    const last = samples.value[samples.value.length - 1]
-    if (last && last.collected_at === sample.collected_at) return
-    samples.value = [...samples.value, sample].slice(-METRICS_HISTORY_SAMPLES)
-  })
+  watch([range, () => toValue(application)], () => void polling.reset())
 
-  watch(() => toValue(application), () => {
-    samples.value = []
-    availability.value = 'loading'
-    void polling.reset()
-  })
+  /** 409 NOT_DEPLOYED: nothing is deployed, so there is nothing to have sampled. */
+  const unavailable = computed(() => polling.error.value?.code === 'NOT_DEPLOYED')
+  /** An agent from before the history endpoint existed. */
+  const unsupported = computed(() => polling.error.value?.code === 'ENDPOINT_NOT_FOUND')
 
-  const latest = computed(() => (availability.value === 'available' ? samples.value[samples.value.length - 1] ?? null : null))
-
-  return { samples, latest, availability, reason }
+  return {
+    range,
+    history: polling.data,
+    error: polling.error,
+    loading: polling.loading,
+    refreshing: polling.refreshing,
+    unavailable,
+    unsupported,
+    refresh: polling.refresh,
+  }
 }

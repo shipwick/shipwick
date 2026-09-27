@@ -8,6 +8,7 @@
 #        SHIPWICK_AGENT_TOKEN=<openssl rand -hex 32>
 #        SHIPWICK_AGENT_DOMAIN=agent.example.com
 #        SHIPWICK_DASHBOARD_DOMAIN=dashboard.example.com
+#        SHIPWICK_WEBHOOK_URL=https://hooks.slack.com/services/...   (optional)
 #
 #   4. docker compose -f compose.production.yml up -d
 #
@@ -36,6 +37,10 @@ services:
       # the API can still be reached through an SSH tunnel (see `ports` below).
       SHIPWICK_AGENT_DOMAIN: ${SHIPWICK_AGENT_DOMAIN:-}
       SHIPWICK_DASHBOARD_DOMAIN: ${SHIPWICK_DASHBOARD_DOMAIN:-}
+      # Optional: a Slack, Discord or plain HTTPS webhook told about deployment
+      # outcomes and applications going down or recovering (see README).
+      SHIPWICK_WEBHOOK_URL: ${SHIPWICK_WEBHOOK_URL:-}
+      SHIPWICK_WEBHOOK_SECRET: ${SHIPWICK_WEBHOOK_SECRET:-}
       SHIPWICK_LOG_FORMAT: json
     # No published port on purpose: the API is plain HTTP, and the only ways in
     # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a

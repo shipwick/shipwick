@@ -30,17 +30,21 @@ const MaxVolumes = 10
 // (sizes, durations, cpu) are decoded as strings so that a bad value yields a
 // field-level error instead of a generic YAML type error.
 type raw struct {
-	Name     string            `yaml:"name"`
-	Image    string            `yaml:"image"`
-	Port     *int              `yaml:"port"`
-	Domain   string            `yaml:"domain"`
-	Replicas *int              `yaml:"replicas"`
-	Env      map[string]string `yaml:"env"`
-	Health   *struct {
-		Path     string `yaml:"path"`
-		Interval string `yaml:"interval"`
-		Timeout  string `yaml:"timeout"`
-		Retries  *int   `yaml:"retries"`
+	Name      string            `yaml:"name"`
+	Image     string            `yaml:"image"`
+	Port      *int              `yaml:"port"`
+	Domain    string            `yaml:"domain"`
+	Aliases   []string          `yaml:"aliases"`
+	Redirects []string          `yaml:"redirects"`
+	Replicas  *int              `yaml:"replicas"`
+	Env       map[string]string `yaml:"env"`
+	Health    *struct {
+		Path     string   `yaml:"path"`
+		TCP      *int     `yaml:"tcp"`
+		Command  []string `yaml:"command"`
+		Interval string   `yaml:"interval"`
+		Timeout  string   `yaml:"timeout"`
+		Retries  *int     `yaml:"retries"`
 	} `yaml:"health"`
 	Resources struct {
 		CPU    string `yaml:"cpu"`
@@ -50,6 +54,29 @@ type raw struct {
 		Name string `yaml:"name"`
 		Path string `yaml:"path"`
 	} `yaml:"volumes"`
+	Publish []struct {
+		Port     *int   `yaml:"port"`
+		Host     *int   `yaml:"host"`
+		Address  string `yaml:"address"`
+		Protocol string `yaml:"protocol"`
+	} `yaml:"publish"`
+	Entrypoint argv   `yaml:"entrypoint"`
+	Command    argv   `yaml:"command"`
+	User       string `yaml:"user"`
+	PreDeploy  *struct {
+		Command []string `yaml:"command"`
+		Timeout string   `yaml:"timeout"`
+	} `yaml:"pre_deploy"`
+	Jobs []struct {
+		Name     string   `yaml:"name"`
+		Schedule string   `yaml:"schedule"`
+		Command  []string `yaml:"command"`
+		Timeout  string   `yaml:"timeout"`
+	} `yaml:"jobs"`
+	Logging *struct {
+		Driver  string            `yaml:"driver"`
+		Options map[string]string `yaml:"options"`
+	} `yaml:"logging"`
 	Restart struct {
 		Policy string `yaml:"policy"`
 	} `yaml:"restart"`
@@ -252,6 +279,10 @@ func (r raw) validate() (App, error) {
 		}
 	}
 
+	app.Aliases, app.Redirects = r.validateDomains(verr, app.Domain)
+	app.Entrypoint, app.Command, app.User = r.validateProcess(verr)
+	app.PreDeploy, app.Jobs = r.validateJobs(verr)
+	app.Logging = r.validateLogging(verr)
 	app.Volumes = r.validateVolumes(verr)
 	if len(app.Volumes) > 0 {
 		// Two versions writing the same files at once is how data gets lost.
@@ -263,6 +294,7 @@ func (r raw) validate() (App, error) {
 			verr.add("replicas", fmt.Sprintf("must be 1 for an application with volumes, got %d: replicas cannot share a volume", app.Replicas), "1")
 		}
 	}
+	app.Publish = r.validatePublish(verr, app)
 
 	if len(verr.Fields) > 0 {
 		return App{}, verr
@@ -339,14 +371,41 @@ func (r raw) validateHealth(verr *ValidationError) *Health {
 		Timeout:  Duration(DefaultHealthTimeout),
 		Retries:  DefaultHealthRetries,
 	}
-
-	if h.Path == "" {
-		verr.add("health.path", "is required when health is set", "/health")
-	} else if err := validateHealthPath(h.Path); err != nil {
-		verr.add("health.path", err.Error(), "/health, /healthz, /api/ping, ...")
+	if r.Health.TCP != nil {
+		h.TCP = *r.Health.TCP
 	}
-	if r.Port == nil {
-		verr.add("port", "is required when health is set", "the port your application listens on, e.g. 8080")
+
+	// The three kinds are alternatives: a check is a GET, a connect or a
+	// command, and a file that names two leaves the agent to guess which.
+	var kinds []string
+	if r.Health.Path != "" {
+		kinds = append(kinds, "path")
+	}
+	if r.Health.TCP != nil {
+		kinds = append(kinds, "tcp")
+	}
+	if r.Health.Command != nil {
+		kinds = append(kinds, "command")
+	}
+	switch {
+	case len(kinds) == 0:
+		verr.add("health", "one of path, tcp or command is required", "path: /health")
+	case len(kinds) > 1:
+		verr.add("health", fmt.Sprintf("%s are set; a health check is one of path, tcp or command", strings.Join(kinds, " and ")),
+			"path: /health for an HTTP application, tcp: 5432 for a database")
+	case kinds[0] == "path":
+		if err := validateHealthPath(h.Path); err != nil {
+			verr.add("health.path", err.Error(), "/health, /healthz, /api/ping, ...")
+		}
+		if r.Port == nil {
+			verr.add("port", "is required when health is set", "the port your application listens on, e.g. 8080")
+		}
+	case kinds[0] == "tcp":
+		if h.TCP < 1 || h.TCP > 65535 {
+			verr.add("health.tcp", fmt.Sprintf("invalid value %d", h.TCP), "the port your application listens on, e.g. 5432")
+		}
+	case kinds[0] == "command":
+		h.Command = validateHealthCommand(r.Health.Command, verr)
 	}
 
 	if v := r.Health.Interval; v != "" {
@@ -426,6 +485,33 @@ func validateHealthPath(p string) error {
 		return fmt.Errorf("invalid value %q: not a valid URL path", p)
 	}
 	return nil
+}
+
+// MaxHealthCommandArgs bounds the argv of a command health check.
+const MaxHealthCommandArgs = 64
+
+// validateHealthCommand checks the argv of a command health check. It is
+// handed to the container runtime as it is, never to a shell, so the only
+// things to refuse are what an argv cannot carry.
+func validateHealthCommand(cmd []string, verr *ValidationError) []string {
+	const example = `["pg_isready", "-U", "postgres"]`
+	if len(cmd) == 0 {
+		verr.add("health.command", "must not be empty", example)
+		return nil
+	}
+	if len(cmd) > MaxHealthCommandArgs {
+		verr.add("health.command", fmt.Sprintf("too many arguments (%d)", len(cmd)), fmt.Sprintf("at most %d", MaxHealthCommandArgs))
+		return nil
+	}
+	for i, arg := range cmd {
+		switch {
+		case arg == "":
+			verr.add(fmt.Sprintf("health.command[%d]", i), "must not be empty", example)
+		case strings.ContainsRune(arg, 0):
+			verr.add(fmt.Sprintf("health.command[%d]", i), "must not contain NUL bytes", example)
+		}
+	}
+	return cmd
 }
 
 // Version derives the human-facing deployment version from the image

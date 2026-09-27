@@ -42,9 +42,18 @@ type cli struct {
 	getenv func(string) string
 	now    func() time.Time
 
-	flagURL string
+	flagURL     string
+	flagContext string
+	// target is what connect resolved, for output that names the server.
+	target cliconfig.Target
+	// severalContexts is set by connect when the config file holds more than
+	// one server; only then is the context name worth showing.
+	severalContexts bool
 	// pollInterval paces `deploy` while it waits for the agent.
 	pollInterval time.Duration
+	// upgrade is where `shipwick upgrade` looks and what it replaces; tests
+	// point it at a fake GitHub and a file of their own.
+	upgrade upgradeOptions
 }
 
 // NewRootCommand builds the shipwick command tree.
@@ -74,15 +83,23 @@ Describe your application in deploy.yaml, then:
 
 The agent is found through --url, SHIPWICK_AGENT_URL, or the config written by
 "shipwick login" (default: ` + cliconfig.DefaultURL + `). The API token comes from
-SHIPWICK_AGENT_TOKEN or that same config; it is never accepted as a flag.`,
+SHIPWICK_AGENT_TOKEN or that same config; it is never accepted as a flag.
+
+Several servers are saved as contexts: "shipwick login --context staging" adds
+one, --context or SHIPWICK_CONTEXT selects one for a command, and "shipwick
+context use" changes the current one.`,
 		Version:       version.Version,
 		SilenceUsage:  true, // a failed deploy is not a usage error
 		SilenceErrors: true, // main renders errors, see Render
+		// A binary that upgraded itself on Windows leaves its predecessor
+		// behind, because the running executable cannot be deleted.
+		PersistentPreRun: func(*cobra.Command, []string) { removeStaleExecutable() },
 	}
 	root.SetIn(opts.In)
 	root.SetOut(opts.Out)
 	root.SetErr(opts.Err)
 	root.PersistentFlags().StringVar(&c.flagURL, "url", "", "agent URL (overrides SHIPWICK_AGENT_URL and the saved config)")
+	root.PersistentFlags().StringVar(&c.flagContext, "context", "", "saved server to use (overrides SHIPWICK_CONTEXT and the current context)")
 
 	root.AddCommand(
 		c.initCommand(),
@@ -99,29 +116,51 @@ SHIPWICK_AGENT_TOKEN or that same config; it is never accepted as a flag.`,
 		c.serverCommand(),
 		c.loginCommand(),
 	)
+	root.AddCommand(c.jobCommands()...)
+	root.AddCommand(c.volumeCommands()...)
+	root.AddCommand(c.tokenCommands()...)
+	root.AddCommand(c.upgradeCommands()...)
 	return c, root
+}
+
+// resolve determines which agent, and with which token, this command talks to.
+func (c *cli) resolve() (cliconfig.Target, error) {
+	_, file, err := c.loadSaved()
+	if err != nil {
+		return cliconfig.Target{}, err
+	}
+	target, err := cliconfig.Resolve(c.flagURL, c.flagContext, c.getenv, file)
+	if err != nil {
+		return cliconfig.Target{}, err
+	}
+	c.target = target
+	c.severalContexts = len(file.Contexts) > 1
+	return target, nil
 }
 
 // connect builds a client for the configured agent.
 func (c *cli) connect() (*client.Client, error) {
-	path, err := cliconfig.Path(c.getenv)
+	target, err := c.resolve()
 	if err != nil {
 		return nil, err
 	}
-	file, err := cliconfig.Load(path)
-	if err != nil {
-		return nil, err
-	}
-	cfg := cliconfig.Resolve(c.flagURL, c.getenv, file)
-
-	cl, err := client.New(cfg.URL, cfg.Token)
+	cl, err := client.New(target.URL, target.Token)
 	if err != nil {
 		return nil, err
 	}
 	if cl.SendsTokenInCleartext() {
-		c.ui.Warn("sending the API token over unencrypted HTTP to %s — use HTTPS or an SSH tunnel", cl.URL())
+		c.ui.Warn("sending the API token over unencrypted HTTP to %s — use HTTPS or an SSH tunnel", c.describeServer(cl.URL()))
 	}
 	return cl, nil
+}
+
+// describeServer names the server a command talks to: its URL, and the
+// context it came from when there are several to tell apart.
+func (c *cli) describeServer(url string) string {
+	if c.severalContexts && c.target.Context != "" {
+		return url + " (context " + c.target.Context + ")"
+	}
+	return url
 }
 
 // fileFlag registers the -f/--file flag shared by commands that read deploy.yaml.
@@ -199,7 +238,8 @@ func Render(err error) string {
 
 Is the agent running? If it is on a remote server, open a tunnel first:
   ssh -L 9000:127.0.0.1:9000 user@your-server
-or point shipwick at it with --url / ` + cliconfig.EnvURL + `.`
+or point shipwick at it with --url / ` + cliconfig.EnvURL + `, or at another
+saved server with --context (see: shipwick context ls).`
 	}
 
 	var apiErr *client.APIError
@@ -219,6 +259,12 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 			return "This application has no successful deployment yet.\n\nDeploy it with: shipwick deploy"
 		case api.CodeNoRollbackTarget:
 			return "There is no earlier successful deployment to go back to.\n\nSee the history with: shipwick status"
+		case api.CodeForbidden:
+			return renderForbidden(apiErr)
+		case api.CodeApplicationRunning:
+			return "The application is running, and a restore replaces the files under it.\n\nStop it first with: shipwick stop"
+		case api.CodeJobAlreadyRunning:
+			return "This job is still running from an earlier start.\n\nSee it with: shipwick jobs <app>"
 		}
 		return "Error: " + apiErr.Message
 	}
