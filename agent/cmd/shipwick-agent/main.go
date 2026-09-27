@@ -262,7 +262,7 @@ func serverAddresses(ctx context.Context, log *slog.Logger, domains ...string) [
 			continue
 		}
 		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		found, err := net.DefaultResolver.LookupHost(lookupCtx, domain)
+		found, err := deploy.PublicLookupHost(lookupCtx, domain)
 		cancel()
 		if err != nil {
 			log.Warn("could not resolve Shipwick's own hostname", "domain", domain, "error", err)

@@ -8,6 +8,18 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- The DNS check that holds a hostname back until it points at the server asks
+  public resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9) instead of the server's own,
+  which remembers that a record did not exist for the zone's negative TTL —
+  half an hour on Cloudflare — and kept the hostname waiting that long after
+  the record was created.
+- An application could show as `FAILED` for one poll while its first deployment
+  was being recorded or the moment a deployment succeeded: the application and
+  its in-flight deployments were read separately, and a commit in between made
+  it look as if it had neither. They are read in one transaction now.
+
 ## [0.3.0] - 2026-09-27
 
 Before 1.0 a minor version may change how things work under the hood. This one

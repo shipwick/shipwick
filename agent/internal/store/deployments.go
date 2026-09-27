@@ -276,6 +276,10 @@ type DeploymentFilter struct {
 
 // ListDeployments returns deployments, newest first.
 func (s *Store) ListDeployments(ctx context.Context, f DeploymentFilter) ([]Deployment, error) {
+	return s.listDeployments(ctx, s.db, f)
+}
+
+func (s *Store) listDeployments(ctx context.Context, q querier, f DeploymentFilter) ([]Deployment, error) {
 	query := deploymentSelect
 	var where []string
 	var args []any
@@ -300,7 +304,7 @@ func (s *Store) ListDeployments(ctx context.Context, f DeploymentFilter) ([]Depl
 		args = append(args, f.Limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list deployments: %w", err)
 	}

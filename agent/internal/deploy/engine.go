@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"strings"
 	"sync"
 	"time"
@@ -182,7 +181,7 @@ func (o *Options) applyDefaults() {
 		o.Logger = slog.Default()
 	}
 	if o.LookupHost == nil {
-		o.LookupHost = net.DefaultResolver.LookupHost
+		o.LookupHost = PublicLookupHost
 	}
 	if o.SampleInterval == 0 {
 		o.SampleInterval = 30 * time.Second

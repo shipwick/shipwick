@@ -42,7 +42,11 @@ func (s *Store) GetApplication(ctx context.Context, name string) (Application, e
 }
 
 func (s *Store) ListApplications(ctx context.Context) ([]Application, error) {
-	rows, err := s.db.QueryContext(ctx, applicationSelect+` ORDER BY name`)
+	return listApplications(ctx, s.db)
+}
+
+func listApplications(ctx context.Context, q querier) ([]Application, error) {
+	rows, err := q.QueryContext(ctx, applicationSelect+` ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list applications: %w", err)
 	}

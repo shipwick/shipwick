@@ -18,15 +18,11 @@ import (
 
 // Applications returns a summary of every application.
 func (e *Engine) Applications(ctx context.Context) ([]api.Application, error) {
-	apps, err := e.store.ListApplications(ctx)
+	apps, inFlight, err := e.store.ApplicationsWithDeployments(ctx, store.DeploymentFilter{Statuses: InFlightStatuses()})
 	if err != nil {
 		return nil, err
 	}
 	containers, err := e.rt.ListContainers(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	inFlight, err := e.store.ListDeployments(ctx, store.DeploymentFilter{Statuses: InFlightStatuses()})
 	if err != nil {
 		return nil, err
 	}
@@ -52,15 +48,11 @@ func (e *Engine) Applications(ctx context.Context) ([]api.Application, error) {
 
 // Application returns the detailed view of one application.
 func (e *Engine) Application(ctx context.Context, name string) (api.ApplicationDetail, error) {
-	app, err := e.store.GetApplication(ctx, name)
+	app, inFlight, err := e.store.ApplicationWithDeployments(ctx, name, store.DeploymentFilter{Statuses: InFlightStatuses(), Limit: 1})
 	if err != nil {
 		return api.ApplicationDetail{}, err
 	}
 	listed, err := e.rt.ListContainers(ctx, name)
-	if err != nil {
-		return api.ApplicationDetail{}, err
-	}
-	inFlight, err := e.store.ListDeployments(ctx, store.DeploymentFilter{Application: name, Statuses: InFlightStatuses(), Limit: 1})
 	if err != nil {
 		return api.ApplicationDetail{}, err
 	}

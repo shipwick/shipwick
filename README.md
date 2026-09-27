@@ -849,7 +849,12 @@ hostname per hour. Caddy asks for a certificate the moment it hears of a
 hostname, and one that does not resolve fails within seconds — deployed before
 its DNS, a domain would use up the five in minutes and stay without a
 certificate for the rest of the hour, however quickly the record was fixed.
-The agent's and the dashboard's own hostnames are never held back.
+The agent asks public resolvers (Cloudflare's, Google's, Quad9's) rather
+than the server's own, which remembers that a record did not exist for as long
+as the zone's negative TTL says — half an hour on Cloudflare — and would keep
+saying so after the record was created; a certificate authority looks from
+the outside too. When none of them can be reached, the server's resolver
+decides. The agent's and the dashboard's own hostnames are never held back.
 
 **Several hostnames, and www.** An application can answer to more than one
 hostname:
@@ -1046,19 +1051,12 @@ opening a pull request: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 14. Roadmap
 
-What the current version does is this document; what changed between versions is in the
-[changelog](CHANGELOG.md).
-
-Next, roughly in this order:
-
-- **Registry credential helpers** (`credsStore`), not only `auths` entries.
-- **Custom Caddy directives** per application: headers, basic auth.
-- **Several servers in one dashboard**; the CLI already has contexts.
-- **Key rotation** for the encryption key.
-
-Out of scope, and likely to stay there: multi-node scheduling, building images,
-anything that requires an external database or queue. Shipwick is for one
-server; when you outgrow that, you have outgrown Shipwick, and that is fine.
+What the current version does is this document; what changed between versions
+is in the [changelog](CHANGELOG.md); what comes next is in
+[ROADMAP.md](ROADMAP.md). Out of scope, and likely to stay there: multi-node
+scheduling, building images, anything that requires an external database or
+queue. Shipwick is for one server; when you outgrow that, you have outgrown
+Shipwick, and that is fine.
 
 ## License
 

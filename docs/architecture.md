@@ -525,7 +525,13 @@ once per change of the held-back set; and when a hostname starts pointing
 here, the next sync adds it and records an application event. The agent's and
 the dashboard's own hostnames are never gated: they come from the operator's
 configuration, not from a `deploy.yaml`, and holding them back could lock the
-operator out. The server learns its addresses at startup by resolving those
+Lookups go to public resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9), in turn: the
+first that knows the hostname decides, "no such host" is believed only when
+every reachable one says so, and the system resolver is the fallback when
+none can be reached. The server's own resolver would answer from its negative
+cache for the zone's negative TTL after a record was created, and the gate
+would hold the hostname back for half an hour on Cloudflare — the wait it
+exists to prevent. operator out. The server learns its addresses at startup by resolving those
 two hostnames; with neither set, "resolves at all" is the only check.
 `checkDomain` is unaffected: conflicts are still refused at deploy time.
 
