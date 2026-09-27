@@ -8,6 +8,11 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-27
+
+Found on a real server the day 0.3.0 shipped. Upgrade by running the installer
+again; nothing else changes.
+
 ### Fixed
 
 - The DNS check that holds a hostname back until it points at the server asks
@@ -255,7 +260,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/shipwick/shipwick/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/shipwick/shipwick/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/shipwick/shipwick/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/shipwick/shipwick/compare/v0.1.0...v0.1.1
