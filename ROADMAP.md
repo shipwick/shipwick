@@ -79,6 +79,14 @@ from one address; today nothing slows a guess down.
 
 What sits in front of the applications: Cloudflare, headers and
 authentication, and what the proxy could tell about the traffic it carries.
+Plus one leftover from the first half hour.
+
+**The CLI on the server knows its own agent.** The installer puts `shipwick`
+on the server but not how to reach the agent, whose port is deliberately not
+published; the first command run there fails with a tunnel hint meant for
+laptops. The installer will save a context for root — the API hostname and
+the token it already has — so that `shipwick ps` works on the server as it
+does anywhere else.
 
 **Cloudflare in front of the server.** Today an application's DNS record must
 point straight at the server (Cloudflare "DNS only"), because Caddy proves
