@@ -10,6 +10,16 @@ says so under **Changed** and explains how to upgrade.
 
 ### Added
 
+- **A hostname is served once its DNS points at the server.** Deploying before
+  the record exists no longer costs the certificate: Caddy is told about a
+  domain, alias or redirect only when it resolves to this server, so Let's
+  Encrypt's five-failures-per-hour limit is never spent on a hostname that
+  cannot pass yet. Until then `shipwick deploy` warns — `does not resolve yet`,
+  or `resolves to 104.21.5.6, not to this server` — instead of claiming the
+  domain is routed; the record is checked again every 10 seconds, and the
+  application's events say when the hostname is being served. The server's own
+  addresses are learned from `SHIPWICK_AGENT_DOMAIN` and
+  `SHIPWICK_DASHBOARD_DOMAIN`; with neither set, resolving at all is enough.
 - **Old images are removed.** After a successful deployment, and after `shipwick
   delete`, the images only retired deployments refer to are untagged. The running
   version and the rollback target are always kept, and so is any image another

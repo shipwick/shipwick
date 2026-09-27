@@ -19,6 +19,7 @@ type harness struct {
 	t      *testing.T
 	store  *store.Store
 	rt     *dockertest.Fake
+	dns    *fakeResolver
 	engine *Engine
 }
 
@@ -29,16 +30,20 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("open store: %v", err)
 	}
 	rt := dockertest.New()
+	dns := newFakeResolver()
 	engine := New(st, rt, Options{
 		StabilizeWindow: 50 * time.Millisecond,
 		NameSettle:      time.Millisecond,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// Every hostname points at the server unless a test says otherwise.
+		LookupHost:      dns.LookupHost,
+		ServerAddresses: []string{serverAddress},
 	})
 	t.Cleanup(func() {
 		engine.Shutdown(context.Background())
 		st.Close()
 	})
-	return &harness{t: t, store: st, rt: rt, engine: engine}
+	return &harness{t: t, store: st, rt: rt, dns: dns, engine: engine}
 }
 
 func app(name, image string, replicas int) spec.App {

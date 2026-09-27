@@ -321,6 +321,9 @@ func (r *rollout) swap(ctx context.Context, ready []store.Replica) error {
 	return ctx.Err()
 }
 
+// announceRouting tells the user where their application is reachable — or
+// why it is not yet: a hostname whose DNS does not point here is kept out of
+// the proxy until it does (see dns.go), and "Routed" would be a lie.
 func (r *rollout) announceRouting(ctx context.Context) {
 	e, d := r.e, r.d
 	switch {
@@ -329,7 +332,22 @@ func (r *rollout) announceRouting(ctx context.Context) {
 		e.event(ctx, d, api.LevelWarn, api.EventStep,
 			fmt.Sprintf("No reverse proxy is configured, so %s is not being served. Set SHIPWICK_CADDY_ADMIN on the agent", d.Spec.Domain))
 	default:
-		e.step(ctx, d, "Routed https://%s to %s", d.Spec.Domain, plural(len(r.serving), "replica"))
+		hosts := hostnamesOf(d.Spec)
+		e.refreshHostnames(ctx, hosts.list())
+		if ready, why := e.hostnameReady(hosts.domain); ready {
+			e.step(ctx, d, "Routed https://%s to %s", d.Spec.Domain, plural(len(r.serving), "replica"))
+		} else {
+			e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Routing https://%s is waiting for DNS: %s; it is served, and its certificate obtained, once the record points at this server", d.Spec.Domain, why))
+		}
+		for _, h := range hosts.all() {
+			if h.host == hosts.domain {
+				continue // said above, one way or the other
+			}
+			if ready, why := e.hostnameReady(h.host); !ready {
+				e.event(ctx, d, api.LevelWarn, api.EventStep,
+					fmt.Sprintf("%s %s; it is served, and its certificate obtained, once its DNS points at this server", h.host, why))
+			}
+		}
 	}
 }
 

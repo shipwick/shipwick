@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -159,6 +161,7 @@ func run() error {
 			// Streaming for the same reason: the dashboard relays followed logs.
 			opts.ExtraRoutes = append(opts.ExtraRoutes, proxy.Route{Domain: cfg.DashboardDomain, Upstreams: []string{cfg.DashboardUpstream}, Streaming: true})
 		}
+		opts.ServerAddresses = serverAddresses(startCtx, log, cfg.AgentDomain, cfg.DashboardDomain)
 	} else {
 		log.Warn("no reverse proxy configured: applications with a domain will not be reachable", "set", config.EnvCaddyAdmin)
 	}
@@ -245,6 +248,38 @@ func reservedHostPorts(listenAddr string) []int {
 		}
 	}
 	return ports
+}
+
+// serverAddresses learns the server's public addresses from the hostnames the
+// operator gave Shipwick itself: those point here by definition, or the
+// operator could not be using them. An application's hostname is handed to the
+// proxy only once it resolves to one of them. With none known, resolving at
+// all has to do.
+func serverAddresses(ctx context.Context, log *slog.Logger, domains ...string) []string {
+	var addresses []string
+	for _, domain := range domains {
+		if domain == "" {
+			continue
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		found, err := net.DefaultResolver.LookupHost(lookupCtx, domain)
+		cancel()
+		if err != nil {
+			log.Warn("could not resolve Shipwick's own hostname", "domain", domain, "error", err)
+			continue
+		}
+		for _, a := range found {
+			if !slices.Contains(addresses, a) {
+				addresses = append(addresses, a)
+			}
+		}
+		log.Info("server addresses learned from "+domain, "addresses", strings.Join(found, ", "))
+	}
+	if len(addresses) == 0 {
+		log.Info("the server's own addresses are not known; application hostnames are checked for resolution only",
+			"set", config.EnvAgentDomain+" or "+config.EnvDashboardDomain)
+	}
+	return addresses
 }
 
 // ownAddress is where the reverse proxy can reach this agent. In a container

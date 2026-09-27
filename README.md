@@ -825,6 +825,22 @@ What a crash costs: requests in flight on the replica that died are lost with
 it, and a request that arrives in the second before its name is dropped may
 get a `503`; everything after it goes to the surviving replicas.
 
+**DNS first.** A hostname is handed to Caddy only once it resolves to this
+server. Deploying before the DNS record exists is fine: the deployment
+succeeds, and instead of `Routed https://…` it prints a warning — `Routing
+https://api.example.com is waiting for DNS: does not resolve yet; it is served,
+and its certificate obtained, once the record points at this server` (or
+`resolves to 104.21.5.6, not to this server (62.238.109.115)` when the record
+points elsewhere). The agent checks again every 10 seconds, and as soon as the
+record is right the hostname is served, the certificate is obtained, and the
+application's events say so.
+The reason is Let's Encrypt's rate limit: five failed authorizations per
+hostname per hour. Caddy asks for a certificate the moment it hears of a
+hostname, and one that does not resolve fails within seconds — deployed before
+its DNS, a domain would use up the five in minutes and stay without a
+certificate for the rest of the hour, however quickly the record was fixed.
+The agent's and the dashboard's own hostnames are never held back.
+
 **Several hostnames, and www.** An application can answer to more than one
 hostname:
 

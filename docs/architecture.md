@@ -506,6 +506,29 @@ method, so a `POST` to the old hostname stays a `POST`. During a rollout the
 route override carries the whole set of hostnames, not only the domain, or the
 aliases would disappear for its duration — and reappear with a reload.
 
+**DNS gates the proxy** (`agent/internal/deploy/dns.go`). A hostname is put
+into Caddy's config only once it resolves — and, when the server's addresses
+are known, resolves to one of them. Caddy asks for a certificate the moment a
+hostname appears in a host matcher, and Let's Encrypt allows five failed
+authorizations per hostname per hour; a domain deployed before its record
+exists would burn them in minutes and stay without a certificate for the rest
+of the hour. So the sync resolves every planned hostname *before* taking the
+routing mutex (a lookup may take its whole 3 s timeout, and nothing that
+renames replicas should wait on a resolver), keeps the verdict in a cache —
+trusted for 30 s when the hostname points here, 10 s when it does not, so a
+fixed record is noticed within ten seconds — and builds the routes from the
+cache alone. A domain that is not ready drops its whole route, redirects and
+aliases included: the redirects' target is the domain. An alias or redirect
+that is not ready is left out on its own. The deployment records what is held
+back and why as warning steps, in place of the "Routed" line; the log says so
+once per change of the held-back set; and when a hostname starts pointing
+here, the next sync adds it and records an application event. The agent's and
+the dashboard's own hostnames are never gated: they come from the operator's
+configuration, not from a `deploy.yaml`, and holding them back could lock the
+operator out. The server learns its addresses at startup by resolving those
+two hostnames; with neither set, "resolves at all" is the only check.
+`checkDomain` is unaffected: conflicts are still refused at deploy time.
+
 **Security.** The config is built as Go data and marshalled, never templated:
 input cannot change its structure (there is a test that tries). Domains,
 aliases and redirects are validated hostnames, and a hostname belongs to one

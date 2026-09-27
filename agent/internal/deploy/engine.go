@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,13 @@ type Options struct {
 	// ExtraRoutes are served next to the applications' routes — the agent's
 	// own API, when it is given a domain.
 	ExtraRoutes []proxy.Route
+	// LookupHost resolves a hostname; an application's hostname is handed to
+	// the proxy only once it points at this server (see dns.go). The default
+	// is the system resolver; tests substitute their own.
+	LookupHost func(ctx context.Context, host string) ([]string, error)
+	// ServerAddresses are the server's public addresses, as far as they are
+	// known. Empty means unknown, and a hostname only has to resolve at all.
+	ServerAddresses []string
 
 	Logger *slog.Logger
 
@@ -173,6 +181,9 @@ func (o *Options) applyDefaults() {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
+	if o.LookupHost == nil {
+		o.LookupHost = net.DefaultResolver.LookupHost
+	}
 	if o.SampleInterval == 0 {
 		o.SampleInterval = 30 * time.Second
 	}
@@ -214,6 +225,12 @@ type Engine struct {
 	// routing serializes syncRouting and everything else that renames replicas.
 	routing    sync.Mutex
 	lastRoutes string // what the proxy was last told, for the log; guarded by routing
+	// heldBack are the hostnames kept out of the proxy because they do not
+	// point at this server yet, with the reason: see dns.go. Guarded by
+	// routing; lastHeld is its one-line summary, for the log.
+	heldBack map[string]string
+	lastHeld string
+	dns      *hostnameCache
 	// routeOverrides: see routeVia. Guarded by mu.
 	routeOverrides map[string]routeOverride
 	// names are the names each container answers to on the services network,
@@ -240,6 +257,8 @@ func New(st *store.Store, rt Runtime, opts Options) *Engine {
 		cancel:  cancel,
 		locks:   map[string]*appLock{},
 
+		heldBack:       map[string]string{},
+		dns:            newHostnameCache(),
 		routeOverrides: map[string]routeOverride{},
 		names:          map[string][]string{},
 	}

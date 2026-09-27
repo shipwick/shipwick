@@ -66,6 +66,15 @@ func (h hostnames) all() []namedHost {
 
 type namedHost struct{ field, host string }
 
+// list is every hostname, whatever its role.
+func (h hostnames) list() []string {
+	var out []string
+	for _, n := range h.all() {
+		out = append(out, n.host)
+	}
+	return out
+}
+
 func routeHostnames(r proxy.Route) []string {
 	out := append([]string{r.Domain}, r.Aliases...)
 	return append(out, r.Redirects...)
@@ -172,6 +181,17 @@ func (e *Engine) clearRouteOverride(app string) {
 // the point: loading a proxy config resets connections that are being
 // established at that instant.
 func (e *Engine) SyncProxy(ctx context.Context) error {
+	if e.opts.Proxy != nil {
+		// DNS first, and before the lock: a lookup may take its whole timeout,
+		// and nothing that renames replicas should wait for a resolver. The
+		// plans are computed again under the lock; only the cache is read there.
+		plans, err := e.routingPlans(ctx)
+		if err != nil {
+			return fmt.Errorf("compute routes: %w", err)
+		}
+		e.refreshHostnames(ctx, plannedHostnames(plans))
+	}
+
 	// One at a time. The supervisor syncs every tick and a rollout at every
 	// step, and giving a replica its names is two calls to Docker — leave the
 	// network, join it again. Two callers renaming the same replica would
@@ -179,7 +199,11 @@ func (e *Engine) SyncProxy(ctx context.Context) error {
 	e.routing.Lock()
 	defer e.routing.Unlock()
 
-	plans, containers, err := e.routingPlans(ctx)
+	plans, err := e.routingPlans(ctx)
+	if err != nil {
+		return fmt.Errorf("compute routes: %w", err)
+	}
+	containers, err := e.listContainers(ctx)
 	if err != nil {
 		return fmt.Errorf("compute routes: %w", err)
 	}
@@ -206,6 +230,7 @@ func (e *Engine) SyncProxy(ctx context.Context) error {
 
 	if e.opts.Proxy != nil {
 		routes := e.routesFor(plans, containers)
+		e.noteHeldBack(ctx, plans)
 		// Every change here is a reload of the proxy, which is what routing by
 		// name exists to avoid: worth a line in the log, with what changed.
 		if now := describeRoutes(routes); now != e.lastRoutes {
@@ -220,9 +245,50 @@ func (e *Engine) SyncProxy(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
+// noteHeldBack keeps track of the hostnames the proxy is not told about
+// because their DNS does not point here yet: a line in the log when the set
+// changes, and an application event the moment one of them starts pointing
+// here — the operator who fixed the record is waiting for exactly that. The
+// caller holds e.routing.
+func (e *Engine) noteHeldBack(ctx context.Context, plans []routingPlan) {
+	held := map[string]string{}
+	for _, p := range plans {
+		for _, h := range p.hosts.all() {
+			ready, why := e.hostnameReady(h.host)
+			if !ready {
+				held[h.host] = why
+			} else if _, was := e.heldBack[h.host]; was {
+				e.appEvent(ctx, store.Application{ID: p.appID, Name: p.app}, fmt.Sprintf("%s now points at this server and is being served", h.host))
+			}
+		}
+	}
+	e.heldBack = held
+	if now := describeHeld(held); now != e.lastHeld {
+		if now == "" {
+			e.log.Info("every hostname points at this server")
+		} else {
+			e.log.Warn("hostnames waiting for DNS are not served yet", "hostnames", now)
+		}
+		e.lastHeld = now
+	}
+}
+
+// describeHeld is a one-line summary for the log:
+// "api.example.com: does not resolve yet; www.example.com: resolves to …".
+func describeHeld(held map[string]string) string {
+	parts := make([]string, 0, len(held))
+	for host, why := range held {
+		parts = append(parts, host+": "+why)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "; ")
+}
+
 // explainUnserved says, for every application that should be served and is
 // not, why each of its replicas does not count. It is for whoever reads the
-// log after the 503s.
+// log after the 503s. An application whose domain is waiting for DNS is not
+// served for a reason its replicas have nothing to do with; noteHeldBack has
+// said so.
 func (e *Engine) explainUnserved(plans []routingPlan, containers map[string]docker.Container, routes []proxy.Route) {
 	served := map[string]bool{}
 	for _, r := range routes {
@@ -230,6 +296,9 @@ func (e *Engine) explainUnserved(plans []routingPlan, containers map[string]dock
 	}
 	for _, p := range plans {
 		if p.hosts.domain == "" || served[p.hosts.domain] {
+			continue
+		}
+		if ready, _ := e.hostnameReady(p.hosts.domain); !ready {
 			continue
 		}
 		for _, m := range p.members {
@@ -268,22 +337,36 @@ func describeRoutes(routes []proxy.Route) string {
 // routingPlan is who should be serving one application.
 type routingPlan struct {
 	app     string
+	appID   int64
 	hosts   hostnames
 	members []routeMember
 }
 
-func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]docker.Container, error) {
-	apps, err := e.store.ListApplications(ctx)
-	if err != nil {
-		return nil, nil, err
+// plannedHostnames is every hostname the plans may ask the proxy to serve.
+func plannedHostnames(plans []routingPlan) []string {
+	var out []string
+	for _, p := range plans {
+		out = append(out, p.hosts.list()...)
 	}
+	return out
+}
+
+func (e *Engine) listContainers(ctx context.Context) (map[string]docker.Container, error) {
 	list, err := e.rt.ListContainers(ctx, "")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	containers := make(map[string]docker.Container, len(list))
 	for _, c := range list {
 		containers[c.ID] = c
+	}
+	return containers, nil
+}
+
+func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
+	apps, err := e.store.ListApplications(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	e.mu.Lock()
@@ -296,7 +379,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]do
 	sort.Slice(apps, func(i, j int) bool { return apps[i].Name < apps[j].Name })
 	plans := make([]routingPlan, 0, len(apps))
 	for _, app := range apps {
-		plan := routingPlan{app: app.Name}
+		plan := routingPlan{app: app.Name, appID: app.ID}
 		if o, overridden := overrides[app.Name]; overridden {
 			// A rollout is in charge and says exactly who serves.
 			plan.hosts, plan.members = o.hosts, o.members
@@ -306,7 +389,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]do
 			}
 			d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			plan.hosts = hostnamesOf(d.Spec)
 			// A stopped application keeps its route — and with it its
@@ -314,7 +397,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]do
 			if app.DesiredState == api.DesiredRunning {
 				replicas, err := e.store.ListReplicas(ctx, d.ID)
 				if err != nil {
-					return nil, nil, err
+					return nil, err
 				}
 				for _, r := range replicas {
 					plan.members = append(plan.members, routeMember{replica: r, port: d.Spec.Port})
@@ -323,13 +406,18 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, map[string]do
 		}
 		plans = append(plans, plan)
 	}
-	return plans, containers, nil
+	return plans, nil
 }
 
 // routesFor is what the proxy is told: for every domain, the names that are
 // behind it right now. A name is listed only while a running replica carries
 // it — Docker's DNS forwards a name nobody carries to the outside resolvers,
 // and every request would wait seconds for that to fail.
+//
+// A hostname whose DNS does not point here yet is left out (see dns.go). The
+// ExtraRoutes are not: the agent's and the dashboard's hostnames come from the
+// operator's configuration, not from a deploy.yaml, and holding them back
+// could lock the operator out of the very agent that reports the problem.
 func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Container) []proxy.Route {
 	routes := append([]proxy.Route(nil), e.opts.ExtraRoutes...)
 	taken := map[string]bool{}
@@ -344,8 +432,14 @@ func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Con
 			continue
 		}
 		taken[p.hosts.domain] = true
+		// The whole route waits for the domain, aliases and redirects
+		// included: the redirects' target is the domain, and an alias is
+		// served "exactly like" a domain that is not served yet.
+		if ready, _ := e.hostnameReady(p.hosts.domain); !ready {
+			continue
+		}
 
-		route := proxy.Route{Domain: p.hosts.domain, Aliases: claim(taken, p.hosts.aliases), Redirects: claim(taken, p.hosts.redirects)}
+		route := proxy.Route{Domain: p.hosts.domain, Aliases: claim(taken, e.readyHosts(p.hosts.aliases)), Redirects: claim(taken, e.readyHosts(p.hosts.redirects))}
 		for _, m := range p.members {
 			c, exists := containers[m.replica.ContainerID]
 			if !exists || !c.Running {
@@ -359,6 +453,17 @@ func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Con
 		routes = append(routes, route)
 	}
 	return routes
+}
+
+// readyHosts is the subset of hosts whose DNS points here.
+func (e *Engine) readyHosts(hosts []string) []string {
+	var ready []string
+	for _, h := range hosts {
+		if ok, _ := e.hostnameReady(h); ok {
+			ready = append(ready, h)
+		}
+	}
+	return ready
 }
 
 // claim marks hosts as taken and returns the ones that were not already.
