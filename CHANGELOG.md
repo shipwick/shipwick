@@ -8,6 +8,13 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- The installer's removal of earlier releases' images, repaired in 0.4.1,
+  was never run: the function existed and nothing called it. It now runs
+  once the upgraded agent is healthy. Run the installer again to reclaim the
+  space; it changes nothing else on a server that is up to date.
+
 ## [0.4.1] - 2026-09-28
 
 What a first install from an empty server and an empty laptop found.

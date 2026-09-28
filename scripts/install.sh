@@ -310,6 +310,7 @@ install_server() {
     printf '\n'
     step "The agent is healthy"
 
+    prune_old_images
     install_cli || true
     print_summary
 }
