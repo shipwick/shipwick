@@ -8,11 +8,24 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-28
+
+What a first install from an empty server and an empty laptop found.
+
 ### Changed
 
 - The dashboard's mark and favicon are Wick, the project's mascot.
 
 ### Fixed
+
+- A static entry of a `shipwick.yaml` was deployed without its folder being
+  uploaded first, which the agent refused; it is now uploaded like a
+  `deploy.yaml`'s, relative to the `shipwick.yaml`.
+- `shipwick server install` printed "once the records exist, check the setup"
+  even when it had just confirmed the records exist, and echoed Compose's
+  progress lines twice.
+- A failed TCP health check said `TCP connect to :5432`; it now says
+  `TCP connect to port 5432`.
 
 - A static application deployed from the folder that holds its `deploy.yaml`
   (`static: .`, which is what `shipwick init` writes for a folder with an
@@ -23,7 +36,7 @@ says so under **Changed** and explains how to upgrade.
 - `shipwick init` refused a `package.json` (or `.csproj`, `go.mod`,
   `pyproject.toml`) that starts with a UTF-8 byte-order mark, which is what
   PowerShell's `Set-Content` and some Windows editors write: `invalid
-  character '﻿'`. The mark is now ignored, as the projects' own tools do.
+  character '\ufeff'`. The mark is now ignored, as the projects' own tools do.
 - An image the CLI built and sent for a deployment the agent then refused
   (a domain another application serves, say) stayed on the server for good:
   no deployment named it, so no sweep considered it. The sweep after a
@@ -412,7 +425,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/shipwick/shipwick/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/shipwick/shipwick/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/shipwick/shipwick/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/shipwick/shipwick/compare/v0.2.0...v0.3.0
