@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -39,4 +40,18 @@ func (f *Fake) LoadedImages() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.loaded...)
+}
+
+// ListImages lists the local images tagged under one repository.
+func (f *Fake) ListImages(_ context.Context, repository string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var refs []string
+	for ref := range f.local {
+		if strings.HasPrefix(ref, repository+":") {
+			refs = append(refs, ref)
+		}
+	}
+	sort.Strings(refs)
+	return refs, nil
 }

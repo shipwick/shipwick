@@ -147,7 +147,9 @@ anything other than this machine.
   which the CLI does not have.
 - **`server install` runs your `ssh`** as a program with arguments, never
   through a shell, with `BatchMode=yes` so that it fails instead of asking for
-  a password. The remote commands are fixed; the hostnames and the version are
+  a password, and `StrictHostKeyChecking=accept-new` so that a server's key is
+  taken on first contact (a fresh server has one nobody has seen) and a key
+  that changed is refused. The remote commands are fixed; the hostnames and the version are
   validated first and go in as environment assignments of the installer. The
   token is read from the installer's summary. When the installer prints none —
   an upgrade — nothing is fetched from the server: the context keeps the token

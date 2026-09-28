@@ -14,6 +14,36 @@ says so under **Changed** and explains how to upgrade.
 
 ### Fixed
 
+- A static application deployed from the folder that holds its `deploy.yaml`
+  (`static: .`, which is what `shipwick init` writes for a folder with an
+  `index.html` at its root) uploaded the file too, and the proxy served it at
+  `/deploy.yaml`. The CLI now leaves `deploy.yaml`, `shipwick.yaml`, `.git`
+  and `.env` files out of the upload, wherever they are in the folder. Deploy
+  such a site again to replace the folder on the server.
+- `shipwick init` refused a `package.json` (or `.csproj`, `go.mod`,
+  `pyproject.toml`) that starts with a UTF-8 byte-order mark, which is what
+  PowerShell's `Set-Content` and some Windows editors write: `invalid
+  character '﻿'`. The mark is now ignored, as the projects' own tools do.
+- An image the CLI built and sent for a deployment the agent then refused
+  (a domain another application serves, say) stayed on the server for good:
+  no deployment named it, so no sweep considered it. The sweep after a
+  successful deployment now also removes the application's local images that
+  no deployment names and that are older than ten minutes; deleting the
+  application removes all of them.
+- `shipwick deploy` with `build:` asks the server whether another
+  application already serves the domain before building, instead of finding
+  out after the image was built and sent.
+- A static application's first deployment ended with `shipwick logs -f` as
+  the next step, which it then refused; it now suggests `shipwick open`.
+- `shipwick server install` failed on every server nobody had connected to
+  before: `ssh` in batch mode refuses an unknown host key, and the message
+  suggested copying a login key. The key of a new server is now accepted on
+  first contact; a key that changed is still refused, and the message says
+  to forget the old one with `ssh-keygen -R` if the server was reinstalled.
+- `shipwick server install` gave up when Docker was installed but not
+  answering yet, which is where a server created a minute ago from an image
+  that installs Docker at first boot often is. It now waits up to a minute
+  for the daemon before saying so.
 - The installer's removal of earlier releases' images did nothing: it asked
   `docker images` for two repositories at once, which it refuses. It now asks
   for each in turn. Run the installer again to reclaim the space.

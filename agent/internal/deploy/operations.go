@@ -112,7 +112,7 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 	}
 	// Its images go too, unless another application keeps them. Listed
 	// before the records are deleted; the volumes stay, on purpose.
-	images, _ := e.deployedImages(ctx, name)
+	images, _ := e.pruneCandidates(ctx, name, true)
 	e.removeStaticFiles(ctx, name)
 	if err := e.store.DeleteApplication(ctx, app.ID); err != nil {
 		return err

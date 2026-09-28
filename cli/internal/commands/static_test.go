@@ -2,11 +2,14 @@ package commands
 
 import (
 	"archive/tar"
+	"bytes"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -83,7 +86,7 @@ func TestDeployStaticUploadsTheFolderFirst(t *testing.T) {
 	f := newFakeAgent(t)
 	done := fixedNow
 	f.deploymentPolls = []api.DeploymentDetail{{
-		Deployment: api.Deployment{ID: 1, Status: api.StatusActive, Version: "0123456789ab", CompletedAt: &done,
+		Deployment: api.Deployment{ID: 1, Sequence: 1, Status: api.StatusActive, Version: "0123456789ab", CompletedAt: &done,
 			Static: &api.StaticFiles{Digest: staticDigest, Files: 2, SizeBytes: 25}},
 		Events: []api.Event{
 			event(1, api.EventState, api.LevelInfo, "BUILDING"),
@@ -110,6 +113,9 @@ func TestDeployStaticUploadsTheFolderFirst(t *testing.T) {
 		"web 0123456789ab",
 		"served by the proxy",
 		"https://example.com",
+		"Next:",
+		"shipwick open web", "open it in the browser",
+		"shipwick status web", "what it serves, history",
 	})
 	if strings.Contains(out, "Uploading") || strings.Contains(out, "replicas healthy") {
 		t.Errorf("piped output carries no progress line, and no replica count for a folder:\n%s", out)
@@ -251,5 +257,51 @@ func TestStaticApplicationErrorIsExplained(t *testing.T) {
 	got := Render(err)
 	if !strings.Contains(got, "folder served by the proxy") || !strings.Contains(got, "shipwick status") {
 		t.Errorf("rendering = %q", got)
+	}
+}
+
+func TestStaticArchiveLeavesTheConfigurationOut(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"index.html":             "<h1>hi</h1>",
+		"deploy.yaml":            "name: web\nstatic: .\n",
+		"shipwick.yaml":          "apps: []\n",
+		".env":                   "SECRET=1",
+		".env.production":        "SECRET=2",
+		".git/HEAD":              "ref: refs/heads/main",
+		".well-known/verify.txt": "keep me",
+		"docs/deploy.yaml":       "nested, still configuration",
+	} {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	files, _, err := writeStaticArchive(dir, &buf, func(path, why string) { t.Errorf("unexpected skip of %s: %s", path, why) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	tr := tar.NewReader(&buf)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			names = append(names, h.Name)
+		}
+	}
+	sort.Strings(names)
+	want := []string{".well-known/verify.txt", "index.html"}
+	if files != 2 || !reflect.DeepEqual(names, want) {
+		t.Errorf("archive holds %v (%d files), want %v: the configuration and the secrets must never be served", names, files, want)
 	}
 }

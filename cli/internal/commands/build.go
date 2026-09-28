@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	dockerclient "github.com/moby/moby/client"
@@ -80,6 +81,15 @@ func (c *closeBoth) Close() error {
 // server answered — what is then deployed, exactly as if the file had named it.
 func (c *cli) buildImage(ctx context.Context, cl *client.Client, file string, data []byte, app spec.App) ([]byte, error) {
 	tools := c.build.withDefaults()
+
+	// A domain another application serves would be refused by the agent
+	// after the build and the upload; asking first spares both. The agent
+	// still checks, since it is the one that knows.
+	if app.Domain != "" {
+		if err := c.domainIsFree(ctx, cl, app); err != nil {
+			return nil, err
+		}
+	}
 
 	server, err := cl.Server(ctx)
 	if err != nil {
@@ -259,4 +269,28 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 		p.report(p.n)
 	}
 	return n, err
+}
+
+// domainIsFree asks the server which hostnames its other applications serve
+// and reports the first of this application's that one of them already does.
+func (c *cli) domainIsFree(ctx context.Context, cl *client.Client, app spec.App) error {
+	others, err := cl.Applications(ctx)
+	if err != nil {
+		return nil // the deploy itself will say what is wrong
+	}
+	mine := append([]string{app.Domain}, app.Aliases...)
+	mine = append(mine, app.Redirects...)
+	for _, other := range others {
+		if other.Name == app.Name {
+			continue
+		}
+		theirs := append([]string{other.Domain}, other.Aliases...)
+		theirs = append(theirs, other.Redirects...)
+		for _, h := range mine {
+			if h != "" && slices.Contains(theirs, h) {
+				return fmt.Errorf("%s is already served by application %q; nothing was built\n\nUse another domain, or change or delete that application first: shipwick delete %s", h, other.Name, other.Name)
+			}
+		}
+	}
+	return nil
 }

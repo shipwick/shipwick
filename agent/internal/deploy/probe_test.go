@@ -118,7 +118,7 @@ func TestDeployFailsWhenTheTCPPortRefuses(t *testing.T) {
 	if d.Status != api.StatusFailed {
 		t.Fatalf("status = %s, want FAILED", d.Status)
 	}
-	if want := "did not become healthy within 60ms: TCP connect to :5432: connection refused"; !strings.Contains(d.Error, want) {
+	if want := "did not become healthy within 60ms: TCP connect to port 5432: connection refused"; !strings.Contains(d.Error, want) {
 		t.Errorf("error = %q, want it to contain %q", d.Error, want)
 	}
 }

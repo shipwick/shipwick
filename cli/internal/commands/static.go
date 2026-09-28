@@ -97,6 +97,23 @@ func (c *cli) deployStatic(ctx context.Context, cl *client.Client, file string, 
 // A symbolic link to a file inside the folder is sent as that file; one that
 // leads out of the folder is skipped and reported to skip — the served folder
 // must not depend on what else is on the machine that built it.
+//
+// What describes or configures the site is not the site: `deploy.yaml` and
+// `shipwick.yaml`, `.git` and `.env` files are left out wherever they are,
+// since everything sent is served to anyone who asks for its path. Other
+// dotfiles go in: `.well-known` is content.
+func keptOutOfStatic(base string, isDir bool) bool {
+	switch {
+	case isDir:
+		return base == ".git"
+	case base == "deploy.yaml" || base == "shipwick.yaml":
+		return true
+	case base == ".env" || strings.HasPrefix(base, ".env."):
+		return true
+	}
+	return false
+}
+
 func writeStaticArchive(root string, w io.Writer, skip func(path, why string)) (files int, size int64, err error) {
 	rootReal, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -116,6 +133,12 @@ func writeStaticArchive(root string, w io.Writer, skip func(path, why string)) (
 			return nil
 		}
 		name := filepath.ToSlash(rel)
+		if keptOutOfStatic(d.Name(), d.IsDir()) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 
 		info, err := d.Info()
 		if err != nil {

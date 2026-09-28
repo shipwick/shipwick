@@ -443,3 +443,33 @@ func TestDeployManyBuildsAnEntryHereFirst(t *testing.T) {
 		t.Errorf("the api document must name the image the server answered:\n%v", f.deployBodies)
 	}
 }
+
+func TestDeployManyUploadsAStaticEntryFirst(t *testing.T) {
+	f := newFakeAgent(t)
+	f.many.outcomes = allActive("api", "site")
+
+	config := "apps:\n  - name: api\n    image: ghcr.io/company/api:2.3.0\n    port: 8080\n  - name: site\n    static: site/\n    domain: example.com\n"
+	dir := writeMany(t, config)
+	if err := os.MkdirAll(filepath.Join(dir, "site"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "site", "index.html"), []byte("<h1>hi</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := f.run(dir, "deploy")
+	if err != nil {
+		t.Fatalf("deploy: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "site  ✓ Uploaded site/: 1 file") {
+		t.Errorf("the folder must be uploaded before the deploy:\n%s", out)
+	}
+	var withDigest bool
+	for _, r := range f.requests {
+		if strings.Contains(r, "/applications/site/deploy?static=sha256") {
+			withDigest = true
+		}
+	}
+	if !withDigest {
+		t.Errorf("the deploy of a static entry must carry the upload's digest; requests: %v", f.requests)
+	}
+}

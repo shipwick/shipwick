@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shipwick/shipwick/cli/internal/cliconfig"
 	"github.com/shipwick/shipwick/pkg/api"
@@ -92,7 +93,7 @@ func TestServerInstallRunsSSHWithoutAShell(t *testing.T) {
 	}
 
 	ssh := func(cmd string) []string {
-		return []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "root@203.0.113.10", "--", cmd}
+		return []string{"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "root@203.0.113.10", "--", cmd}
 	}
 	want := [][]string{
 		ssh("uname -sm"),
@@ -306,6 +307,17 @@ func TestServerInstallExplainsSSHFailures(t *testing.T) {
 	_, _, err = f.run(t.TempDir(), "server", "install", "root@203.0.113.10")
 	if err == nil || !strings.Contains(err.Error(), "Permission denied (publickey)") || !strings.Contains(err.Error(), "ssh-copy-id root@203.0.113.10") {
 		t.Errorf("refused login: %v", err)
+	}
+
+	// A reinstalled server has a new key; ssh refuses it with a banner. The
+	// advice is to forget the old key, not to copy a login key.
+	f.local = localOptions{exec: func(_ context.Context, _ []string, _, stderr io.Writer) error {
+		fmt.Fprintln(stderr, "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nIT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\nHost key verification failed.")
+		return errors.New("exit status 255")
+	}}
+	_, _, err = f.run(t.TempDir(), "server", "install", "root@203.0.113.10")
+	if err == nil || !strings.Contains(err.Error(), "ssh-keygen -R 203.0.113.10") || strings.Contains(err.Error(), "ssh-copy-id") || strings.Contains(err.Error(), "@@@") {
+		t.Errorf("changed host key: %v", err)
 	}
 
 	f.local = localOptions{exec: func(_ context.Context, argv []string, stdout, _ io.Writer) error {
@@ -570,6 +582,47 @@ func TestOpenerArgvKeepsTheURLOneArgument(t *testing.T) {
 		argv := openerArgv(goos, url)
 		if argv[len(argv)-1] != url {
 			t.Errorf("%s: %q", goos, argv)
+		}
+	}
+}
+
+func TestServerInstallWaitsForADockerThatIsStillStarting(t *testing.T) {
+	f := newFakeAgent(t)
+	versionCalls, slept := 0, 0
+	programs := &fakePrograms{respond: func(argv []string, stdout, stderr io.Writer) error {
+		switch remote(argv) {
+		case remoteUname:
+			fmt.Fprintln(stdout, "Linux x86_64")
+		case remoteHasDocker:
+		case remoteDockerVersion:
+			// The image installed Docker at first boot; the daemon is up on
+			// the third look.
+			versionCalls++
+			if versionCalls < 3 {
+				fmt.Fprintln(stderr, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+				return errors.New("exit status 1")
+			}
+			fmt.Fprintln(stdout, "29.8.1")
+		default:
+			fmt.Fprint(stdout, installerSummary)
+		}
+		return nil
+	}}
+	f.local = localOptions{exec: programs.exec, sleep: func(time.Duration) { slept++ },
+		lookupHost: func(context.Context, string) ([]string, error) { return nil, errors.New("no such host") }}
+	f.env = map[string]string{cliconfig.EnvConfig: filepath.Join(t.TempDir(), "config.yaml")}
+
+	out, _, err := f.run(t.TempDir(), "server", "install", "root@203.0.113.10", "--agent-domain", "agent.example.com")
+	if err != nil {
+		t.Fatalf("server install: %v\n%s", err, out)
+	}
+	if versionCalls != 3 || slept != 2 {
+		t.Errorf("version asked %d times with %d waits; want 3 and 2", versionCalls, slept)
+	}
+	assertInOrder(t, out, []string{"Docker is installed but not answering yet; waiting for it to start.", "✓ Docker 29.8.1"})
+	for _, argv := range programs.argvs {
+		if strings.Contains(remote(argv), "get.docker.com") {
+			t.Error("Docker was there; nothing should be installed")
 		}
 	}
 }

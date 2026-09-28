@@ -494,10 +494,11 @@ func (f *Fake) RemoveImage(_ context.Context, image string) error {
 			return docker.ErrImageInUse
 		}
 	}
-	if f.local[image] {
-		delete(f.local, image)
-		f.removedImages = append(f.removedImages, image)
+	if !f.local[image] {
+		return docker.ErrImageNotFound
 	}
+	delete(f.local, image)
+	f.removedImages = append(f.removedImages, image)
 	return nil
 }
 

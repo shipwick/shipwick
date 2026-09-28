@@ -22,7 +22,7 @@ func (e *Engine) probeReplica(ctx context.Context, d *store.Deployment, c docker
 	switch h.Kind() {
 	case spec.HealthTCP:
 		if err := e.opts.ProbeTCP(ctx, c.IP, h.TCP, timeout); err != nil {
-			return fmt.Errorf("TCP connect to :%d: %w", h.TCP, err)
+			return fmt.Errorf("TCP connect to port %d: %w", h.TCP, err)
 		}
 		return nil
 	case spec.HealthCommand:

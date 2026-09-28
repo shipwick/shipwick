@@ -514,7 +514,9 @@ a server that deploys daily does not fill its disk with versions nobody can
 return to. Two are always kept per application: the one running, and the one
 of the most recent earlier version — the rollback target, so a rollback never
 waits for a pull. Images another application uses, or a container started
-outside Shipwick, are never touched.
+outside Shipwick, are never touched. An image `shipwick deploy` built and
+sent for a deployment the agent then refused is removed by the next sweep
+once it is ten minutes old, and by `delete` at any age.
 
 **Images built where you are.** With `build: .` in place of `image`, there is
 no registry in the picture. `shipwick deploy` runs `docker build` on your
@@ -646,7 +648,10 @@ redirects: [www.example.com]
 ```
 
 `shipwick deploy` sends the folder as it is — run the build first — and the
-agent puts it in front of Caddy and routes the domain to it:
+agent puts it in front of Caddy and routes the domain to it. Everything sent
+is served to anyone who asks for its path, so what describes the site stays
+out: `deploy.yaml` and `shipwick.yaml`, `.git` and `.env` files, wherever
+they are in the folder. Other dotfiles go in; `.well-known` is content.
 
 ```text
 ✓ Validated deploy.yaml

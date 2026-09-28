@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -154,7 +155,7 @@ var (
 )
 
 func detectNode(dir string) (project, bool, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	data, err := readProjectFile(filepath.Join(dir, "package.json"))
 	if err != nil {
 		return project{}, false, err
 	}
@@ -184,7 +185,7 @@ func detectNode(dir string) (project, bool, error) {
 		p.HealthPath, p.HealthLive = "/", true
 		p.Node.NextConfig = firstMatch(dir, "next.config.*")
 		if p.Node.NextConfig != "" {
-			config, _ := os.ReadFile(filepath.Join(dir, p.Node.NextConfig))
+			config, _ := readProjectFile(filepath.Join(dir, p.Node.NextConfig))
 			p.Node.Standalone = strings.Contains(string(config), "standalone")
 		}
 	case (pkg.depends("vite") || pkg.depends("astro")) && p.Node.HasBuild && !server:
@@ -269,7 +270,7 @@ var (
 )
 
 func detectDotnet(dir, csproj string) (project, error) {
-	data, err := os.ReadFile(filepath.Join(dir, csproj))
+	data, err := readProjectFile(filepath.Join(dir, csproj))
 	if err != nil {
 		return project{}, err
 	}
@@ -309,7 +310,7 @@ func detectDotnet(dir, csproj string) (project, error) {
 var goDirective = regexp.MustCompile(`(?m)^go\s+(\d+\.\d+)`)
 
 func detectGo(dir string) (project, bool, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	data, err := readProjectFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		return project{}, false, err
 	}
@@ -356,7 +357,7 @@ func isMainPackage(dir string) bool {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		data, err := os.ReadFile(f)
+		data, err := readProjectFile(f)
 		if err == nil && packageMain.Match(data) {
 			return true
 		}
@@ -373,7 +374,7 @@ func detectPython(dir string) (project, error) {
 	var deps strings.Builder
 	py := pythonProject{Version: "3.13"}
 	for _, name := range []string{"requirements.txt", "pyproject.toml"} {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, err := readProjectFile(filepath.Join(dir, name))
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -388,7 +389,7 @@ func detectPython(dir string) (project, error) {
 			py.Version = m[1]
 		}
 	}
-	if data, err := os.ReadFile(filepath.Join(dir, ".python-version")); err == nil {
+	if data, err := readProjectFile(filepath.Join(dir, ".python-version")); err == nil {
 		if m := pythonVersion.FindStringSubmatch(strings.TrimSpace(string(data))); m != nil {
 			py.Version = m[1]
 		}
@@ -447,4 +448,15 @@ func detectStatic(dir string) project {
 		}
 	}
 	return project{}
+}
+
+// readProjectFile reads a file the way its own tools do: without the UTF-8
+// byte-order mark that Windows editors and PowerShell's Set-Content put at
+// the start of a file, which json and xml would otherwise refuse.
+func readProjectFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), nil
 }

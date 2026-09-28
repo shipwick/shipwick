@@ -47,3 +47,24 @@ func (r *Runtime) LoadImage(ctx context.Context, archive io.Reader) ([]string, e
 	}
 	return refs, nil
 }
+
+// ListImages returns the references tagged under one repository, in no
+// particular order. The daemon's reference filter takes the repository as
+// it is and matches every tag of it.
+func (r *Runtime) ListImages(ctx context.Context, repository string) ([]string, error) {
+	filters := client.Filters{}
+	filters.Add("reference", repository)
+	res, err := r.cli.ImageList(ctx, client.ImageListOptions{Filters: filters})
+	if err != nil {
+		return nil, fmt.Errorf("list images of %s: %w", repository, err)
+	}
+	var refs []string
+	for _, img := range res.Items {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, repository+":") {
+				refs = append(refs, tag)
+			}
+		}
+	}
+	return refs, nil
+}

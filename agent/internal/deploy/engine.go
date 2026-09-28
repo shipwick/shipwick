@@ -63,8 +63,10 @@ type Runtime interface {
 	ExportPath(ctx context.Context, id, path string) (io.ReadCloser, error)
 	ImportPath(ctx context.Context, id, path string, archive io.Reader) error
 	// LoadImage loads an image archive (the `docker save` format) and returns
-	// the references it carried.
+	// the references it carried. ListImages lists the references under one
+	// repository, such as shipwick.local/<app>.
 	LoadImage(ctx context.Context, archive io.Reader) ([]string, error)
+	ListImages(ctx context.Context, repository string) ([]string, error)
 	// ListVolumes lists the volumes Shipwick created, with the application
 	// each belongs to; RemoveVolume removes one of them.
 	ListVolumes(ctx context.Context) ([]docker.Volume, error)

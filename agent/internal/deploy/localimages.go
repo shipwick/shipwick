@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/spec"
 )
@@ -58,7 +59,7 @@ func (e *Engine) LoadImage(ctx context.Context, app string, archive io.Reader) (
 		// effort: the daemon would refuse an image a container uses, and
 		// then it was there before this upload.
 		for _, ref := range refs {
-			if rerr := e.rt.RemoveImage(ctx, ref); rerr != nil {
+			if rerr := e.rt.RemoveImage(ctx, ref); rerr != nil && !errors.Is(rerr, docker.ErrImageNotFound) {
 				e.log.Warn("could not remove image from a refused upload", "image", ref, "error", rerr)
 			}
 		}

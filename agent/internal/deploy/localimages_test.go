@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/pkg/api"
@@ -60,7 +61,10 @@ func TestAMissingLocalImageFailsTheDeployment(t *testing.T) {
 
 func TestLocalImagesArePrunedLikeOthersAndARollbackToAPrunedOneFails(t *testing.T) {
 	h := newHarness(t)
-	v1, v2, v3 := "shipwick.local/my-api:20260927-100000-0001", "shipwick.local/my-api:20260927-110000-0002", "shipwick.local/my-api:20260927-120000-0003"
+	// Stamped now: images sent minutes ago and not deployed yet are left
+	// alone by the sweep, as a deploy may be on its way.
+	stamp := time.Now().UTC().Format("20060102-150405")
+	v1, v2, v3 := "shipwick.local/my-api:"+stamp+"-0001", "shipwick.local/my-api:"+stamp+"-0002", "shipwick.local/my-api:"+stamp+"-0003"
 	for _, image := range []string{v1, v2, v3} {
 		h.rt.AddLocalImage(image)
 	}
@@ -174,4 +178,63 @@ func TestRedeployOfABuiltApplicationRefusesARegistryImage(t *testing.T) {
 		t.Errorf("a plain redeploy keeps the image: %v", err)
 	}
 	h.engine.Wait()
+}
+
+func TestALocalImageNobodyDeployedIsRemovedWithTheNextSweep(t *testing.T) {
+	h := newHarness(t)
+	// One upload was followed by a deploy the agent refused; the next one went
+	// through. The first image names no deployment, so nothing else would
+	// ever remove it. A fresh one is left alone: its deploy may be on its way.
+	orphan := "shipwick.local/my-api:20260101-000000-ee80"
+	fresh := "shipwick.local/my-api:" + time.Now().UTC().Format("20060102-150405") + "-ffff"
+	h.rt.AddLocalImage(orphan)
+	h.rt.AddLocalImage(fresh)
+	h.rt.AddLocalImage(localImage)
+
+	d := h.deploy(built(localImage))
+	if d.Status != api.StatusActive {
+		t.Fatalf("status = %s (%s), want ACTIVE", d.Status, d.Error)
+	}
+	removed := h.rt.RemovedImages()
+	if len(removed) != 1 || removed[0] != orphan {
+		t.Errorf("removed %v, want only the stale orphan %s; the fresh %s may still be deployed", removed, orphan, fresh)
+	}
+	if ok, _ := h.rt.ImageExists(context.Background(), localImage); !ok {
+		t.Error("the active image must stay")
+	}
+
+	// Deleting the application takes its remaining local images with it.
+	h.rt.AddLocalImage("shipwick.local/my-api:20260928-000000-aaaa")
+	if err := h.engine.Delete(context.Background(), "my-api"); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := h.rt.ListImages(context.Background(), "shipwick.local/my-api"); len(left) != 0 {
+		t.Errorf("after delete, local images left: %v", left)
+	}
+}
+
+func TestAnImageAlreadyGoneIsNotCountedAsRemoved(t *testing.T) {
+	h := newHarness(t)
+	stamp := time.Now().UTC().Format("20060102-150405")
+	v1, v2 := "shipwick.local/my-api:"+stamp+"-0001", "shipwick.local/my-api:"+stamp+"-0002"
+	h.rt.AddLocalImage(v1)
+	h.rt.AddLocalImage(v2)
+	h.deploy(built(v1))
+	d := h.deploy(built(v2))
+	// v1 is the rollback target and stays. Someone removes it by hand; the
+	// next rollback's sweep finds nothing to do and must say nothing.
+	if err := h.rt.RemoveImage(context.Background(), v1); err != nil {
+		t.Fatal(err)
+	}
+	h.rt.AddLocalImage(v1)
+	d, err := h.engine.Rollback(context.Background(), "my-api", d.ID-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.engine.Wait()
+	for _, e := range h.events(d.ID) {
+		if strings.Contains(e.Message, "Removed") {
+			t.Errorf("a rollback with nothing to remove said %q", e.Message)
+		}
+	}
 }

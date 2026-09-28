@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -74,10 +75,13 @@ func parseSSHTarget(s string) (sshTarget, error) {
 }
 
 // sshArgv runs remote on the target. BatchMode makes ssh fail instead of
-// asking for a password; the "--" keeps the command from being read as
-// options.
+// asking for a password. A server that was just created has a host key
+// nobody has seen yet, and BatchMode alone would refuse it: accept-new
+// takes a key on first contact, as an interactive ssh does after its
+// question, and still refuses a key that changed. The "--" keeps the
+// command from being read as options.
 func sshArgv(t sshTarget, remote string) []string {
-	return []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", t.String(), "--", remote}
+	return []string{"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", t.String(), "--", remote}
 }
 
 // Remote commands are fixed strings. The installer's is the one exception:
@@ -87,6 +91,13 @@ const (
 	remoteHasDocker     = "command -v docker >/dev/null 2>&1"
 	remoteDockerVersion = "docker version --format '{{.Server.Version}}'"
 	remoteInstallDocker = "curl -fsSL https://get.docker.com | sh"
+)
+
+// A daemon installed at first boot answers within a minute of the server
+// coming up; longer than that and something is wrong.
+const (
+	dockerStartAttempts = 12
+	dockerStartWait     = 5 * time.Second
 )
 
 // installerRemoteCommand is the installer as the handbook shows it, with its
@@ -164,8 +175,22 @@ func (c *cli) serverInstall(ctx context.Context, target string, opts installOpti
 	dim := &dimmedLines{c: c}
 	switch err := ssh(remoteHasDocker, io.Discard, io.Discard); {
 	case err == nil:
+		// A server created a minute ago may still be starting the daemon its
+		// image installed at first boot; give it the time it takes.
 		var v bytes.Buffer
-		if err := ssh(remoteDockerVersion, &v, io.Discard); err != nil {
+		answered := false
+		for attempt := 0; attempt < dockerStartAttempts; attempt++ {
+			v.Reset()
+			if ssh(remoteDockerVersion, &v, io.Discard) == nil {
+				answered = true
+				break
+			}
+			if attempt == 0 {
+				c.ui.Println("Docker is installed but not answering yet; waiting for it to start.")
+			}
+			local.sleep(dockerStartWait)
+		}
+		if !answered {
 			return fmt.Errorf("Docker is installed on %s but does not answer; start it (systemctl start docker) and run this again", t)
 		}
 		c.ui.Success("Docker %s", strings.TrimSpace(v.String()))
@@ -246,6 +271,7 @@ func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarg
 		}
 	}
 	c.ui.Println()
+	recordsMissing := false
 	if len(hostnames) > 0 {
 		addrs := []string{t.host}
 		if net.ParseIP(t.host) == nil {
@@ -267,6 +293,7 @@ func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarg
 			missing = append(missing, h)
 		}
 		if len(missing) > 0 {
+			recordsMissing = true
 			if len(missing) < len(hostnames) {
 				c.ui.Println()
 			}
@@ -288,7 +315,11 @@ func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarg
 		c.ui.Println()
 	}
 	c.ui.Println("Next: in your project, run: shipwick init")
-	c.ui.Println("      once the records exist, check the setup with: shipwick doctor")
+	if recordsMissing {
+		c.ui.Println("      once the records exist, check the setup with: shipwick doctor")
+	} else {
+		c.ui.Println("      check the setup with: shipwick doctor")
+	}
 }
 
 // sshConnectionFailed is ssh's own exit status; a remote command's status
@@ -311,7 +342,25 @@ func describeSSHError(err error, t sshTarget, stderr string) error {
 	if detail == "" {
 		detail = err.Error()
 	}
+	// A key that changed is what ssh refuses on purpose: a reinstalled
+	// server, or someone in the middle. Only the person who reinstalled it
+	// can tell which.
+	if strings.Contains(detail, "REMOTE HOST IDENTIFICATION HAS CHANGED") || strings.Contains(detail, "Host key verification failed") {
+		return fmt.Errorf("the SSH host key of %s is not the one this machine knows:\n  %s\n\nIf the server was reinstalled, forget the old key with: ssh-keygen -R %s\nand run this again. If it was not, do not connect until you know why the key changed", t, firstLine(detail), t.host)
+	}
 	return fmt.Errorf("could not log in to %s over SSH:\n  %s\n\nThe login must work without a password: add your key with ssh-copy-id %s, or check the host in ~/.ssh/config, then run this again", t, detail, t)
+}
+
+// firstLine is the line of ssh's output that says what happened, without
+// the banner of asterisks it prints around a changed key.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "@") {
+			return line
+		}
+	}
+	return s
 }
 
 // installerToken finds the token in the installer's summary: the one line
@@ -367,6 +416,11 @@ func (d *dimmedLines) flush() {
 
 func (d *dimmedLines) line(s string) {
 	s = strings.TrimRight(s, "\r")
+	// Compose reports each step as it starts and again as it ends, which
+	// without a terminal arrives as the same line twice in a row.
+	if n := len(d.lines); n > 0 && d.lines[n-1] == s && strings.TrimSpace(s) != "" {
+		return
+	}
 	d.lines = append(d.lines, s)
 	if tokenLine.MatchString(strings.TrimSpace(s)) {
 		s = "      (the API token — saved to your shipwick config, not shown)"

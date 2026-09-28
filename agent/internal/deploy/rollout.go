@@ -156,7 +156,7 @@ func (r *rollout) execute(ctx context.Context) error {
 	sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	e.retireOthers(sweepCtx, d, previous)
-	if candidates, err := e.deployedImages(sweepCtx, d.Application); err == nil {
+	if candidates, err := e.pruneCandidates(sweepCtx, d.Application, false); err == nil {
 		if n := e.pruneImages(sweepCtx, candidates); n > 0 {
 			e.step(sweepCtx, d, "Removed %s of older versions", plural(n, "image"))
 		}

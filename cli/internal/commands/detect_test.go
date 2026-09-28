@@ -47,6 +47,12 @@ func TestDetectProject(t *testing.T) {
 			},
 		},
 		{
+			// PowerShell's Set-Content writes one; npm reads past it, so must init.
+			name:  "a package.json with a byte-order mark",
+			files: map[string]string{"package.json": "\xef\xbb\xbf" + `{"dependencies":{"nuxt":"^4"}}`},
+			want:  project{Kind: kindNuxt, Label: "a Nuxt application", Port: 3000, HealthPath: "/", HealthLive: true},
+		},
+		{
 			name:  "pnpm from its lock file",
 			files: map[string]string{"package.json": `{"dependencies":{"nuxt":"^4"}}`, "pnpm-lock.yaml": ""},
 			want:  project{Kind: kindNuxt, Label: "a Nuxt application", Port: 3000, HealthPath: "/", HealthLive: true},

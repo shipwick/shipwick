@@ -185,7 +185,7 @@ func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e
 	cc.manyInFlight = true
 
 	// An entry with build: is built here first, like a deploy.yaml is; its
-	// paths are relative to the shipwick.yaml.
+	// paths, like a static entry's folder, are relative to the shipwick.yaml.
 	config := e.Config
 	var err error
 	if e.App.Build != nil {
@@ -196,7 +196,8 @@ func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e
 	}
 
 	started := c.now()
-	d, err := cl.Deploy(ctx, e.App.Name, config)
+	// A static entry uploads its folder first, as a deploy.yaml does.
+	d, err := cc.startDeployment(ctx, cl, file, e.App, config)
 	if err == nil {
 		err = cc.followDeployment(ctx, cl, d, started, noWait)
 	}

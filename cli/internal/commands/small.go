@@ -35,6 +35,8 @@ type localOptions struct {
 	// "when standard input is a terminal".
 	interactive func() bool
 	goos        string
+	// sleep waits between retries; tests make it return at once.
+	sleep func(time.Duration)
 }
 
 func (o localOptions) withDefaults() localOptions {
@@ -59,6 +61,9 @@ func (o localOptions) withDefaults() localOptions {
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
+	}
+	if o.sleep == nil {
+		o.sleep = time.Sleep
 	}
 	return o
 }
@@ -195,13 +200,18 @@ func (c *cli) initClosing(files int) string {
 
 // printNextSteps closes an application's first deployment with the two
 // commands that answer the next question: is it running, and what is it
-// saying.
-func (c *cli) printNextSteps(name string) {
+// saying. A static application has no logs; its next question is what the
+// site looks like.
+func (c *cli) printNextSteps(name string, static bool) {
 	c.ui.Println()
 	c.ui.Println("Next:")
-	logs := "  shipwick logs -f " + name
-	status := "  shipwick status " + name
-	width := max(len(logs), len(status)) + 4
-	c.ui.Printf("%-*s%s\n", width, logs, "follow the logs")
-	c.ui.Printf("%-*s%s\n", width, status, "replicas, health, history")
+	first, firstWhy := "  shipwick logs -f "+name, "follow the logs"
+	status, statusWhy := "  shipwick status "+name, "replicas, health, history"
+	if static {
+		first, firstWhy = "  shipwick open "+name, "open it in the browser"
+		statusWhy = "what it serves, history"
+	}
+	width := max(len(first), len(status)) + 4
+	c.ui.Printf("%-*s%s\n", width, first, firstWhy)
+	c.ui.Printf("%-*s%s\n", width, status, statusWhy)
 }

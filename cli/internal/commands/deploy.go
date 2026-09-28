@@ -192,7 +192,7 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 		c.ui.Println("https://" + final.Spec.Domain)
 	}
 	if final.Sequence == 1 && !c.manyInFlight {
-		c.printNextSteps(name)
+		c.printNextSteps(name, final.Spec.Static != nil)
 	}
 	return nil
 }
