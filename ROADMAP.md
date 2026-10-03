@@ -6,12 +6,14 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.5 — The proxy
+## 0.5 — The proxy, and running it for a year
 
-What sits in front of the applications: Cloudflare, headers and
-authentication, and what the proxy could tell about the traffic it carries.
-Before that, what 0.4 — the first half hour, from an empty server to a running
-application — left unfinished.
+Three things in one release. What 0.4 — the first half hour, from an empty
+server to a running application — left unfinished. What sits in front of the
+applications: Cloudflare, headers and authentication, and what the proxy could
+tell about the traffic it carries. And what an installation needs once it has
+been up for months: backups that happen without anyone remembering, alerts
+before a limit is hit, keys that can be rotated.
 
 ### Left over from 0.4
 
@@ -128,11 +130,7 @@ leaves the proxy first and is then given a moment to finish what it has in
 hand; that moment is the same for every application. `deploy.stop_timeout`
 in `deploy.yaml`, for the application that holds WebSockets or long uploads.
 
-## 0.6 — Running it for a year
-
-The things an installation needs once it has been up for months: backups
-that happen without anyone remembering, alerts before a limit is hit, keys
-that can be rotated, and nothing that depends on the agent never restarting.
+### Running it for a year
 
 **Scheduled backups.** `backups` in `deploy.yaml`: a schedule, how many to
 keep, and where to put them — a directory on the server first, an S3-compatible
@@ -173,27 +171,23 @@ configuration and secrets and a backup of every volume into one archive;
 restores the data. The same command backs up the agent's own `shipwick.db`
 and `encryption.key`, which today the documentation asks you to copy by hand.
 
+**A second server kept ready.** Shipwick does not fail over. What it can do
+is keep a standby honest: the scheduled export restored on a second server on
+the same schedule, applications deployed and stopped there, and one command
+(`shipwick standby promote`) that starts them when the first server is gone
+and prints the DNS records to change. Minutes of downtime and a person in the
+loop, stated as such.
+
 **Deployments that survive an agent restart.** An interrupted deployment is
 marked `FAILED` and cleaned up; the containers it had started are removed.
 Resuming where it stopped would cost a restart nothing.
-
-**What happens when things break, written down and tested.** A full disk, a
-Docker daemon that stops answering, a network that drops in the middle of a
-pull, an agent killed half-way through a rollout: each with a test that
-produces it, the behaviour that test pins down, and a page that says what the
-operator sees and does. Some of this is tested today; none of it is in one
-place.
-
-**More than one distribution in CI.** The integration tests run on one Ubuntu
-image with one Docker version. A matrix over the distributions the installer
-claims to support and the Docker versions still in use, on amd64 and arm64.
 
 **Metrics for whoever already has a Prometheus.** `GET /metrics` on the
 agent, in the Prometheus text format: replicas, health, restarts, CPU and
 memory per application, deployment outcomes. A week of history in SQLite
 stays for those who have nothing else; this is for those who do.
 
-## 0.7 — Teams
+## 0.6 — Teams
 
 More than one person, more than one server, and a record of who did what.
 
@@ -204,28 +198,21 @@ the others.
 the token; a delete, a restore, a token created or revoked are only in the
 agent's log. Every action a token takes, with who and when, in one place.
 
-**The API reachable only from the proxy and the dashboard.** Application
-containers share the `shipwick` network with the agent, which needs it for
-health checks, so today they can reach the API and try tokens against it. The
-agent should answer only the proxy, the dashboard and the server itself.
-
 **Tokens that expire.** `shipwick token create ci --role deploy --expires 90d`;
 an expired token is refused with a message that says so, and `token ls` shows
 what is about to lapse.
 
-**Containers locked down further, on request.** Replicas already run without
-new privileges, without host mounts and without ports they did not ask for.
-`security` in `deploy.yaml` for the rest: a read-only root filesystem,
-dropped capabilities, a refusal to run as root.
-
-**Less than the whole Docker socket.** The agent holds the Docker socket,
-which is root on the server. Running it against a socket proxy that allows
-only the calls it makes, and against rootless Docker, each documented and
-tested, for installations where that matters more than convenience.
-
 **Behind a corporate proxy.** An agent that pulls images and reaches
 webhooks through `HTTPS_PROXY`, trusts an internal certificate authority, and
 can be installed from files copied to a server that has no way out.
+
+**Signing in to the dashboard with the company's accounts.** The dashboard
+has no users of its own and should not grow a user database. With an OpenID
+Connect provider configured on the agent (Google Workspace, Microsoft Entra,
+Okta, Keycloak), a person signs in there, and a table on the agent says which
+e-mail address or group gets which role. Two-factor authentication, password
+rules and offboarding stay where they already are. Tokens remain, for the CLI
+and for CI.
 
 **A new application from the dashboard.** Paste a `deploy.yaml`, deploy. Today
 the dashboard redeploys and rolls back what the CLI created.
@@ -233,7 +220,7 @@ the dashboard redeploys and rolls back what the CLI created.
 **Several servers in one dashboard.** The CLI already switches between servers
 with contexts; the dashboard should too, one sign-in per server.
 
-## 0.8 — Logs and distribution
+## 0.7 — Logs and distribution
 
 **Log archiving.** A run's output and a replica's last log lines kept beyond
 the container's life, searchable from the dashboard.
@@ -241,10 +228,6 @@ the container's life, searchable from the dashboard.
 **Distribution.** A Windows arm64 build of the CLI; Debian and RPM packages for
 the agent as a plain binary; an update notice in the dashboard when a newer
 release exists.
-
-**Signed releases.** Every binary and image signed at release time, with a
-software bill of materials and build provenance, so that what a server runs as
-root can be traced to a commit in this repository.
 
 **`winget install` in the documentation.** The package is submitted to
 winget-pkgs and waits for review; once it is accepted, `winget install
@@ -257,6 +240,58 @@ followed by two commands (`packaging/winget/update-manifests.sh`, then
 GitHub token with write access to a fork of winget-pkgs stored in this
 repository, which the Homebrew tap deliberately avoids; worth it once the
 cadence makes the two commands a chore.
+
+## 0.8 — Hardening
+
+No new features. The release before 1.0 is for finding out what the earlier
+ones got wrong: stability under failure, the last checks, and security looked
+at by someone other than the people who wrote it.
+
+**What happens when things break, written down and tested.** A full disk, a
+Docker daemon that stops answering, a network that drops in the middle of a
+pull, an agent killed half-way through a rollout: each with a test that
+produces it, the behaviour that test pins down, and a page that says what the
+operator sees and does. Some of this is tested today; none of it is in one
+place.
+
+**More than one distribution in CI.** The integration tests run on one Ubuntu
+image with one Docker version. A matrix over the distributions the installer
+claims to support and the Docker versions still in use, on amd64 and arm64.
+
+**Every upgrade path, walked.** From each 0.x release to the current one on a
+server with real applications and data: the migrations, the proxy's
+configuration, the volumes, the secrets. An upgrade that needs a manual step
+gets it written down or removed.
+
+**The limits, measured.** How many applications, replicas and requests per
+second one server of a given size carries before deployments slow down or the
+proxy does; how large the database grows in a year; how long a restore takes.
+Numbers from tests anyone can run, in the documentation, with the point at
+which the honest answer is "you have outgrown Shipwick".
+
+**The API reachable only from the proxy and the dashboard.** Application
+containers share the `shipwick` network with the agent, which needs it for
+health checks, so today they can reach the API and try tokens against it. The
+agent should answer only the proxy, the dashboard and the server itself.
+
+**Less than the whole Docker socket.** The agent holds the Docker socket,
+which is root on the server. Running it against a socket proxy that allows
+only the calls it makes, and against rootless Docker, each documented and
+tested, for installations where that matters more than convenience.
+
+**Containers locked down further, on request.** Replicas already run without
+new privileges, without host mounts and without ports they did not ask for.
+`security` in `deploy.yaml` for the rest: a read-only root filesystem,
+dropped capabilities, a refusal to run as root.
+
+**Signed releases.** Every binary and image signed at release time, with a
+software bill of materials and build provenance, so that what a server runs as
+root can be traced to a commit in this repository.
+
+**An independent security review.** The agent's use of the Docker Engine API,
+the proxy configuration it generates, and the handling of tokens, secrets and
+uploads, examined by an outside reviewer; the findings fixed, and a summary
+published with the release.
 
 ## Documentation, as it becomes true
 
@@ -274,6 +309,25 @@ questionnaire: what the agent stores and where, what is encrypted and with
 which key, what leaves the server (nothing, unless a webhook is set), and
 what a backup contains.
 
+**Coming from another tool.** The same guide as for Compose, for the tools
+people most often arrive from: Dokku and Coolify. What each of their concepts
+becomes here and how to move a running application across, without a
+comparison of merits.
+
+**Staging and production.** Two servers are two contexts, and promoting a
+version is deploying the image that ran on one to the other:
+`shipwick --context production deploy --image <the one staging runs>`. An
+approval before production is the pipeline's to ask for (a protected
+environment in GitHub or GitLab); the page shows both.
+
+**Scanning an image before it is deployed.** A scanner belongs in the
+pipeline, before `shipwick deploy`, where its result can stop the job: a
+worked example with Trivy next to the GitHub Action.
+
+**Keeping the encryption key off the server's disk.** `SHIPWICK_ENCRYPTION_KEY`
+already lets the key come from the environment; a page on supplying it from a
+secret manager at start-up, and what that does to an unattended reboot.
+
 ## 1.0
 
 1.0 is a promise, not a feature: from then on `deploy.yaml`, the API and the
@@ -283,6 +337,40 @@ the 0.x series has run real installations for long enough that the last two
 minor versions changed nothing anyone had to relearn, when every item above
 has either shipped or been dropped on purpose, and when the limits of one
 server are written down with numbers that were measured.
+
+## Not planned
+
+Asked for, considered, and declined. Unlike what is out of scope below, these
+could change if real installations show the need; until then the answer is no,
+and this is why.
+
+**Blue/green and canary deployments.** Blue/green needs room for two full
+copies of an application, which is what a small server does not have; rolling
+replacement with health checks and automatic rollback is the strategy, and
+`recreate` the exception for what cannot run twice. Canary releases need
+traffic splitting and a way to judge the canary, for a benefit that shows at
+a scale one server does not reach.
+
+**Automatic failover.** See *A second server kept ready* in 0.5 for what is
+offered instead, and *Scheduling across machines* below for why.
+
+**User accounts, SAML, LDAP.** The dashboard will accept identities from an
+OpenID Connect provider (0.6) and will not keep passwords, sessions for
+people, or a directory of its own. SAML and LDAP are reached through a
+provider that speaks OpenID Connect, which every one of them does.
+
+**Approval steps inside Shipwick.** A second person approving a production
+deployment is a feature of the pipeline that calls `shipwick deploy`, where
+the code review already happened.
+
+**A built-in image scanner, and connectors to secret managers.** Each would be
+a dependency to track and a product to keep up with. Scanning runs in the
+pipeline; a secret manager supplies environment variables or the encryption
+key at start-up. Both are documented rather than built in.
+
+**Long-term support releases.** Before 1.0 there is one supported version, the
+latest. What 1.0 promises is under *1.0* above; a support policy for older
+1.x versions is decided then, with real upgrade data.
 
 ## Out of scope
 
