@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-04
+
 ### Added
 
 - A `deploy` token can be limited to applications: `shipwick token create ci
@@ -164,6 +166,12 @@ says so under **Changed** and explains how to upgrade.
 
 ### Fixed
 
+- The installer no longer untags the images that are in use when it removes
+  those of earlier releases. Its list of images to keep never matched, and
+  only Docker's refusal to remove an image a container runs on protected
+  them; after an install from a bundle that refusal did not apply, and the
+  next `docker compose up` on a server without a way out had nothing to start
+  from.
 - A hostname under `redirects` of an application with a `path` redirects to
   the domain and that path — `https://example.com/api/users` for a request
   for `/users` — instead of to the same path on the domain, which may belong
@@ -916,7 +924,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/shipwick/shipwick/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/shipwick/shipwick/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/shipwick/shipwick/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/shipwick/shipwick/compare/v0.4.0...v0.4.1

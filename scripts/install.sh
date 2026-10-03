@@ -486,7 +486,9 @@ sign_in_cli() {
 # a few hundred megabytes each; the running ones and anything else on the
 # server are kept.
 prune_old_images() {
-    keep="$(docker compose config --images 2>/dev/null)"
+    # One line, names separated by spaces: the list is matched as words below,
+    # and compose prints one name a line.
+    keep="$(docker compose config --images 2>/dev/null | tr '\n' ' ')"
     removed=0
     # `docker images` takes one repository at a time.
     for repo in ghcr.io/shipwick/agent ghcr.io/shipwick/dashboard ghcr.io/shipwick/caddy; do
