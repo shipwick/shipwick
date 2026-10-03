@@ -158,8 +158,9 @@ open_bundle() {
     # its checksum with it: what is checked is that the copy arrived whole.
     expected="$(awk '{ print $1; exit }' "$BUNDLE/images.tar.sha256")"
     actual="$(sha256_of "$BUNDLE/images.tar")"
-    [ -n "$expected" ] && [ "$expected" = "$actual" ] \
-        || die "images.tar in the bundle is damaged (expected $expected, got $actual): copy the bundle again. Nothing was changed."
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        die "images.tar in the bundle is damaged (expected $expected, got $actual): copy the bundle again. Nothing was changed."
+    fi
     step "The bundle is complete ($BUNDLE)"
 }
 
