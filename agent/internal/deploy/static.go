@@ -89,6 +89,10 @@ func (e *Engine) StoreStatic(ctx context.Context, name string, archive io.Reader
 	if e.opts.UploadDir == "" {
 		return api.StaticUpload{}, errors.New("this agent has nowhere to keep uploads: it was started without a data directory")
 	}
+	// The name becomes a directory: checked here, whoever checked it before.
+	if err := spec.ValidateName(name); err != nil {
+		return api.StaticUpload{}, &InvalidUploadError{Reason: "the application's name is not one: " + err.Error()}
+	}
 	// Under the application's lock: a deployment reading the last upload must
 	// not find it replaced half-way through.
 	if err := e.lock(ctx, name); err != nil {
@@ -183,6 +187,10 @@ func (e *Engine) uploadNotePath(app, digest string) string {
 
 // uploadInfo reads what an upload holds, for the deployment record.
 func (e *Engine) uploadInfo(app, digest string) (store.StaticFiles, error) {
+	// Both become parts of a path.
+	if spec.ValidateName(app) != nil || !ValidStaticDigest(digest) {
+		return store.StaticFiles{}, ErrNoUpload
+	}
 	note, err := os.ReadFile(e.uploadNotePath(app, digest))
 	if err != nil {
 		return store.StaticFiles{}, ErrNoUpload

@@ -1,6 +1,8 @@
 package deploy
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -31,13 +33,27 @@ const hashCost = 10
 type hashCache struct {
 	mu     sync.Mutex
 	hashes map[string]string
+	// secret keys the names accounts are cached under: see key. Made up when
+	// first needed, never stored.
+	secret []byte
 }
 
-// accountKey names an account by what its hash depends on, without being the
-// password: the cache must not become a second place where passwords are.
-func accountKey(a spec.BasicAuth) string {
-	sum := sha256.Sum256([]byte(a.Username + "\x00" + a.Password))
-	return hex.EncodeToString(sum[:])
+// key names an account by what its hash depends on, without being the
+// password: the cache must not become a second place where passwords are. A
+// plain digest of a password can be tried against a word list at any speed;
+// this one is keyed with a secret that dies with the process. Called with
+// c.mu held.
+func (c *hashCache) key(a spec.BasicAuth) (string, error) {
+	if c.secret == nil {
+		secret := make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			return "", fmt.Errorf("generate a key for the account cache: %w", err)
+		}
+		c.secret = secret
+	}
+	mac := hmac.New(sha256.New, c.secret)
+	mac.Write([]byte(a.Username + "\x00" + a.Password))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // accounts turns the accounts of a proxy block into what the proxy is told,
@@ -53,13 +69,17 @@ func (c *hashCache) accounts(in []spec.BasicAuth, used map[string]bool) ([]proxy
 	}
 	out := make([]proxy.BasicAuth, 0, len(in))
 	for _, a := range in {
-		key := accountKey(a)
+		key, err := c.key(a)
+		if err != nil {
+			return nil, err
+		}
 		hash, ok := c.hashes[key]
 		if !ok {
 			h, err := bcrypt.GenerateFromPassword([]byte(a.Password), hashCost)
 			if err != nil {
-				// The error names lengths at most, never the password.
-				return nil, fmt.Errorf("account %q: %w", a.Username, err)
+				// Said in words of its own: nothing that was computed from
+				// the password travels into an error, a log or an event.
+				return nil, fmt.Errorf("account %q: its password cannot be hashed; bcrypt takes at most %d bytes", a.Username, spec.MaxPasswordBytes)
 			}
 			hash = string(h)
 			c.hashes[key] = hash
