@@ -6,80 +6,17 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.4 — The first half hour
-
-A developer with two APIs, a frontend and one server should get from nothing
-to three running applications without opening an account anywhere else,
-without learning what a registry is, and without being told to run something
-"on the server" without knowing which one.
-
-**Images without a registry.** `build: .` in `deploy.yaml`: `shipwick deploy`
-builds the image on the developer's machine, where Docker already is, and
-sends it straight to the agent, which loads it. No registry account, no
-token, no `docker login` on the server, no public-or-private question. A
-registry stays the right tool for CI and stays supported; it stops being a
-prerequisite. The agent still builds nothing itself. A first version sends
-the whole image; sending only the layers the server lacks comes after.
-
-**`shipwick init` that knows the project.** It recognises what is in the
-directory — a Node, Nuxt or Next application, a .NET or Go service, a folder
-of static files — and writes a Dockerfile, a `.dockerignore` and a
-`deploy.yaml` that work as they are. `static: dist/` serves a built frontend
-straight from the proxy, with no container at all.
-
-**Secrets kept on the server.** `shipwick secret set DATABASE_PASSWORD`
-stores a value on the server, encrypted like environment values are, and
-`${DATABASE_PASSWORD}` in `deploy.yaml` is filled in by the agent. The
-`--env-file` on every laptop and in every pipeline becomes optional.
-
-**Installing the server from the laptop.** `shipwick server install
-root@203.0.113.10 --agent-domain agent.example.com` connects over SSH, installs Docker if
-it is missing, runs the installer, saves the token as a context, and prints
-the DNS records to create. Nothing to type on the server.
-
-**DNS spelled out.** The agent knows the server's addresses now; a deploy whose
-hostname is not ready prints the exact record to add: name, type, address, and
-that it must not be proxied. Cloudflare's own addresses are recognised, so the
-message says "turn the proxy off" rather than "does not point here".
-
-**Several applications in one file.** `apps:` in one `shipwick.yaml`, deployed
-in dependency order with one command, so that a project with three services
-has one file to read. `-f` repeated stays.
-
-**Faster deployments.** Independent applications of one command deploy at the
-same time, not one after the other; `after:` in the file says which must wait.
-
-**Small things that remove a question.** `shipwick deploy` in a directory
-without a `deploy.yaml` starts `init` instead of failing. `shipwick doctor`
-checks DNS, ports 80 and 443, Docker, the token and the versions, and says
-what is wrong in one screen. `shipwick open` opens the application in the
-browser. A first deployment ends with what to do next: the address, the logs,
-the dashboard.
-
-**Compressed responses.** The proxy sends what the application sends; a 42 KB
-page leaves as 42 KB. Caddy compresses with zstd and gzip when asked, and
-leaves alone what the application already compressed. One line of
-configuration, for every route.
-
-**A GitHub Action.** `uses: shipwick/deploy@v1` with the agent's address, a
-`deploy` token and the image just built: installs the CLI and runs `shipwick
-deploy`. The same thing a pipeline does by hand today, in three lines.
-
-**Volumes of deleted applications.** They stay, on purpose; today only
-`docker volume rm` on the server removes one. `shipwick volumes` to list them,
-with what they belonged to and how much they hold, and to remove one.
-
-**A grace period for slow starters.** `health.start_period`: a JVM that needs a
-minute should not have to say `retries: 12`.
-
-**Rate limiting on the API.** A token is tried at most a few times a minute
-from one address; today nothing slows a guess down.
-
 ## 0.5 — The proxy
 
 What sits in front of the applications: Cloudflare, headers and
 authentication, and what the proxy could tell about the traffic it carries.
-Plus one leftover from the first half hour.
+Before that, what 0.4 — the first half hour, from an empty server to a running
+application — left unfinished.
+
+### Left over from 0.4
+
+Small things that the first real installations turned up, none of them
+blocking, each a question a new user should not have to ask.
 
 **The CLI on the server knows its own agent.** The installer puts `shipwick`
 on the server but not how to reach the agent, whose port is deliberately not
@@ -87,6 +24,70 @@ published; the first command run there fails with a tunnel hint meant for
 laptops. The installer will save a context for root — the API hostname and
 the token it already has — so that `shipwick ps` works on the server as it
 does anywhere else.
+
+**Commands that know `shipwick.yaml`.** `deploy` and `validate` read it;
+`status`, `logs`, `stop` and the others that take the application's name
+from `deploy.yaml` do not, and ask for a name in a directory that has only a
+`shipwick.yaml`. `shipwick init` in such a directory should add an entry to
+the file instead of writing a second one next to it.
+
+**Sending only the layers the server lacks.** With `build: .` the whole image
+travels on every deployment, base layers included: 59 MB for a ten-line Node
+application whose own layer is a few kilobytes. The agent already has most of
+it after the first time.
+
+**Asking the agent before building.** A document the agent will refuse — a
+port already published, a secret that is not stored — is refused after the
+image was built and sent. The CLI checks the domain itself today; a dry run
+of the agent's own validation would cover every case with one request.
+
+**A failed deployment cleans up after itself.** The image sent for a
+deployment that then fails stays until the application's next successful
+deployment sweeps it; it should go when the failure is recorded.
+
+**A quieter build.** `docker build` prints forty lines for a build that takes
+two seconds. Show a progress line while it runs and the full output only when
+it fails.
+
+**`logs -f` that says it is waiting.** Following an application that has
+printed nothing yet shows an empty screen, which reads as a hang.
+
+**Why replacing one replica takes fourteen seconds.** A first deployment of
+the example application takes 2.4 s, every later one 13.7 s. Find where the
+time goes when a single replica is replaced, and whether it has to.
+
+**More kinds of project for `init`.** SvelteKit, Remix and Astro with a
+server, a Next.js static export, Python projects locked with `uv`; a warning
+when there is no lock file and the build is therefore not reproducible; and
+`build: {dockerfile: X}` without `context` meaning the directory of the file.
+
+**Static sites: a fallback page and a clean switch.** A single-page
+application needs unknown paths to answer with `index.html`
+(`static: {dir: dist, fallback: index.html}`). And an application that turns
+from a folder into a container leaves its folders in the proxy until it is
+deleted.
+
+**Compression for the API and the dashboard.** Application routes are
+compressed; the agent's own API and the dashboard are not, because the
+encoder may hold back the first lines of a followed log. Measure it against a
+real proxy, and compress everything that is not a stream.
+
+**The dashboard's address, where the CLI can find it.** The agent does not
+report the dashboard's hostname, so `shipwick open --dashboard` does not exist
+and a first deployment cannot end with a link to it.
+
+**Dashboard details.** A `429` says how long to wait and the dashboard polls
+on regardless; the log viewer offers static applications, which have no logs;
+a deployment refused for a missing secret could offer to add it.
+
+**`doctor` recognises Cloudflare.** The agent names Cloudflare's proxy when a
+record points at it; `doctor` says "a CDN". One list of ranges, one wording.
+
+**The GitHub Action against a real server.** `shipwick/deploy` is tested for
+downloading and verifying the CLI on every runner; a deployment from a
+workflow to a live agent has not been run end to end.
+
+### The proxy
 
 **Cloudflare in front of the server.** Today an application's DNS record must
 point straight at the server (Cloudflare "DNS only"), because Caddy proves
@@ -184,6 +185,11 @@ release exists.
 **Signed releases.** Every binary and image signed at release time, with a
 software bill of materials and build provenance, so that what a server runs as
 root can be traced to a commit in this repository.
+
+**`winget install` in the documentation.** The package is submitted to
+winget-pkgs and waits for review; once it is accepted, `winget install
+Shipwick.Shipwick` replaces "download the .exe and put it on your PATH" as the
+way to install on Windows.
 
 **The winget submission from the release workflow.** Today a release is
 followed by two commands (`packaging/winget/update-manifests.sh`, then
