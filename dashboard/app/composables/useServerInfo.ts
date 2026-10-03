@@ -1,5 +1,6 @@
 import type { InjectionKey } from 'vue'
 import type { Role, Server, TokenIdentity } from '~/types/api'
+import { canDeploy as tokenCanDeploy } from '~/utils/access'
 import { roleCovers } from '~/utils/roles'
 
 type ServerPolling = ReturnType<typeof usePolling<Server>>
@@ -50,5 +51,15 @@ export function useAccess() {
     return role.value !== null && roleCovers(role.value, required)
   }
 
-  return { token, role, can, knownTo }
+  /**
+   * Deploying, rolling back, stopping, starting, running and backing up one
+   * application: the role, and for a deploy token limited to some applications
+   * whether this is one of them. A name that does not exist yet counts too: a
+   * first deployment is covered.
+   */
+  function canDeploy(application: string): boolean {
+    return tokenCanDeploy(token.value, application)
+  }
+
+  return { token, role, can, knownTo, canDeploy }
 }

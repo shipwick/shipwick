@@ -189,6 +189,9 @@ type Options struct {
 	// Transfer is what the agent does on a schedule for the server that would
 	// replace it, or as that server: see export.go and standby.go.
 	Transfer TransferOptions
+	// Network is how the agent was set up to reach what is outside the
+	// server, for GET /server: see network.go.
+	Network NetworkOptions
 }
 
 // ProbeFunc checks one replica once. A nil error means healthy.
@@ -518,6 +521,15 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 		return store.Deployment{}, err
 	}
 	e.log.Info("deployment created", "app", d.Application, "deployment", d.ID, "version", d.Version, "kind", d.Kind)
+	if o.dormant {
+		// In its record before it begins: an agent that resumes it must not
+		// take it for a deployment that starts what it creates (see Recover).
+		if err := e.store.MarkDeploymentDormant(ctx, d.ID); err != nil {
+			e.failUnstarted(ctx, &d, err)
+			e.unlock(name)
+			return store.Deployment{}, err
+		}
+	}
 	r := e.newRollout(d)
 	r.dormant = o.dormant
 	e.launch(r)

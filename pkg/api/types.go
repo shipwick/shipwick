@@ -106,6 +106,12 @@ type Application struct {
 	// Static is true for an application the proxy serves from a folder: it has
 	// no containers, and Replicas are all zero.
 	Static bool `json:"static"`
+	// CertificateProblem is null while no certificate of the application is
+	// known to be out of order. AlertCount is how many alerts about it are
+	// active, AlertSeverity the highest severity among them, "" for none.
+	CertificateProblem *CertificateProblem `json:"certificate_problem"`
+	AlertCount         int                 `json:"alert_count"`
+	AlertSeverity      string              `json:"alert_severity"`
 }
 
 type ReplicaCount struct {
@@ -150,6 +156,11 @@ type Container struct {
 	Health       string     `json:"health"`     // see the Health* constants
 	Restarts     int        `json:"restarts"`   // restarts performed by the supervisor
 	CrashLoop    bool       `json:"crash_loop"` // restarts are being rate-limited
+	// Stopping is true for a container the agent is retiring in the
+	// background: replaced by a deployment or left over, out of rotation, and
+	// gone once its process has exited or its grace period is over. It is not
+	// one of the application's replicas any more.
+	Stopping bool `json:"stopping"`
 }
 
 type Deployment struct {
@@ -251,6 +262,11 @@ type Server struct {
 	Disk   *DiskUsage `json:"disk"`
 	// Backups is absent from agents older than scheduled backups.
 	Backups *BackupStatus `json:"backups,omitempty"`
+	// Network is absent from agents older than 0.6.
+	Network *NetworkStatus `json:"network,omitempty"`
+	// SignIn says whether people can sign in with an OpenID Connect
+	// provider; Token.Kind says whether this caller did.
+	SignIn SignInStatus `json:"sign_in"`
 }
 
 // ProxyStatus describes the reverse proxy in front of the applications.
@@ -321,6 +337,13 @@ const RootTokenName = "root"
 type TokenIdentity struct {
 	Name string `json:"name"`
 	Role Role   `json:"role"`
+	// Kind is what kind of caller this is: ActorToken or ActorUser.
+	Kind string `json:"kind"`
+	// Applications are the ones a deploy token is limited to; empty: not
+	// limited. See Allows.
+	Applications []string `json:"applications"`
+	// ExpiresAt is null for a token that does not expire.
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 // Token is a stored API token as GET /tokens lists it. The token value is not
@@ -331,12 +354,23 @@ type Token struct {
 	Role       Role       `json:"role"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"` // to the minute; null until first used
+	// Applications are the ones a deploy token is limited to; empty: not
+	// limited.
+	Applications []string `json:"applications"`
+	// ExpiresAt is null for a token that does not expire. A token whose
+	// time has passed stays listed until it is revoked.
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 // CreateTokenRequest is the body of POST /tokens.
 type CreateTokenRequest struct {
 	Name string `json:"name"`
 	Role Role   `json:"role"`
+	// Applications limits a deploy token to these applications; left out,
+	// the token is not limited.
+	Applications []string `json:"applications,omitempty"`
+	// ExpiresAt is when the token stops being accepted; left out, never.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // CreatedToken is the answer to POST /tokens, the one time the token value
@@ -347,6 +381,9 @@ type CreatedToken struct {
 	Role      Role      `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 	Token     string    `json:"token"`
+
+	Applications []string   `json:"applications"`
+	ExpiresAt    *time.Time `json:"expires_at"`
 }
 
 // Volume backups.
@@ -917,8 +954,8 @@ const (
 	ImportAppFailed   = "failed"
 )
 
-// Import is the import a server is running, or ran last. It is kept in the
-// agent's memory: an agent that restarts has forgotten it.
+// Import is the import a server is running, or ran last. An agent that
+// restarts still knows it; an import it cut off by restarting has failed.
 type Import struct {
 	Status string `json:"status"`
 	// Source says where the export came from: "upload", or the export in the
@@ -967,6 +1004,9 @@ type Standby struct {
 	Records []DNSRecord `json:"records"`
 	// Pull is null when the agent does not fetch exports on a schedule.
 	Pull *StandbyPull `json:"pull"`
+	// Promotion is the promotion that runs or ran last; null when this server
+	// was never promoted.
+	Promotion *Promotion `json:"promotion"`
 }
 
 type StandbyApplication struct {
@@ -984,21 +1024,182 @@ type StandbyPull struct {
 	LastError  string     `json:"last_error"`
 }
 
-// Promotion statuses.
+// Statuses of one application of a promotion.
 const (
-	PromotedRunning = "running" // started and ready
-	PromotedStarted = "started" // started, not ready within its startup budget
-	PromotedFailed  = "failed"  // could not be started
+	PromotedPending  = "pending"  // not reached yet
+	PromotedStarting = "starting" // being started, or waited for
+	PromotedRunning  = "running"  // started and ready
+	PromotedStarted  = "started"  // started, not ready within its startup budget
+	PromotedFailed   = "failed"   // could not be started
 )
 
-// Promotion is the answer of POST /standby/promote.
+// Statuses of a promotion. One that started every application has succeeded,
+// whether or not each was ready in time; the applications say which were not.
+const (
+	PromotionRunning   = "running"
+	PromotionSucceeded = "succeeded"
+	PromotionFailed    = "failed" // at least one application could not be started
+)
+
+// CodePromotionInProgress: a promotion is running; GET /standby/promotion
+// follows it.
+const CodePromotionInProgress = "PROMOTION_IN_PROGRESS"
+
+// Promotion is the promotion a standby is running, or ran last: the answer of
+// POST /standby/promote and of GET /standby/promotion. It is done when
+// CompletedAt is set. An agent that restarts while one runs goes on with it.
 type Promotion struct {
+	// Applications are in the order they are started.
 	Applications []PromotedApplication `json:"applications"`
 	Records      []DNSRecord           `json:"records"`
+	// ID counts the promotions of this server; a client that lost the answer
+	// to its request tells by it whether the request arrived.
+	ID          int64      `json:"id"`
+	Status      string     `json:"status"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at"`
 }
 
 type PromotedApplication struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
+}
+
+// What the list of applications says about certificates and alerts.
+
+// CertificateProblem is the hostname of an application whose certificate is
+// furthest from in order, with the status and message that
+// ApplicationDetail.Certificates carries for it. Status is waiting_for_dns,
+// expiring or obtaining, the worst first; "unknown" is not a problem.
+type CertificateProblem struct {
+	Hostname string `json:"hostname"`
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+}
+
+// Access: tokens limited to applications, tokens that expire, the audit trail.
+
+const (
+	// CodeTokenExpired means the token is a real one whose time is up;
+	// details: {name, expired_at}. It is answered 401, like a wrong token, and only
+	// to a caller who presented the token itself.
+	CodeTokenExpired = "TOKEN_EXPIRED"
+	// CodeTokenLimited means the role would do, and the token is limited to
+	// applications this operation is not about; details: {applications}, and
+	// {application} when the operation was about one.
+	CodeTokenLimited = "TOKEN_LIMITED"
+)
+
+// MaxTokenApplications is how many applications a token can be limited to.
+const MaxTokenApplications = 50
+
+// Kinds of caller: a token, or a person who signed in (ActorUser, signin.go).
+const ActorToken = "token"
+
+// Actor is who did something: what kind of caller, and its name.
+type Actor struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// Outcomes of an audited action.
+const (
+	AuditOK      = "ok"      // answered 2xx; for what runs in the background: accepted
+	AuditRefused = "refused" // the caller's role or application limit did not allow it
+	AuditFailed  = "failed"  // anything else
+)
+
+// AuditEntry is one action that changed something, or tried to, as GET /audit
+// lists it. Nothing in it comes from a request body except names.
+type AuditEntry struct {
+	ID    int64     `json:"id"`
+	At    time.Time `json:"at"`
+	Actor Actor     `json:"actor"`
+	// Address is where the connection came from; behind the proxy that is
+	// the proxy, and ForwardedFor is the client it reported.
+	Address      string `json:"address"`
+	ForwardedFor string `json:"forwarded_for"`
+	Action       string `json:"action"`
+	// Application is "" for what is not about one application.
+	Application string `json:"application"`
+	// Target is what was acted on besides the application: a token, a
+	// secret, a registry, a hostname, a volume, a job, a backup's id.
+	Target  string `json:"target"`
+	Outcome string `json:"outcome"`
+	Status  int    `json:"status"` // the HTTP status the request was answered with
+	Code    string `json:"code"`   // the error code of a request that was not answered 2xx
+	Detail  string `json:"detail"`
+}
+
+// Adopting backups the database has forgotten.
+
+// BackupTriggerAdopted is the trigger of a backup that was recorded by
+// POST /server/backups/adopt from the files it left: what started it is not
+// known any more.
+const BackupTriggerAdopted = "adopted"
+
+// CodeForeignBucket means the bucket holds the backups of another
+// installation under the agent's prefix, and nothing is adopted from it; the
+// answer is 409.
+const CodeForeignBucket = "FOREIGN_BUCKET"
+
+// What a backup found in the destinations is a backup of.
+const (
+	BackupKindApplication = "application" // an application's volumes
+	BackupKindState       = "state"       // the agent's database and encryption key
+	BackupKindExport      = "export"      // a scheduled export
+)
+
+// BackupAdoptRequest is the body of POST /server/backups/adopt. Without an
+// application, everything the destinations hold is looked at: every
+// application's backups, the agent's state and the exports.
+type BackupAdoptRequest struct {
+	Application string `json:"application"`
+}
+
+// BackupAdoption is the answer: the backups that are recorded now and were
+// not before, and the ones that were found and left alone.
+type BackupAdoption struct {
+	Adopted []AdoptedBackup `json:"adopted"`
+	Skipped []SkippedBackup `json:"skipped"`
+}
+
+// AdoptedBackup is a backup the database knows from now on. Application is
+// empty unless Kind is "application".
+type AdoptedBackup struct {
+	Kind        string    `json:"kind"`
+	Application string    `json:"application"`
+	Backup      BackupRun `json:"backup"`
+}
+
+// SkippedBackup is a run whose files were found and are not a backup that
+// can be recorded; Reason says why.
+type SkippedBackup struct {
+	Kind        string `json:"kind"`
+	Application string `json:"application"`
+	ID          int64  `json:"id"`
+	Reason      string `json:"reason"`
+}
+
+// Outbound connections: what stands between the server and the internet.
+
+// NetworkStatus is how the agent and the Docker daemon reach what is outside
+// the server. It is absent from agents older than 0.6.
+type NetworkStatus struct {
+	// Proxy is the proxy the agent's own requests go through — the webhook,
+	// the bucket — as host:port; "" when it has none.
+	Proxy string `json:"proxy"`
+	// DockerProxy says whether the Docker daemon has a proxy configured.
+	// Images are pulled by the daemon: the agent's proxy does nothing for them.
+	DockerProxy bool `json:"docker_proxy"`
+	// CAFile is true when certificate authorities of the operator's own are
+	// trusted in addition to the system's (SHIPWICK_CA_FILE).
+	CAFile bool `json:"ca_file"`
+	// DNSResolvers are the name servers asked whether a hostname points at
+	// the server: addresses, or "system". Empty: the public ones.
+	DNSResolvers []string `json:"dns_resolvers"`
+	// ACMEDirectory is the certificate authority the proxy obtains
+	// certificates from; "" is Let's Encrypt.
+	ACMEDirectory string `json:"acme_directory"`
 }

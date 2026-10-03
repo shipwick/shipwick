@@ -3,7 +3,7 @@ import { summarizeAlerts, worstAlertTone } from '~/utils/alerts'
 
 const route = useRoute()
 
-// Which server this is, and whether it answers: shown at the bottom of the sidebar on every page.
+// Which server this is, and whether it answers: shown at the top of the sidebar on every page.
 const server = provideServerInfo()
 
 const alerts = computed(() => server.data.value?.alerts ?? [])
@@ -30,14 +30,14 @@ watch(() => route.fullPath, closeDrawer)
 </script>
 
 <template>
-  <div class="min-h-dvh md:pl-52">
+  <div class="min-h-dvh md:pl-56">
     <a
       href="#main"
       class="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-sm focus:border focus:border-line-strong focus:bg-bg focus:px-3 focus:py-1.5"
     >Skip to content</a>
 
     <!-- Desktop: fixed narrow sidebar -->
-    <aside class="fixed inset-y-0 left-0 z-30 hidden w-52 border-r border-line bg-subtle md:block">
+    <aside class="fixed inset-y-0 left-0 z-30 hidden w-56 border-r border-line bg-subtle md:block">
       <AppNav :server="server.data.value" :server-error="server.error.value" />
     </aside>
 
@@ -45,7 +45,7 @@ watch(() => route.fullPath, closeDrawer)
     <header class="flex h-12 items-center gap-2 border-b border-line bg-subtle px-2 md:hidden">
       <button
         type="button"
-        class="flex size-8 items-center justify-center rounded-sm text-fg-muted hover:bg-hover hover:text-fg"
+        class="flex size-9 items-center justify-center rounded-sm text-fg-muted hover:bg-hover hover:text-fg"
         aria-label="Open navigation"
         :aria-expanded="drawerOpen"
         @click="openDrawer"

@@ -8,6 +8,184 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- A `deploy` token can be limited to applications: `shipwick token create ci
+  --role deploy --app my-api --app web`. It deploys, stops, starts and runs
+  commands in those, reads everything, and is refused anything else with
+  `403 TOKEN_LIMITED` and a message that names its applications.
+- Tokens can expire: `--expires 90d`, `12h` or a date. An expired token is
+  refused with `401 TOKEN_EXPIRED` and a message that says when it expired;
+  `shipwick token ls` shows each token's expiry and marks what expires within
+  14 days, and `shipwick doctor` and `shipwick server status` say when the
+  token they run with does. The root token does not expire.
+- An audit trail: every request that changes something is recorded with the
+  token, the time, the address, what it was about and how it was answered,
+  refusals included. `shipwick audit [--app] [--actor] [--since] [-n]` and
+  `GET /audit` (admin) read it; it is kept for a year.
+- `GET /server` → `token` carries `kind`, `applications` and `expires_at`,
+  so that a client knows what its token may do before it tries.
+- **Signing in to the dashboard with the company's accounts.** With an OpenID
+  Connect provider configured on the agent — `SHIPWICK_OIDC_ISSUER`,
+  `SHIPWICK_OIDC_CLIENT_ID`, `SHIPWICK_OIDC_CLIENT_SECRET`, and optionally
+  `SHIPWICK_OIDC_SCOPES` and `SHIPWICK_OIDC_GROUPS_CLAIM` — a person signs in
+  at Google Workspace, Microsoft Entra, Okta, Keycloak or any other such
+  provider, and a table on the agent says what they may do: `shipwick access
+  grant ada@example.com --role admin`, `group:backend --role deploy --app
+  my-api`, `'*@example.com' --role read`; `shipwick access ls`, `revoke`,
+  `sessions` and `signout`. The most specific rule decides — address, then
+  groups, then domain — and nobody without one gets in. A session lasts ten
+  hours, is the same kind of caller a token is (`kind: "user"` in
+  `GET /server` and in the audit trail, which records sign-ins too), and
+  ends with its next request when the rule it rests on is revoked or
+  changed. The flow is the authorization code with PKCE; the client secret
+  stays in the agent. Shipwick keeps no passwords and no users; tokens work
+  as before. API: `GET /auth`, `POST /auth/exchange`, `DELETE /auth/session`,
+  `/access/rules`, `/access/sessions`; new codes `SIGN_IN_NOT_CONFIGURED`,
+  `SIGN_IN_FAILED`, `SIGN_IN_UNAVAILABLE`, `ACCESS_NOT_GRANTED`,
+  `SESSION_EXPIRED`, `SESSION_ENDED`.
+- The dashboard signs people in through the agent's OpenID Connect provider:
+  a button above the token field, and under *Access* the rules that give an
+  address, a group or a domain a role, and who is signed in now.
+- The dashboard's *Access* page creates tokens for some applications and
+  tokens that expire, lists both, and reads the audit trail with its filters.
+  What a token may not do on an application is said on that application's
+  page, per application; a token that expired, or a session that was ended,
+  returns to the sign-in page with the reason.
+- **A new application from the dashboard.** *New application* takes a pasted
+  `deploy.yaml`, has the agent check it, lists every field the agent refuses
+  with what it expects, and deploys it when it is in order; the same page
+  deploys a changed configuration of an existing application. For an image in
+  a registry: a document with `build:` or `static:` is told that it is
+  deployed with `shipwick deploy` from the project.
+- **Several servers in one dashboard.** `SHIPWICK_AGENTS` on the dashboard
+  lists servers as `name=URL` pairs. Each has its own sign-in; the box under
+  the logo switches between them, `/servers` lists them, and every address
+  carries its server (`?server=staging`), so a shared link opens on the
+  server it was copied from. With `SHIPWICK_AGENT_URL` alone nothing changes.
+- The dashboard follows a standby's promotion as it runs, marks applications
+  that have an alert or a certificate problem in its lists, shows a container
+  that is stopping as such from the agent's own word, names the proxy and
+  the other network settings on the server's page, and adopts backups.
+- The dashboard's server passes the browser's address to the agent as
+  `X-Forwarded-For`, so that the audit trail names who asked and not the
+  dashboard.
+- Behind a corporate proxy: the agent's requests to the webhook and the bucket
+  go through `HTTPS_PROXY` / `HTTP_PROXY` (unless `NO_PROXY` covers the host),
+  and so do Caddy's to the certificate authority and to Cloudflare. Both
+  compose files pass the three variables on, and the installer uses them and
+  keeps them in `.env`. Names on the server's own networks, health checks and
+  requests to replicas never go through the proxy. A proxy that refuses is
+  named in the log with the destination and its answer; a password in the
+  proxy's URL is never logged.
+- `SHIPWICK_CA_FILE`: certificate authorities of your own, trusted by the
+  agent and by `shipwick` in addition to the system's. The agent checks the
+  file when it starts and says what is wrong with it.
+- `SHIPWICK_ACME_DIRECTORY`: Caddy obtains certificates from an ACME server of
+  your own instead of Let's Encrypt.
+- `SHIPWICK_DNS_RESOLVERS`: who is asked whether a hostname points at the
+  server — `system`, or name servers by address.
+- `shipwick server bundle` makes one file that installs or upgrades a server
+  with no connection: the release's compose file, installer and checksums,
+  the CLI and the three images. `install.sh --bundle <file>` installs from it
+  without a download or a pull. The release publishes `install.sh`.
+- A pull that fails on the way to the registry says that images are pulled by
+  the Docker daemon, and what to set in `/etc/docker/daemon.json` or
+  `/etc/docker/certs.d`. `GET /server` reports the agent's proxy next to the
+  daemon's (`network`); `shipwick doctor` and `shipwick server status` show it.
+- **Backups larger than 5 GB to a bucket.** An archive of more than 64 MiB,
+  a scheduled export included, goes to the bucket as a multipart upload, in
+  parts read from the file on the server; the limit is now the service's own
+  for one object, 5 TiB on S3. An upload that fails or is interrupted is
+  aborted, and what an agent did not live to abort is aborted by the next
+  one before its first upload, so no parts are left to be paid for.
+- **`shipwick backups adopt [app]`** records the backups that the directory
+  and the bucket hold and the database does not know: after the agent's
+  state was restored from a backup of it, the backups taken since. They are
+  listed with the trigger `adopted` and can be verified, restored, downloaded
+  and pruned like any other. `POST /server/backups/adopt`, `admin`.
+- **`backups.before_timeout`** in `deploy.yaml`: how long `backups.before`
+  may run, 1s–24h, one hour by default as before. A backup whose command
+  runs past it fails with an error that names the key.
+- A promotion can be followed. `shipwick standby promote` starts it and
+  prints each application as it comes up; the promotion runs on the server
+  and has a record (`GET /standby/promotion`, and `promotion` in
+  `GET /standby`). A lost connection no longer loses the answer, an agent
+  that is restarted in the middle goes on with the promotion where it was,
+  and the command run again follows the one that is under way.
+  `POST /standby/promote?wait=false` answers `202` at once; without the
+  parameter the request is held and answered as before, which is what a
+  `shipwick` before 0.6 expects. A second promotion, or an import, while one
+  runs is refused with `409 PROMOTION_IN_PROGRESS`.
+- A standby remembers what it imported across restarts of its agent: the
+  newest export is no longer imported once more after every restart, and
+  `shipwick import --status` and `shipwick standby` answer as before it. An
+  import the agent was restarted under is shown as failed.
+- An import validates the configuration of every application by all the
+  rules a `deploy.yaml` is held to. Health paths, the `proxy` block,
+  `publish` and logging options were taken as the export had them.
+- **An init process, on request.** `init: true` in `deploy.yaml` runs Docker's
+  init process as the first process of every container of the application —
+  replicas, the pre-deploy hook, jobs, one-off commands — so that a process
+  without a handler for `SIGTERM`, such as Node started as `node server.js`,
+  ends when it is asked to instead of being killed when its grace period is
+  over: the same ten-line Node server stopped in 0.3 seconds with it and in
+  10.4 without. Not the default, and not for images that bring their own
+  init. Refused for a static application. `shipwick init` writes it for a Node
+  project whose Dockerfile it writes, and the event about a container that had
+  to be killed names it — an event `shipwick stop` now writes too.
+- A container that is being stopped after a deployment replaced it carries
+  `stopping: true` in `GET /applications/:name`, and `shipwick status` lists
+  it as `stopping`, below the replicas.
+- `GET /applications` says of each application whether a certificate is not
+  in order (`certificate_problem`: the hostname, its status and message) and
+  how many alerts about it are active (`alert_count`, `alert_severity`), and
+  `shipwick ps` ends the line of such an application with a few words:
+  `certificate waiting for DNS, 2 alerts`.
+
+### Changed
+
+- Dashboard: an application's page is tabs with addresses of their own —
+  Overview, Metrics, Logs, Deployments, Jobs, Backups, Configuration — instead
+  of one long page. The overview tab says first what is wrong and where to
+  look: a replica that keeps crashing, a deployment that failed while the old
+  version still runs, a certificate that is waiting for DNS.
+- Dashboard: the server's page is tabs as well (Status, Backups, Export and
+  standby, Encryption key), and the overview opens with the answer to "is
+  everything fine?" and, on an empty server, the three commands that deploy
+  the first application.
+- Dashboard: the navigation is grouped into applications, server and
+  settings. Tokens are under *Access* (`/settings/access`); secrets and
+  registries moved to `/settings/secrets` and `/settings/registries`. The old
+  addresses (`/tokens`, `/secrets`, `/registries`) redirect.
+- Dashboard: a read token is told on the page that it cannot change anything,
+  traffic numbers are named in words, and a deployment's timeline names its
+  phases the way the rest of the dashboard does.
+
+### Fixed
+
+- A hostname under `redirects` of an application with a `path` redirects to
+  the domain and that path — `https://example.com/api/users` for a request
+  for `/users` — instead of to the same path on the domain, which may belong
+  to another application.
+- The agent finds the proxy's container in the compose project it runs in
+  itself, whatever that project is called. An installation started under
+  another project name (`docker compose -p`, `COMPOSE_PROJECT_NAME`) had no
+  traffic figures, and its static applications failed to deploy.
+- On a server whose firewall drops DNS to the public resolvers, no hostname
+  was ever routed: the first resolver used up the whole lookup and the
+  server's own was never asked. Each now has a share of the time, and
+  resolvers that do not answer are left alone for five minutes.
+- With `HTTP_PROXY` in Caddy's environment, requests to applications went to
+  that proxy. They never do now.
+- An application that was being imported stopped when the agent restarted
+  is no longer started by the deployment that resumes: an application that
+  was stopped where it came from stays stopped, and one on a standby is
+  served after its promotion.
+- The volumes a backup verification restores into are removed after an agent
+  restart interrupted it. They were swept before the container that mounted
+  them was gone, and stayed.
+
 ## [0.5.1] - 2026-10-03
 
 ### Changed

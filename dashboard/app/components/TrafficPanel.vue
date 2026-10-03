@@ -29,7 +29,7 @@ const requestSeries = computed<TrafficSeries[]>(() => {
   if (!c || !t) return []
   return [
     { key: 'requests', label: 'Requests', color: 'var(--series-1)', segments: [c.requests], summary: formatCount(t.requests) },
-    { key: '5xx', label: '5xx', color: 'var(--danger-dot)', segments: [c.errors], summary: formatCount(t.status_5xx) },
+    { key: '5xx', label: 'Server errors', color: 'var(--danger-dot)', segments: [c.errors], summary: formatCount(t.status_5xx) },
   ]
 })
 
@@ -72,7 +72,7 @@ watch(() => props.application, () => {
       @retry="traffic.refresh()"
     />
     <div v-else-if="chart && totals" class="divide-y divide-line">
-      <dl class="grid grid-cols-2 gap-px bg-line sm:grid-cols-3 lg:grid-cols-6">
+      <dl class="facts grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
         <div class="bg-bg px-4 py-2.5">
           <dt class="label">
             Requests
@@ -82,8 +82,8 @@ watch(() => props.application, () => {
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label">
-            5xx
+          <dt class="label" title="Answers with a 5xx status: the application or the proxy failed">
+            Server errors
           </dt>
           <dd class="mono mt-0.5" :class="totals.status_5xx > 0 ? 'text-danger' : ''" :title="`${formatCount(totals.status_5xx)} of ${formatCount(totals.requests)} requests`">
             {{ errorShare(totals) }}
@@ -91,24 +91,24 @@ watch(() => props.application, () => {
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label">
-            4xx
+          <dt class="label" title="Answers with a 4xx status: the request was refused, such as 404 or 401">
+            Refused (4xx)
           </dt>
           <dd class="mono mt-0.5">
             {{ formatCount(totals.status_4xx) }}
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label">
-            p50 · p95
+          <dt class="label" title="Half of the requests were answered within the first time (p50), 95 in 100 within the second (p95)">
+            Response time
           </dt>
           <dd class="mono mt-0.5">
-            {{ any ? `${formatLatency(totals.p50_ms)} · ${formatLatency(totals.p95_ms)}` : '—' }}
+            {{ any ? `${formatLatency(totals.p50_ms)} typical · ${formatLatency(totals.p95_ms)} p95` : '—' }}
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label">
-            p99
+          <dt class="label" title="99 in 100 requests were answered within this time (p99)">
+            Slowest 1%
           </dt>
           <dd class="mono mt-0.5">
             {{ any ? formatLatency(totals.p99_ms) : '—' }}
@@ -116,7 +116,7 @@ watch(() => props.application, () => {
         </div>
         <div class="bg-bg px-4 py-2.5">
           <dt class="label">
-            Sent
+            Data sent
           </dt>
           <dd class="mono mt-0.5" title="Response bodies as sent, after compression">
             {{ formatBytes(totals.bytes) }}
@@ -144,7 +144,7 @@ watch(() => props.application, () => {
           :format="v => formatCount(v)"
         />
         <TrafficChart
-          label="Duration"
+          label="Response time"
           :series="latencySeries"
           :start="chart.start"
           :end="chart.end"

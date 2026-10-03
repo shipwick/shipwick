@@ -89,7 +89,10 @@ function closeRun() {
 
 // --- presentation -------------------------------------------------------------------
 
-const runTitleFor = (job: Job) => (!props.mayDeploy ? roleHint('deploy') : props.busy ? 'A deployment is in progress' : job.last_run?.status === 'running' ? 'A run of this job is still going' : undefined)
+const { deployHint } = useApplication()
+const blocked = computed(() => deployHint.value ?? roleHint('deploy'))
+
+const runTitleFor = (job: Job) => (!props.mayDeploy ? blocked.value : props.busy ? 'A deployment is in progress' : job.last_run?.status === 'running' ? 'A run of this job is still going' : undefined)
 
 function runDuration(r: Run): string {
   if (r.finished_at) return formatDuration(durationBetween(r.started_at, r.finished_at))
@@ -107,7 +110,7 @@ function openRow(r: Run, event: MouseEvent) {
 <template>
   <UiPanel title="Jobs" :meta="props.spec.jobs?.length ?? 0">
     <template #actions>
-      <UiButton size="sm" :disabled="!props.mayDeploy || props.busy" :title="!props.mayDeploy ? roleHint('deploy') : props.busy ? 'A deployment is in progress' : undefined" @click="commandOpen = true">
+      <UiButton size="sm" :disabled="!props.mayDeploy || props.busy" :title="!props.mayDeploy ? blocked : props.busy ? 'A deployment is in progress' : undefined" @click="commandOpen = true">
         <UiIcon name="play" :size="12" />
         Run command
       </UiButton>

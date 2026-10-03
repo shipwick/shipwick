@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -51,7 +50,10 @@ type ImportOptions struct {
 
 // transfer is what the engine remembers about exports and imports between
 // requests: the import that runs or ran last, whether an export is being
-// written, and how far the two schedules have looked.
+// written, how far the two schedules have looked, and the promotion that
+// runs or ran last. The last import, the last pull and the promotion are
+// written to the store as they change and read back by the agent that starts
+// next (see recoverTransfers).
 type transfer struct {
 	mu        sync.Mutex
 	importing bool
@@ -62,9 +64,26 @@ type transfer struct {
 	exportTick  time.Time
 	standbyTick time.Time
 	pull        api.StandbyPull
+
+	// promotion is nil until this server was promoted; promoted is closed
+	// when the one that runs has ended, or the agent stops under it.
+	promoting bool
+	promotion *promotionRecord
+	promoted  chan struct{}
 }
 
 func newTransfer() *transfer { return &transfer{} }
+
+// keep writes one of the records to the store. The caller holds t.mu, which
+// keeps the writes in the order of the changes. A record that could not be
+// written is still true in memory; only a restart would miss it.
+func (e *Engine) keep(name string, v any) {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := e.store.SetTransferState(ctx, name, v, time.Now()); err != nil {
+		e.log.Warn("could not record what a restart of the agent should remember", "record", name, "error", err)
+	}
+}
 
 // importRun is the import in progress. Its record is copied out under the
 // transfer's mutex, so that a request sees a consistent one.
@@ -81,6 +100,7 @@ func (im *importRun) update(fn func(rec *api.Import)) {
 	defer t.mu.Unlock()
 	fn(&im.rec)
 	t.last = copyImport(im.rec)
+	im.e.keep(store.TransferImport, t.last)
 }
 
 func copyImport(rec api.Import) *api.Import {
@@ -110,7 +130,7 @@ func (im *importRun) application(name string, fn func(a *api.ImportedApplication
 }
 
 // ImportStatus returns the import that is running, or ran last; ok is false
-// when this agent has run none since it started.
+// when this server has run none.
 func (e *Engine) ImportStatus() (api.Import, bool) {
 	t := e.transfer
 	t.mu.Lock()
@@ -129,6 +149,10 @@ func (e *Engine) beginImport(opts ImportOptions) (*importRun, error) {
 	if t.importing {
 		return nil, ErrImportInProgress
 	}
+	// What a promotion is about to start is not replaced under it.
+	if t.promoting {
+		return nil, ErrPromotionInProgress
+	}
 	if !e.beginOp() {
 		return nil, ErrShuttingDown
 	}
@@ -139,6 +163,7 @@ func (e *Engine) beginImport(opts ImportOptions) (*importRun, error) {
 		StartedAt: time.Now().UTC(), Applications: []api.ImportedApplication{}, Warnings: []string{},
 	}}
 	t.last = copyImport(im.rec)
+	e.keep(store.TransferImport, t.last)
 	return im, nil
 }
 
@@ -183,6 +208,7 @@ func (im *importRun) run(ctx context.Context, archive io.Reader) (api.Import, er
 		im.rec.Status, im.rec.Error = api.ImportFailed, err.Error()
 	}
 	t.last = copyImport(im.rec)
+	e.keep(store.TransferImport, t.last)
 	t.importing = false
 	final := *copyImport(im.rec)
 	t.mu.Unlock()
@@ -383,75 +409,41 @@ func printable(s string) string {
 // checkImported validates again what an export says about an application:
 // the archive was written by an agent, but it arrives over the API like a
 // deploy.yaml, and the same names end up in containers, URLs and the proxy's
-// configuration. pkg/spec validates documents, not parsed configurations, so
-// this applies its validators to the fields that travel that far.
-func checkImported(name string, entry exportApp) error {
-	a := entry.Spec
-	if entry.Name != name || a.Name != name {
-		return errors.New("its configuration is filed under another application's name")
+// configuration. The configuration is held to the rules of a deploy.yaml
+// (spec.Validate) and returned as those rules write it; what the entry says
+// besides must agree with it.
+func checkImported(name string, entry exportApp) (spec.App, error) {
+	if entry.Name != name || entry.Spec.Name != name {
+		return spec.App{}, errors.New("its configuration is filed under another application's name")
 	}
-	if err := spec.ValidateName(name); err != nil {
-		return err
-	}
-	if a.Static == nil {
-		if err := spec.ValidateImage(a.Image); err != nil {
-			return fmt.Errorf("image: %w", err)
+	a, err := spec.Validate(entry.Spec)
+	var invalid *spec.ValidationError
+	if errors.As(err, &invalid) {
+		problems := make([]string, 0, len(invalid.Fields))
+		for _, f := range invalid.Fields {
+			problems = append(problems, printable(f.Field)+": "+f.Message)
 		}
+		return spec.App{}, errors.New(strings.Join(problems, "; "))
+	} else if err != nil {
+		return spec.App{}, err
 	}
 	if entry.Static != (a.Static != nil) {
-		return errors.New("its configuration and its files do not agree on whether it is a static application")
+		return spec.App{}, errors.New("its configuration and its files do not agree on whether it is a static application")
 	}
-	if a.Domain != "" {
-		if err := spec.ValidateHostname(a.Domain); err != nil {
-			return fmt.Errorf("domain: %w", err)
-		}
-	}
-	for _, h := range append(append([]string{}, a.Aliases...), a.Redirects...) {
-		if err := spec.ValidateHostname(h); err != nil {
-			return fmt.Errorf("hostname %s: %w", printable(h), err)
-		}
-	}
-	if a.Replicas < 1 || a.Port < 0 || a.Port > 65535 {
-		return errors.New("replicas or port are out of range")
-	}
-	if a.Deploy.Strategy != spec.StrategyRolling && a.Deploy.Strategy != spec.StrategyRecreate {
-		return errors.New("deploy.strategy is not one this agent knows")
-	}
+	// A volume's name is a member of the archive as well.
 	mounted := map[string]bool{}
 	for _, v := range a.Volumes {
-		// The name becomes a Docker volume's name and a member of the archive.
-		if spec.ValidateName(v.Name) != nil || !path.IsAbs(v.Path) || path.Clean(v.Path) != v.Path || v.Path == "/" {
-			return fmt.Errorf("volume %s is not one this agent accepts", printable(v.Name))
-		}
 		mounted[v.Name] = true
 	}
-	if len(a.Volumes) > 0 && (a.Replicas != 1 || a.Deploy.Strategy != spec.StrategyRecreate) {
-		return errors.New("an application with volumes has one replica and the recreate strategy")
-	}
 	if len(entry.Volumes) != len(a.Volumes) {
-		return errors.New("its configuration and its archives do not name the same volumes")
+		return spec.App{}, errors.New("its configuration and its archives do not name the same volumes")
 	}
 	for _, v := range entry.Volumes {
 		if !mounted[v] {
-			return errors.New("its configuration and its archives do not name the same volumes")
+			return spec.App{}, errors.New("its configuration and its archives do not name the same volumes")
 		}
 	}
-	for _, argv := range [][]string{a.Entrypoint, a.Command} {
-		if len(argv) > 0 {
-			if err := spec.ValidateCommand(argv); err != nil {
-				return err
-			}
-		}
-	}
-	for _, j := range a.Jobs {
-		if err := spec.ValidateJobName(j.Name); err != nil {
-			return err
-		}
-		if err := spec.ValidateCommand(j.Command); err != nil {
-			return fmt.Errorf("job %s: %w", j.Name, err)
-		}
-	}
-	return nil
+	return a, nil
 }
 
 var (
@@ -464,10 +456,10 @@ var (
 // cannot be read on.
 func (im *importRun) importApplication(ctx context.Context, xr *exportReader, name string, entry exportApp) (status, message string, fatal error) {
 	e := im.e
-	if err := checkImported(name, entry); err != nil {
+	app, err := checkImported(name, entry)
+	if err != nil {
 		return api.ImportAppFailed, "the export's entry for it is refused: " + err.Error(), nil
 	}
-	app := entry.Spec
 	dormant := im.opts.Stopped || entry.Stopped
 
 	// Asked before anything of it is read, so that what is skipped costs

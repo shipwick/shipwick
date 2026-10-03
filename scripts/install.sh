@@ -3,6 +3,7 @@
 #
 #   curl -fsSL https://get.shipwick.com | sh                 # server: agent + Caddy + dashboard, and the CLI
 #   curl -fsSL https://get.shipwick.com | sh -s -- --cli     # the CLI only (your laptop, CI)
+#   sh install.sh --bundle shipwick-v0.6.0-linux-amd64.tar.gz  # a server with no way out: from files
 #
 # Safe to run again: that is how you upgrade. An existing .env — and with it
 # your API token — is never touched.
@@ -26,6 +27,23 @@ if [ -z "$COMPOSE_SOURCE" ] && [ -f "$(dirname "$0")/../configs/compose.producti
 fi
 
 COMPOSE_FILE="compose.yml"
+
+# A bundle made by `shipwick server bundle` and copied here: a directory, or
+# its .tar.gz. With one, nothing is downloaded and nothing is pulled. Run from
+# inside an unpacked bundle, the files next door are the bundle.
+BUNDLE="${SHIPWICK_BUNDLE:-}"
+if [ -z "$BUNDLE" ] && [ -f "$(dirname "$0")/images.tar" ] && [ -f "$(dirname "$0")/compose.production.yml" ]; then
+    BUNDLE="$(dirname "$0")"
+fi
+
+# Behind a proxy. curl reads HTTPS_PROXY in either case, wget in lower case
+# only; .env carries one spelling, the one the compose file passes on.
+HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
+HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
+NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
+if [ -n "$HTTPS_PROXY" ]; then https_proxy="$HTTPS_PROXY"; export HTTPS_PROXY https_proxy; fi
+if [ -n "$HTTP_PROXY" ]; then http_proxy="$HTTP_PROXY"; export HTTP_PROXY http_proxy; fi
+if [ -n "$NO_PROXY" ]; then no_proxy="$NO_PROXY"; export NO_PROXY no_proxy; fi
 
 # --- output -----------------------------------------------------------------
 
@@ -76,7 +94,16 @@ release_url() { # release_url ASSET
 # it unless it matches the release's published checksum. Returns 1 only when
 # the asset cannot be downloaded at all; anything suspicious is fatal.
 fetch_release_asset() {
-    download "$(release_url "$1")" "$2" 2>/dev/null || return 1
+    if [ -n "$BUNDLE" ]; then
+        # The bundle carries the release's files and its checksums.txt; a file
+        # damaged on the way here is refused like a bad download.
+        [ -f "$BUNDLE/$1" ] || return 1
+        cp "$BUNDLE/$1" "$2"
+        [ -f "$WORK_DIR/checksums.txt" ] || cp "$BUNDLE/checksums.txt" "$WORK_DIR/checksums.txt" 2>/dev/null \
+            || { rm -f "$2"; die "The bundle has no checksums.txt; refusing to install unverified files."; }
+    else
+        download "$(release_url "$1")" "$2" 2>/dev/null || return 1
+    fi
 
     if [ ! -f "$WORK_DIR/checksums.txt" ]; then
         download "$(release_url checksums.txt)" "$WORK_DIR/checksums.txt" \
@@ -84,13 +111,64 @@ fetch_release_asset() {
     fi
     expected="$(awk -v f="$1" '$2 == f || $2 == "*"f { print $1 }' "$WORK_DIR/checksums.txt")"
     [ -n "$expected" ] || { rm -f "$2"; die "checksums.txt has no entry for $1."; }
-    if have sha256sum; then
-        actual="$(sha256sum "$2" | awk '{print $1}')"
-    else
-        actual="$(shasum -a 256 "$2" | awk '{print $1}')"
-    fi
+    actual="$(sha256_of "$2")"
     [ "$expected" = "$actual" ] \
         || { rm -f "$2"; die "Checksum mismatch for $1 (expected $expected, got $actual). Nothing was installed."; }
+}
+
+sha256_of() {
+    if have sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# --- a bundle ---------------------------------------------------------------
+
+# open_bundle makes BUNDLE a directory that holds the bundle's files, and
+# refuses one made for another kind of machine before anything is changed.
+open_bundle() {
+    [ -e "$BUNDLE" ] || die "$BUNDLE does not exist. Give the bundle made by:  shipwick server bundle"
+    if [ -f "$BUNDLE" ]; then
+        have tar || die "tar is not installed, and $BUNDLE is an archive. Unpack it elsewhere and copy the directory instead."
+        mkdir "$WORK_DIR/bundle"
+        tar -xzf "$BUNDLE" -C "$WORK_DIR/bundle" \
+            || die "$BUNDLE could not be unpacked: it is not a .tar.gz, or the copy is incomplete (it needs as much free space in $(dirname "$WORK_DIR") as it is large)."
+        BUNDLE="$WORK_DIR/bundle"
+        # The archive holds one directory, named after the release.
+        for dir in "$BUNDLE"/*/; do
+            if [ -f "${dir}compose.production.yml" ]; then BUNDLE="${dir%/}"; fi
+        done
+    fi
+    # The installer changes directory before it is done with the bundle.
+    BUNDLE="$(cd "$BUNDLE" && pwd)"
+    for file in compose.production.yml checksums.txt images.tar images.tar.sha256; do
+        [ -f "$BUNDLE/$file" ] || die "$BUNDLE is not a Shipwick bundle: it has no $file. Make one with:  shipwick server bundle"
+    done
+    detect_platform
+    if [ ! -f "$BUNDLE/shipwick_${PLATFORM}" ]; then
+        made_for="another platform"
+        for file in "$BUNDLE"/shipwick_*; do
+            if [ -f "$file" ]; then made_for="${file##*/shipwick_}"; fi
+        done
+        die "This bundle was made for $made_for, and this server is $PLATFORM. Make one with:  shipwick server bundle --arch ${PLATFORM#*_}"
+    fi
+    # The archive of images is not a file of the release, so the bundle brings
+    # its checksum with it: what is checked is that the copy arrived whole.
+    expected="$(awk '{ print $1; exit }' "$BUNDLE/images.tar.sha256")"
+    actual="$(sha256_of "$BUNDLE/images.tar")"
+    [ -n "$expected" ] && [ "$expected" = "$actual" ] \
+        || die "images.tar in the bundle is damaged (expected $expected, got $actual): copy the bundle again. Nothing was changed."
+    step "The bundle is complete ($BUNDLE)"
+}
+
+# load_bundle_images hands the images to Docker, before the compose file that
+# names them replaces the one in use.
+load_bundle_images() {
+    docker load --quiet --input "$BUNDLE/images.tar" >/dev/null \
+        || die "Docker could not load images.tar from the bundle. Nothing was changed."
+    step "Loaded the images from the bundle"
 }
 
 detect_platform() {
@@ -167,6 +245,11 @@ check_server_requirements() {
     [ "$(uname -s)" = "Linux" ] || die "The Shipwick server runs on Linux. To install only the CLI here, use --cli."
     [ "$(id -u)" -eq 0 ] || die "Installing the server needs root (it writes to $INSTALL_DIR and talks to Docker). Re-run with sudo."
 
+    if ! have docker && [ -n "$BUNDLE" ]; then
+        die "Docker is not installed, and the bundle does not bring it. On a server with no way out, install Docker Engine
+  and the Compose plugin from your distribution's packages or from Docker's static binaries, copied here like the
+  bundle (docs/handbook.md, \"A server with no way out\"), then run this installer again."
+    fi
     if ! have docker; then
         die "Docker is not installed. Shipwick does not install it for you — that is your server's decision to make.
   Install it with:   curl -fsSL https://get.docker.com | sh
@@ -252,7 +335,7 @@ SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
       # Settings given for this run have to outlive it: the next run, an
       # upgrade, must not quietly move the proxy back to the default ports.
-      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE; do
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_AGENTS; do
           eval "value=\${$name:-}"
           [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
       done
@@ -266,14 +349,17 @@ install_server() {
 
     ( umask 077; mkdir -p "$INSTALL_DIR" )
     chmod 0700 "$INSTALL_DIR"
-    if [ -n "$COMPOSE_SOURCE" ]; then
+    [ -z "$BUNDLE" ] || load_bundle_images
+    if [ -n "$COMPOSE_SOURCE" ] && [ -z "$BUNDLE" ]; then
         cp "$COMPOSE_SOURCE" "$INSTALL_DIR/$COMPOSE_FILE"
     else
         # The release's compose file pins the images to the release's version.
         # Verified in the work directory first: a bad download must not replace
         # the compose file of a running installation.
         fetch_release_asset compose.production.yml "$WORK_DIR/compose.yml" \
-            || die "Could not download $(release_url compose.production.yml)"
+            || die "Could not download $(release_url compose.production.yml)
+  Behind a proxy, set HTTPS_PROXY for this installer (with sudo:  sudo -E sh). On a server with no way out,
+  install from a bundle made elsewhere with:  shipwick server bundle"
         mv "$WORK_DIR/compose.yml" "$INSTALL_DIR/$COMPOSE_FILE"
     fi
     step "Installed $INSTALL_DIR/$COMPOSE_FILE"
@@ -281,7 +367,17 @@ install_server() {
     write_env
     cd "$INSTALL_DIR"
 
-    if ! docker compose pull --quiet 2>/dev/null; then
+    if [ -n "$BUNDLE" ]; then
+        # Nothing is pulled: what the compose file names must be what the
+        # bundle brought, or what .env names instead and the server has.
+        missing=""
+        for image in $(docker compose config --images); do
+            docker image inspect "$image" >/dev/null 2>&1 || missing="$missing $image"
+        done
+        [ -z "$missing" ] || die "Not on this server and not in the bundle:$missing
+  If $INSTALL_DIR/.env names images of your own (SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE,
+  SHIPWICK_CADDY_IMAGE), load them with docker load, or remove those lines."
+    elif ! docker compose pull --quiet 2>/dev/null; then
         # Not fatal if every image the compose file names is here anyway: built
         # locally, or pulled earlier.
         missing=""
@@ -292,9 +388,10 @@ install_server() {
         done
         if [ -n "$missing" ]; then
             die "Could not pull:$missing
-  Check this server's connection to the registry and run the installer again.
+  Check this server's connection to the registry and run the installer again.$(daemon_proxy_advice)
   To run images you built yourself, set SHIPWICK_AGENT_IMAGE,
-  SHIPWICK_DASHBOARD_IMAGE and SHIPWICK_CADDY_IMAGE in $INSTALL_DIR/.env."
+  SHIPWICK_DASHBOARD_IMAGE and SHIPWICK_CADDY_IMAGE in $INSTALL_DIR/.env.
+  On a server with no way out, install from a bundle made elsewhere with:  shipwick server bundle"
         fi
         warn "Could not pull images; using the ones already on this server."
     fi
@@ -319,6 +416,18 @@ install_server() {
     install_cli || true
     sign_in_cli
     print_summary
+}
+
+# daemon_proxy_advice is for a pull that failed while this installer has a
+# proxy and the Docker daemon has none: images are pulled by the daemon, and
+# what the shell is told about proxies does not reach it.
+daemon_proxy_advice() {
+    [ -n "$HTTPS_PROXY$HTTP_PROXY" ] || return 0
+    [ -z "$(docker info --format '{{.HTTPSProxy}}{{.HTTPProxy}}' 2>/dev/null)" ] || return 0
+    printf '\n%s\n%s\n%s' \
+        "  This installer goes through a proxy, and the Docker daemon has none configured: images are" \
+        "  pulled by the daemon. Add  \"proxies\": {\"http-proxy\": \"...\", \"https-proxy\": \"...\"}  to" \
+        "  /etc/docker/daemon.json, restart Docker, and run the installer again."
 }
 
 # shipwick_here ARGS — the installed CLI, deaf to variables that point it at
@@ -419,7 +528,13 @@ print_summary() {
     fi
     [ -z "$dashboard_domain" ] || info "Dashboard:                https://$dashboard_domain"
     info "Open ports 80 and 443 (and 443/udp) — and nothing else — in your firewall."
-    if grep -q '^SHIPWICK_CLOUDFLARE_API_TOKEN=.' "$INSTALL_DIR/.env"; then
+    if grep -q '^SHIPWICK_ACME_DIRECTORY=.' "$INSTALL_DIR/.env"; then
+        info "Certificates are obtained from the ACME server in SHIPWICK_ACME_DIRECTORY."
+    elif [ -n "$BUNDLE" ]; then
+        info "Certificates: a server with no way out cannot reach Let's Encrypt. Supply them with"
+        info "  shipwick cert set <hostname> --cert <file> --key <file>"
+        info "or set SHIPWICK_ACME_DIRECTORY in $INSTALL_DIR/.env to an ACME server of your own."
+    elif grep -q '^SHIPWICK_CLOUDFLARE_API_TOKEN=.' "$INSTALL_DIR/.env"; then
         info "Certificates are obtained through Cloudflare DNS: hostnames may be proxied by"
         info "Cloudflare. Set the zone's SSL/TLS mode to Full (strict)."
     else
@@ -427,7 +542,11 @@ print_summary() {
         info "Cloudflare's proxy on, add SHIPWICK_CLOUDFLARE_API_TOKEN to $INSTALL_DIR/.env"
         info "and run:   cd $INSTALL_DIR && docker compose up -d"
     fi
-    info "Upgrade later by running this installer again."
+    if [ -n "$BUNDLE" ]; then
+        info "Upgrade later by making a bundle of the newer release and running its installer the same way."
+    else
+        info "Upgrade later by running this installer again."
+    fi
     printf '\n'
 }
 
@@ -440,6 +559,10 @@ Shipwick installer
 
   install.sh          install or upgrade the server (agent, Caddy, dashboard) and the CLI
   install.sh --cli    install the CLI only
+  install.sh --bundle <directory or .tar.gz>
+                      install or upgrade from files made elsewhere with "shipwick server bundle":
+                      nothing is downloaded and nothing is pulled. Run from inside an unpacked
+                      bundle, the option is not needed.
 
 With a hostname for the API, the CLI on the server is signed in to it for the
 user who runs the installer: the URL and the token are saved as a context, so
@@ -464,6 +587,25 @@ Environment:
   SHIPWICK_STANDBY_SCHEDULE   makes this server a standby that imports those exports (optional)
   SHIPWICK_ALERT_MEMORY_PERCENT, SHIPWICK_ALERT_DISK_PERCENT
                               when a replica's memory and the disk raise an alert (90, 85)
+  HTTPS_PROXY, HTTP_PROXY, NO_PROXY
+                              a proxy between the server and the internet: used for the downloads
+                              and kept for the agent and Caddy. The Docker daemon, which pulls
+                              the images, has its own setting in /etc/docker/daemon.json
+  SHIPWICK_CA_FILE            a PEM file of certificate authorities the agent trusts as well, as
+                              the agent's container sees it; mount it in compose.override.yml
+  SHIPWICK_DNS_RESOLVERS      who is asked whether a hostname points here: "system", or name
+                              servers by address (default: public ones)
+  SHIPWICK_ACME_DIRECTORY     an ACME server of your own to obtain certificates from
+  SHIPWICK_AGENTS             several servers in this server's dashboard: name=URL pairs, such as
+                              production=http://agent:9000,staging=https://agent.staging.example.com;
+                              each has its own sign-in (optional)
+  SHIPWICK_BUNDLE             the same as --bundle
+  SHIPWICK_OIDC_ISSUER, SHIPWICK_OIDC_CLIENT_ID, SHIPWICK_OIDC_CLIENT_SECRET
+                              an OpenID Connect provider people sign in to the dashboard
+                              with; needs SHIPWICK_DASHBOARD_DOMAIN (optional)
+  SHIPWICK_OIDC_SCOPES, SHIPWICK_OIDC_GROUPS_CLAIM
+                              what is asked of the provider, and the claim that lists
+                              groups ("openid email profile", groups)
   SHIPWICK_HTTP_PORT, SHIPWICK_HTTPS_PORT
                               the proxy's ports, when something else owns 80 and 443
   SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE, SHIPWICK_CADDY_IMAGE
@@ -475,19 +617,29 @@ EOF
 
 main() {
     mode="server"
-    for arg in "$@"; do
-        case "$arg" in
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
             --cli) mode="cli" ;;
+            --bundle)
+                [ "$#" -ge 2 ] || die "--bundle needs the bundle's directory or .tar.gz"
+                BUNDLE="$2"; shift ;;
+            --bundle=*) BUNDLE="${1#--bundle=}" ;;
             -h|--help) usage; exit 0 ;;
-            *) die "Unknown option: $arg (try --help)" ;;
+            *) die "Unknown option: $1 (try --help)" ;;
         esac
+        shift
     done
 
     # Downloads land here and move into place only once verified.
     WORK_DIR="$(mktemp -d)"
     trap 'rm -rf "$WORK_DIR"' EXIT
 
-    printf '%s\n\n' "${BOLD}Shipwick installer${RESET} ${DIM}($REPO@$VERSION)${RESET}"
+    if [ -n "$BUNDLE" ]; then
+        printf '%s\n\n' "${BOLD}Shipwick installer${RESET} ${DIM}(from a bundle)${RESET}"
+        open_bundle
+    else
+        printf '%s\n\n' "${BOLD}Shipwick installer${RESET} ${DIM}($REPO@$VERSION)${RESET}"
+    fi
     if [ "$mode" = "cli" ]; then
         install_cli || exit 1
         printf '\n'; info "Next:   shipwick login"

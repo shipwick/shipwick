@@ -311,6 +311,79 @@ var migrations = []string{
 	CREATE TABLE backup_installation (
 		id TEXT NOT NULL
 	);`,
+	// 14: what the agent must remember across its own restarts about imports
+	// and a promotion: the import that ran last, the export a standby imported
+	// last, the promotion that runs or ran last. One row each, as JSON: they
+	// are read whole and by nothing but the agent (see standby.go). And the
+	// deployments that are to exist without being started, which an agent
+	// that resumes one has to know.
+	`CREATE TABLE transfer_state (
+		name       TEXT PRIMARY KEY,
+		value      TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	ALTER TABLE deployments ADD COLUMN dormant INTEGER NOT NULL DEFAULT 0;`,
+	// 15: a token may be limited to applications (a JSON list of names; '[]':
+	// not limited) and may expire. Tokens from before have neither.
+	`ALTER TABLE tokens ADD COLUMN applications TEXT NOT NULL DEFAULT '[]';
+	 ALTER TABLE tokens ADD COLUMN expires_at TEXT;`,
+	// 16: the audit trail: one row per request that changes something, by
+	// whom, from where, on what and how it was answered. The application
+	// and the actor are kept by name, not by reference: the trail outlives
+	// both. Pruned by age and by count (audit.go).
+	`CREATE TABLE audit_log (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		at            TEXT NOT NULL,
+		actor_kind    TEXT NOT NULL,
+		actor         TEXT NOT NULL,
+		address       TEXT NOT NULL,
+		forwarded_for TEXT NOT NULL DEFAULT '',
+		action        TEXT NOT NULL,
+		application   TEXT NOT NULL DEFAULT '',
+		target        TEXT NOT NULL DEFAULT '',
+		outcome       TEXT NOT NULL,
+		status        INTEGER NOT NULL,
+		code          TEXT NOT NULL DEFAULT '',
+		detail        TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX audit_log_application ON audit_log(application, id);
+	CREATE INDEX audit_log_actor ON audit_log(actor, id);
+	CREATE INDEX audit_log_at ON audit_log(at);`,
+	// 17: who may sign in, and as what: a role for an e-mail address, a
+	// group of the provider's or a whole domain. applications is a JSON list
+	// as on tokens. created_by is a name, not a reference: the rule outlives
+	// the token or the person that made it.
+	`CREATE TABLE access_rules (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		kind         TEXT NOT NULL,
+		subject      TEXT NOT NULL,
+		role         TEXT NOT NULL,
+		applications TEXT NOT NULL DEFAULT '[]',
+		created_at   TEXT NOT NULL,
+		created_by   TEXT NOT NULL DEFAULT '',
+		UNIQUE (kind, subject)
+	);`,
+	// 18: the sessions of people who signed in. hash is the SHA-256 of the
+	// session's value in hex, as tokens keep theirs; the value is not stored.
+	// groups, role and applications are what the provider said and what the
+	// rules gave at the sign-in: each request compares them with what the
+	// rules give now. A session that was ended keeps its row until it would
+	// have expired, so that its holder is told why.
+	`CREATE TABLE sessions (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		hash         TEXT NOT NULL UNIQUE,
+		email        TEXT NOT NULL,
+		groups       TEXT NOT NULL DEFAULT '[]',
+		role         TEXT NOT NULL,
+		applications TEXT NOT NULL DEFAULT '[]',
+		created_at   TEXT NOT NULL,
+		expires_at   TEXT NOT NULL,
+		last_used_at TEXT,
+		ended_at     TEXT,
+		ended_reason TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX sessions_email ON sessions(email);
+	CREATE INDEX sessions_expires_at ON sessions(expires_at);`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

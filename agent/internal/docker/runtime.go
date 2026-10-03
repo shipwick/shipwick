@@ -58,6 +58,9 @@ type ContainerSpec struct {
 	// replica. It gets its own name and labels, so that nothing that looks
 	// for replicas ever finds it.
 	Job *JobSpec
+	// Init runs the daemon's init process as PID 1, with the image's process
+	// as its child.
+	Init bool
 }
 
 // PortBinding publishes a container port on the host.
@@ -127,6 +130,9 @@ type Info struct {
 	DockerVersion string
 	CPUs          int
 	MemoryBytes   int64
+	// Proxy says whether the daemon has a proxy configured for its own
+	// requests, image pulls above all.
+	Proxy bool
 }
 
 type Runtime struct {
@@ -134,6 +140,9 @@ type Runtime struct {
 	network    string
 	services   string
 	configPath string
+	// project is the compose project the agent itself runs in: see
+	// runtime_proxy.go.
+	project ownProject
 }
 
 // New connects to the Docker daemon selected by the standard environment
@@ -178,6 +187,7 @@ func (r *Runtime) Info(ctx context.Context) (Info, error) {
 		DockerVersion: res.Info.ServerVersion,
 		CPUs:          res.Info.NCPU,
 		MemoryBytes:   res.Info.MemTotal,
+		Proxy:         res.Info.HTTPProxy != "" || res.Info.HTTPSProxy != "",
 	}, nil
 }
 
@@ -262,11 +272,11 @@ func (r *Runtime) PullImage(ctx context.Context, image string, cred *RegistryAut
 	}
 	resp, err := r.cli.ImagePull(ctx, image, client.ImagePullOptions{RegistryAuth: auth})
 	if err != nil {
-		return pullError(ctx, image, err)
+		return r.explainPull(ctx, image, pullError(ctx, image, err))
 	}
 	defer resp.Close()
 	if err := resp.Wait(ctx); err != nil {
-		return pullError(ctx, image, err)
+		return r.explainPull(ctx, image, pullError(ctx, image, err))
 	}
 	return nil
 }
@@ -368,6 +378,7 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 	configureProcess(spec, cfg)
 	configurePublish(spec, cfg, host)
 	configureLogging(spec, host)
+	configureInit(spec, host)
 	if spec.Job != nil {
 		name = configureJob(spec, cfg)
 	}

@@ -34,6 +34,7 @@ agent/internal/certs       checks on certificates the operator supplies
 agent/internal/notify      webhook notifications: queue, formats, signing
 agent/internal/backup      where backups are kept: the directory, the S3 client, encryption on the way
 agent/internal/disk        how full the disk under the data directory is
+agent/internal/oidc        signing in: the provider's endpoints and keys, the code exchange, ID token verification
 agent/internal/deploy      deployment engine: state machine, supervisor, operations, views
 agent/internal/api         REST API: routing, auth, error envelope
 pkg/spec                   deploy.yaml parser + validator   (shared with the CLI)
@@ -169,9 +170,16 @@ what the user's image is — an image built on s6-overlay refuses to start
 And it makes a slow deployment fast by ending the old process at once: an
 application that has no `SIGTERM` handler has no graceful shutdown either, so
 what it was serving is cut either way — the init only moves the cut ten
-seconds forward. That is the application's to decide, in its image
-(`ENTRYPOINT ["tini", "--"]`, or five lines that handle the signal), not a
-default to impose on every image.
+seconds forward. That is the application's to decide, not a default to
+impose on every image — so it is a key of deploy.yaml, off unless set:
+`init: true` is `HostConfig.Init` on every container made from the
+application's image, replicas, the pre-deploy hook, jobs, one-off commands
+and the container a backup is verified in alike, because the image is what
+has or lacks an init, not the role a container plays. Without the key the
+field is left unset rather than false, so a daemon configured with
+`"init": true` keeps deciding for itself. Measured through the agent on
+Docker 29, the ten-line Node server again: `shipwick stop` returned after
+0.3s with `init: true` (exit code 143) and after 10.4s without (137).
 
 *Do not wait for it.* By the time a replica is retired, its successor has
 been verified and has taken its place; the deployment has done what it was
@@ -208,8 +216,18 @@ listening on `SIGTERM` leaves the rotation at once; one that ignores the
 signal keeps receiving its share of requests until it is killed, and the
 requests it holds at that moment are lost. The agent cannot tell the two
 apart beforehand, so it says so afterwards: a replaced container that ended
-with exit code 137 gets a warning in the application's events, with the two
-things that can be done about it.
+with exit code 137 gets a warning in the application's events, with what can
+be done about it — `init: true`, a handler, a longer `deploy.stop_timeout` —
+and without the first when the configuration the container ran with already
+has it. `stop` says the same about a replica it had to kill.
+
+While it drains, the container is still one of the application's as far as
+Docker's labels go, and `GET /applications/:name` lists it. It carries
+`stopping: true` there, read from the same map that makes the supervisor
+skip it, so that a client need not infer it from a deployment id that is not
+the active one: `shipwick status` shows it below the replicas, and it was
+never counted among them — `replicas` counts the active deployment's
+containers, or during a rollout the ones the rollout has serving.
 
 `deploy.stop_timeout` (1s–10m) is the grace period of an application, for the
 one that holds WebSockets or long uploads; the agent's default is 10s. It is
@@ -568,8 +586,13 @@ any other, owned by `_agent` instead of an application.
 | **The backup scheduler has its own ticker and waits for the supervisor**, for up to one tick. | The supervisor ticks at the same pace and holds every application for a moment each time; a scheduler that gave up on "busy" would give up every time. An application held by a user operation is still left for the next tick, with its window kept, so a backup due during a deployment is taken after it. |
 | **`stop` does not touch the desired state.** The replicas are stopped under the lock and started again in a deferred call. | The application is meant to run. If the agent dies between the two, the next one finds an application that should be running and is not, and the supervisor starts it — which a recorded "stopped" would prevent. |
 | **A failed backup keeps nothing**, in either place. | Two volumes out of three, or an archive that never reached the bucket, would be listed and counted as a backup. Retention counts successes only, so failures never push out the last backup that worked. |
-| **The directory first, then the bucket, from the file.** | A single S3 `PUT` needs the length and the hash of what it sends before the first byte, and the archive is a stream of unknown length. Written to the server first — which it is anyway — it has both, hashed as it was written. The cost is the 5 GB limit of one `PUT`; multipart uploads lift it and are not written yet. |
-| **No SDK for S3.** Four operations, path-style, signed with Signature Version 4 using the standard library alone, tested against the vectors AWS publishes and against a real server. | No dependency where the standard library will do, and four signed requests are within its reach. Path-style addressing is what every S3-compatible service accepts; virtual-hosted buckets would need DNS the endpoint may not have. |
+| **The directory first, then the bucket, from the file.** | A single S3 `PUT` needs the length and the hash of what it sends before the first byte, and the archive is a stream of unknown length. Written to the server first — which it is anyway — it has both, hashed as it was written. |
+| **An archive larger than one part, 64 MiB, is a multipart upload**: created, sent part by part from the file, completed. Each part is read twice, once for its hash and once for the request, and sent up to three times. Parts grow past 64 MiB only when 10,000 of them would not hold the file. | One `PUT` ends at 5 GB. The file is on the server already, so a part needs no buffer: memory does not grow with the archive, and the second read comes from the page cache. The hash is not optional, because the signature covers the payload. Parts go one after the other because the disk and the line are the limit, and because an upload with one request in flight is one that can be aborted cleanly. What remains is the service's limit for an object, 5 TiB on S3. Smaller archives stay a single `PUT`, signed with the hash taken while the file was written. |
+| **An upload that does not complete is aborted by whoever started it**, with a context of its own; completing is checked in the body, where S3 reports a failure after answering `200`. | Parts of an unfinished upload are in no listing and on every invoice. The upload's context is often what ended it, so the abort cannot use it. |
+| **An agent that died in the middle leaves a note**: `<file>.upload` next to the file being sent, holding the upload's id, written before the first part and removed when the upload is over. The next agent aborts what the notes name once the bucket is known to be its own and before its own first upload, then asks the bucket for unfinished uploads under its prefix and aborts those whose keys have the shape `<owner>/<id>/<file>`. | Asking the bucket alone is not enough: S3 lists unfinished uploads by prefix, MinIO only under an exact key, which was found against a real one. A note names the upload on every service. The listing is for the server whose disk went with the agent, where it is answered. The shape is checked because a bucket shared without a prefix has other people's uploads in it. It happens with the first use of the bucket rather than at start, because nothing is removed from a bucket before it is known to be this installation's; an agent that died over a backup finds that backup `running` at its start and uses the bucket to clean up after it. |
+| **`backups.before_timeout` bounds the wait, not the process.** | The Docker Engine API starts a command in a container and cannot end it. The agent stops reading at the limit, fails the backup and frees the application's lock; a command that hangs is the container's until it exits or the container is replaced. Saying "stopped" would be saying something that is not checked. |
+| **Adoption writes records from files** (`POST /server/backups/adopt`): the run id from the path, the volumes from the names, the time from the newest file, the size from the stored size, with the trigger `adopted`. An encrypted file's plaintext size is computed, not read: the format adds a 33-byte header and 16 bytes per chunk. The ids the database knows are read before the destinations are listed, and the insert leaves an existing id alone. | A database restored from yesterday has forgotten today's backups, whose files sit under ids it will not hand out again. There is no manifest to read, and none is needed for what the API promises: `Content-Length` of a download is the plaintext size, which the size of the file determines. Reading the ids first means a backup pruned meanwhile is not adopted as a ghost, and one started meanwhile has a record the insert respects. What files cannot say is whether an application's backup was finished; the state's two files and an export's one are known, and a run that lacks one is reported instead of adopted. Owner and file names come from a bucket's keys, which anybody with the credentials can choose: they are checked before they can become a path. |
+| **No SDK for S3.** Put, get, list, delete and the multipart upload, path-style, signed with Signature Version 4 using the standard library alone, tested against the vectors AWS publishes, against a fake that verifies every signature and implements multipart, and against a real server — once with a file over 5 GB. | No dependency where the standard library will do, and a handful of signed requests are within its reach. Path-style addressing is what every S3-compatible service accepts; virtual-hosted buckets would need DNS the endpoint may not have. |
 | **Encryption is the agent's, not the bucket's**, and applies to the directory as well. | Server-side encryption protects against the provider's disks, not against whoever holds the bucket's credentials. Encrypting before the first write means one rule: without the passphrase, nothing the agent wrote can be read. |
 | **The key is never written unencrypted.** Without a passphrase there is no backup of the agent's state at all. | `encryption.key` next to `shipwick.db` in a directory of backups is every secret in clear, one `cp` away. No backup is the smaller harm, as long as it is said — `GET /server` and `shipwick doctor` say it. |
 | **The database is copied with `VACUUM INTO`, before the backup is recorded.** | A copy of a file in use, and of the write-ahead log next to it, may not open. And a copy that held its own backup as `running` would, once restored, take it for one an agent died over and remove its files: the files it was just restored from. |
@@ -634,7 +657,7 @@ key.
 | **One application at a time, each waited for.** | The order of the file is the only dependency information an export has. Deploying in parallel would throw it away. |
 | **The order is "no domain first, then by age".** | An export has no `after` graph; that lives in a `shipwick.yaml` on somebody's machine. What the agent does know is that an application without a hostname is reached by other applications, not by visitors. It is a heuristic, said as such: a wrong guess is a failed health check and a `redeploy`, not lost data. |
 | **Nothing existing is replaced without `overwrite`**, and a volume left by a deleted application counts as existing. | `delete` keeps volumes on purpose. An import that extracted over one would produce a mix of two states that nobody chose. |
-| **What the agent validates again is what reaches Docker and the proxy**: names, the image reference, hostnames, volume names and paths, commands. | `pkg/spec` validates documents, and an export carries parsed configurations. The file is authenticated by its passphrase, so this is defence against a damaged or hand-made export rather than against a stranger. |
+| **A configuration out of an export is validated as the document that says it.** `spec.Validate` writes the parsed value back into the form a deploy.yaml is decoded into and runs the one validator there is; the import deploys what comes out. | An export carries parsed configurations, and the rules are written for documents. A second set of rules for values would drift from the first with every key added — the first version of the import checked names, images and hostnames and took health paths, the `proxy` block, `publish` and logging options as the file had them. Going back through the document form costs a function that mirrors the parser field by field; a test fails when a field is added to one and not the other. The file is authenticated by its passphrase, so this is defence against a damaged or hand-made export rather than against a stranger. |
 | **An image the daemon cannot write out does not fail the export.** The image is opened, and its first byte waited for, before `app.json` says whether it follows. | See [Images without a registry](#images-without-a-registry): on the containerd store an image may lack blobs for layers it shares. The import then skips that application and says how to bring it over by hand. With Docker 29, images sent in reduced archives were written out whole in the cases tried; the refusal is there for the case that is not. |
 
 **The file**, inside the encryption described under [Backups](#backups):
@@ -656,16 +679,51 @@ half of `ensureReplicas`, as a volume restore uses it — and the deployment
 is committed with the application recorded as stopped. Nothing is started,
 probed or routed, and `pre_deploy` does not run. The record passes the same
 statuses on its way to `ACTIVE`, because the transition table has one way
-there, and an event says what they did not involve. A deployment of the kind
-`standby` is dormant by its kind, which is in the record and survives a
-restart of the agent; an application that was merely stopped where it came
-from is dormant by a flag in memory, and an agent that restarts during the
-seconds its deployment takes would start it.
+there, and an event says what they did not involve. That a
+deployment is dormant is written into its record (`deployments.dormant`)
+before it begins, under the lock that created it: an import that the agent
+is restarted under leaves its deployment in flight, the agent that starts
+next resumes it, and it must resume it as what it was — for a `standby`
+deployment, whose kind says so, and for the `import` of an application that
+was stopped where it came from, whose kind does not. A resumed deployment
+takes over its application's routing before it runs (`prepare`); the dormant
+rollout gives it back when it commits, like every other.
 
-`start` is all a promotion is: `Promote` starts the stopped `standby`
-deployments in the order they were made and holds each to its health check
-or stabilization window before the next. It records nothing new, so there is
-no state for "promoted": a promoted application is one that runs.
+`start` is all a promotion does to an application: the stopped `standby`
+deployments are started in the order they were made, each held to its health
+check or stabilization window before the next. A promoted application is one
+that runs; nothing about it is recorded.
+
+**A promotion is a record that is followed.** The request that asks for one
+gets the record as it begins (`202`), the work runs in the background under
+the engine's context, and `GET /standby/promotion` is read until
+`completed_at` is set — a deployment's contract, for the same reason: the
+work takes as long as the applications' startup budgets together, and a
+connection that long is the weakest part of it. The record is one row of
+`transfer_state`, rewritten at every change. It is not a table of
+promotions: a server is promoted once or twice in its life, and what is
+needed is the one that runs or ran last.
+
+An agent that is restarted under a promotion resumes it. The alternative —
+report it as interrupted and let a person run it again — was weighed and
+refused: a promotion is run on the worst day, the restart may be the
+server's own (it was just handed load it never carried), and a server that
+was told to take over and then holds half of its applications stopped is a
+state nobody chose. Resuming needs no more than the record: applications
+with an outcome keep it; the one the promotion was at is started unless it
+is recorded as running, and waited for again; the rest follow. Starting a
+container that a moment before the restart was started already is a no-op
+to Docker. Who asked for the promotion is kept with the record, so that the
+applications started after the restart name the same person in their
+events.
+
+A promotion and an import exclude each other, in both directions: an import
+replaces stopped applications, which are exactly what a promotion is about
+to start. The scheduled pull skips its turn without recording a failure.
+A client that cannot follow a record — the CLI before 0.6 — is answered as
+before: without `wait=false` the request is held until the promotion ends.
+The default is the old behaviour because the old client cannot say what it
+is; the new one can.
 
 That is also what makes the scheduled import safe to leave configured. An
 import that leaves applications stopped replaces only applications that are
@@ -682,9 +740,14 @@ standby is given the same bucket and passphrase and reads it through a
 taken off the bucket for as long as it is a standby, since a bucket is marked
 with the one installation that writes to it. It asks for the highest run that
 holds the file — a file appears under its name only when it is complete — and
-skips one it has already imported. The state is in memory: an agent that
-restarts imports the newest export once more, which costs a restore and
-changes nothing.
+skips one it has already imported. Which one that was, and the record of the
+last import, are rows of `transfer_state` too, written when they change and
+read by `Recover`: an agent that restarts does not restore every volume once
+more for an export it already holds, and `GET /import` still answers. An
+import itself is not resumed. It reads a stream that ended with the agent;
+the record found `running` at startup is settled as failed, and the next
+scheduled pull, which sees no successful import of that export, takes it
+again.
 
 What this does not do is in the handbook, in the same words: nothing watches
 the first server, nothing decides, and nothing prevents both servers from
@@ -948,8 +1011,9 @@ itself is recreated by that upgrade, because it joins the second network.
 **Aliases and redirects.** An application's `aliases` are more hostnames in
 the host matcher of its one route: the same handler, the same names behind it,
 nothing else to keep in step. Its `redirects` are a second route with no
-backend at all — a static `308` whose `Location` is `https://<domain>` plus the
-request's path and query — so they answer while the application is stopped or
+backend at all — a static `308` whose `Location` is `https://<domain>`, then
+the application's `path` if it has one, plus the request's path and query —
+so they answer while the application is stopped or
 has no healthy replica, and a rollout never touches them. Both kinds of
 hostname sit in host matchers on `:443` like the domain does, which is all
 Caddy needs to obtain certificates for them — `https://www.example.com` has to
@@ -971,7 +1035,10 @@ is down. Ownership is checked per hostname *and* path (`checkDomain`): the
 same path twice is refused, and so are two applications both without one.
 Caddy matches paths without regard to case, so that is how they are compared.
 A redirected hostname has no paths to share and is taken whole, like the
-agent's own. Whether the prefix reaches the application is the
+agent's own; what it redirects to is the part of the domain its application
+serves, `https://example.com/api/users` for a request for `/users` and an
+application at `/api`, since the rest of the domain may be another
+application's or nobody's. Whether the prefix reaches the application is the
 application's choice (`proxy.strip_prefix`, a `rewrite` handler in front of
 `reverse_proxy`); the default is to pass the request as it came, because a
 proxy that strips cannot fix the links and redirects the application then
@@ -1096,6 +1163,16 @@ none can be reached. The server's own resolver would answer from its negative
 cache for the zone's negative TTL after a record was created, and the gate
 would hold the hostname back for half an hour on Cloudflare — the wait it
 exists to prevent.
+
+Each public resolver gets 700 ms of the three seconds a lookup may take
+(`resolvers.go`). A firewall that drops outgoing DNS does not refuse, it stays
+silent: asked without a bound of its own, the first resolver used up the
+whole lookup, the fallback was never reached, and no hostname was ever routed
+on such a server. When none of them answered, they are left alone for five
+minutes and the system resolver is asked directly, so that the supervisor
+does not spend two seconds per hostname on every round.
+`SHIPWICK_DNS_RESOLVERS` replaces the list, or with `system` skips it: see
+*Leaving the server*.
 
 **Certificates through DNS** (`agent/internal/proxy/tls.go`). Behind
 Cloudflare's proxy no authority can reach the server, so neither of Caddy's
@@ -1257,6 +1334,19 @@ things worth a notification: `certificate.expiring` when the state is
 entered and once more at 3 days. An agent restart forgets that it has
 warned, and warns again.
 
+The list of applications carries a summary of both this and the alerts
+(`deploy/attention.go`), so that a list can mark an application without a
+request per row: `certificate_problem` is the hostname whose certificate is
+furthest from in order, with the status and message its own page shows, and
+`alert_count` / `alert_severity` are the application's active alerts. Both
+are read from the watch's and the alert book's memory when the list is
+built; nothing is probed for them. The order of badness is
+`waiting_for_dns` (the hostname is not served at all, and waits for the
+operator), `expiring` (it works until somebody fails to act), `obtaining`
+(usually over in seconds). `unknown` is not a problem: nothing is known
+against the certificate, and an agent without a proxy would otherwise mark
+every application it runs.
+
 ### Graceful shutdown
 
 On `SIGINT`/`SIGTERM`: end log streams → stop accepting HTTP requests → stop the
@@ -1274,9 +1364,9 @@ close Docker client and database. A second signal kills immediately.
 | Volumes | `volumes` in deploy.yaml become named Docker volumes `shipwick_<app>_<volume>`, created with labels, mounted at the given path. They belong to the application: every deployment mounts the same ones, and nothing removes them — not a rollback, not `delete`. Never a host path. **Backup and restore** go through the replica's container and Docker's archive endpoints (`CopyFromContainer`, `CopyToContainer`), which read and write a container's filesystem whether or not it runs: no helper container, no image to pull, no shell. A backup holds the lock while it streams and is rewritten on the fly so that its entries are relative to the mount point. A restore is the one thing that removes a volume: with the application stopped, the container goes, then the volume, then `createReplicas` makes both again — empty — and the archive is extracted into the mount point before any process could write there. It is the only user of the create-only half of `ensureReplicas`. |
 | Ports | None, unless deploy.yaml has `publish`; then exactly the listed container ports are bound on the server (`PortBindings`), on the address given or on every address, for services the proxy cannot serve because they are not HTTP. Only for recreate applications with one replica: a server port has one holder, so the old version is stopped before the new one binds it. The engine refuses, before anything is recorded, a port the agent or the proxy listens on and a port another application's active configuration publishes — Docker would refuse the bind too, but only at start, after the old version is gone. Published ports bypass the host firewall on most distributions (Docker inserts its own iptables rules), which is why the README says to bind to a private address. |
 | Images | After a successful deployment, and after `delete`, the images that only retired deployments of the application name are untagged. Kept, across all applications: the active deployment's image and its most recent superseded one (the rollback target). Never forced: an image any container uses stays, so does anything no deployment ever named. Images the CLI built and sent (`shipwick.local/…`) are loaded with `ImageLoad`, live in the same store and are pruned the same way; they are never pulled, since their host does not exist. An archive may leave out the layers the server has (see [Images without a registry](#images-without-a-registry)); one that leaves out more is refused by the daemon and the image it tagged is removed. One of them that no deployment names — sent for a deploy the agent then refused — is removed by the application's next sweep once it is ten minutes old (the CLI deploys within seconds of sending), and by `delete` whatever its age. A deployment that ends `FAILED` or `ROLLED_BACK` removes the image it named right then, under the same rules — kept if it is anybody's active image or rollback target, never forced, never an error: a first deployment that keeps failing would otherwise leave one image behind per attempt, with no successful deployment to sweep them. |
-| Static folders | `static` in deploy.yaml is served by Caddy itself, from `/srv/shipwick/<app>/<digest>` inside Caddy's own container — the `caddy-static` volume of the compose setup. The CLI uploads the folder as a tar archive (`PUT …/static`); the agent inspects it while it hashes it — files and directories only, nothing outside the folder, no symbolic links, which the file server would follow into the container that holds the certificates — keeps it in `<data>/uploads/<app>/` under its digest, one per application, and answers with the digest; the deployment names it (`?static=`). The rollout runs in the proxy's container through the Engine API's exec, the way command health checks run in a replica: `mkdir -p`, `CopyToContainer` into `<digest>.part`, `test -f …/index.html`, `mv` into place — so a crash half-way never leaves a directory that looks complete — then a route whose root is the directory. Directories are named by content, not by deployment: a rollback, or a redeploy of the same folder, routes to a directory that is already there and needs no upload. After a deployment the directories that neither the active deployment nor its most recent predecessor serve are removed (`ls -1`, `rm -rf`), like images; `delete` removes the application's directory and its upload. The proxy is found by its Compose labels (`com.docker.compose.project=shipwick`, `service=caddy`); an agent whose proxy is not that container fails the deployment with a sentence. The supervisor skips static applications: there is nothing to keep alive. Logs, metrics, jobs and one-off commands answer `STATIC_APPLICATION`. |
+| Static folders | `static` in deploy.yaml is served by Caddy itself, from `/srv/shipwick/<app>/<digest>` inside Caddy's own container — the `caddy-static` volume of the compose setup. The CLI uploads the folder as a tar archive (`PUT …/static`); the agent inspects it while it hashes it — files and directories only, nothing outside the folder, no symbolic links, which the file server would follow into the container that holds the certificates — keeps it in `<data>/uploads/<app>/` under its digest, one per application, and answers with the digest; the deployment names it (`?static=`). The rollout runs in the proxy's container through the Engine API's exec, the way command health checks run in a replica: `mkdir -p`, `CopyToContainer` into `<digest>.part`, `test -f …/index.html`, `mv` into place — so a crash half-way never leaves a directory that looks complete — then a route whose root is the directory. Directories are named by content, not by deployment: a rollback, or a redeploy of the same folder, routes to a directory that is already there and needs no upload. After a deployment the directories that neither the active deployment nor its most recent predecessor serve are removed (`ls -1`, `rm -rf`), like images; `delete` removes the application's directory and its upload. The proxy is found by its Compose labels: the `caddy` service of the project the agent's own container belongs to, which the agent reads off itself once (it inspects the container its hostname names, as it does to join the network) — `shipwick` in the files Shipwick ships, anything under `docker compose -p`. An agent that is not a container, or not one Compose started, looks in the project `shipwick`; one whose proxy is not such a container fails the deployment with a sentence. The access log is read from the same container. The supervisor skips static applications: there is nothing to keep alive. Logs, metrics, jobs and one-off commands answer `STATIC_APPLICATION`. |
 | Restart policy | Docker's is set to `no`. Restarts belong to Shipwick's supervisor, which adds backoff, health awareness and crash-loop detection; two restart mechanisms would fight. |
-| Stopping | `SIGTERM`, then `SIGKILL` after the application's `deploy.stop_timeout` (10s unless set). No init is put in front of the image's process: see [Retiring a replica](#retiring-a-replica-and-what-a-deployment-waits-for). |
+| Stopping | `SIGTERM`, then `SIGKILL` after the application's `deploy.stop_timeout` (10s unless set). An init process is put in front of the image's own only where deploy.yaml says `init: true`: see [Retiring a replica](#retiring-a-replica-and-what-a-deployment-waits-for). |
 | Limits | `resources.cpu` → `NanoCPUs`; `resources.memory` → `Memory`, with `MemorySwap` equal to it so the limit is a hard cap. |
 | Hardening | Never privileged; `no-new-privileges`; no host mounts (named volumes only); nothing from `deploy.yaml` ever runs on the server itself. |
 | Process | `entrypoint`, `command` and `user` go to Docker as `Entrypoint`, `Cmd` and `User`: argv as written, nothing split, joined or passed through a shell. Unset means the image's own. They change what runs inside the container, which the image always decided anyway; the container's boundaries are the same. |
@@ -1291,7 +1381,9 @@ connection**: the agent's write volume is tiny, and serializing access rules
 out `SQLITE_BUSY` and lock-upgrade deadlocks by construction.
 
 Tables: `applications`, `deployments`, `deployment_replicas`, `events`,
-`tokens`, `metric_samples`, `traffic_samples` (one row per application and
+`tokens`, `audit_log` (one row per request that changed something, kept for
+a year), `access_rules` and `sessions` (who may sign in as what, and who is
+signed in: the SHA-256 of each session, never its value), `metric_samples`, `traffic_samples` (one row per application and
 minute with requests: counts and a latency histogram), `job_runs` (one row
 per run of a hook, job or one-off command, with the tail of its output; the
 last 50 per job are kept), `secrets` (name, sealed value, timestamps),
@@ -1470,6 +1562,233 @@ token's name travels in the request context (`deploy.WithActor`), each
 deployment stores it (`by` in the API), and stop and start events name it
 unless it is root.
 
+### Who may do what
+
+Authentication ends with an identity — a kind, a name, a role, a list of
+applications, an expiry — and everything after it works on that identity,
+not on a token: `authorize` in `agent/internal/api/access.go` is the one
+place that decides, and the audit trail's actor is the identity's kind and
+name. A second kind of caller is another way to arrive at an identity; it
+needs neither a second check nor a second trail.
+
+**A limit is a list on the token, not a second set of roles.** The
+alternative was a role per application — `deploy` on one, `read` on another,
+`admin` on a third. That is a matrix to explain, to render and to get wrong,
+and its `admin` cell has no good meaning: almost everything `admin` does —
+secrets, registries, certificates, tokens, the key, exports — belongs to no
+application. So the role stays what it was, and a `deploy` token may carry
+the applications it deploys. What it loses is exactly what can be said in
+one sentence: it changes those applications and reads everything.
+
+Reading is not limited, on purpose. A limit that hid the other applications
+would have to hide them everywhere they show — the list, the deployments,
+the server's counts, the proxy's routes, Prometheus — and would promise a
+separation that one Docker daemon does not give. The limit is there so that
+a CI token leaked from one repository cannot redeploy another's application;
+it is not tenancy.
+
+**No handler can forget it.** A handler never sees the question. Every
+authenticated endpoint is registered through the route table, which notes its
+role and whether its path is under `/applications/{name}`; `authorize` runs
+before the handler and compares `{name}` with the list. The name in the path
+is also the name a first deployment creates, so creating is covered by the
+same comparison — which is why a limit may name an application that does not
+exist yet. An endpoint that takes `deploy` and is not under
+`/applications/{name}` is refused to a limited token outright: nothing says
+which applications it would touch, and refusing is the answer that cannot be
+wrong. A test walks the route table and fails for an application route the
+prefix does not catch, and sends every `deploy` route a request for an
+application the token does not have.
+
+**Expiry is checked after the token is known**, never instead: the answer
+`TOKEN_EXPIRED` goes only to a caller who presented the token itself, so it
+gives nothing to someone guessing, and it is neither counted by the rate
+limit nor subject to it — a CI job that keeps trying with last quarter's
+token must not lock the dashboard out, and must keep being told why it
+fails. An expired token stays in the table: deleting it would turn the clear
+answer into "invalid token". There is no renewal, for the reason there is no
+editing of a token's role: a token is a value someone holds, and what it may
+do should not change under them.
+
+### The audit trail
+
+One table, `audit_log`, written by the same wrapper that authorizes: a
+request to an endpoint listed in `auditedRoutes` (`agent/internal/api/
+audit.go`) gets a response writer that notes the status, the error code and
+the `Location` of what was started, and the entry is written when the
+handler returns — also when it panics, and also when the request was refused
+before it reached the handler, since an attempt is what one looks for after a
+token leaked. The list is keyed by route pattern, next to a second list of
+the endpoints that are not `GET`s and change nothing, each with its reason;
+a test fails for a route that is in neither.
+
+What an entry holds comes from the path — the application, and the segment
+that names the job, volume, secret, registry, hostname or backup — and from
+the answer. A handler adds to it only where the path does not say what was
+acted on: the name and the permissions of a token being created, the options
+of an import. The body is never read for it, so a secret cannot get in by
+accident; a test sends every audited endpoint a body full of a marker and
+looks for it in the table.
+
+The outcome is the HTTP answer's, which for a deployment means "accepted".
+How it went on is in the deployment's own record, and the entry names it;
+copying the final status over would make two records of one fact, one of
+them written later by something that is not a request.
+
+The address is the connection's, with the proxy's `X-Forwarded-For` next to
+it rather than in its place. Caddy replaces the header with the address it
+saw, so through the proxy it is the client; on a connection that bypasses the
+proxy it is whatever the caller sent. Keeping both lets the reader tell.
+
+Retention is a year and 100,000 entries, enforced in the transaction that
+writes an entry: two indexed deletes that almost always delete nothing. A
+separate pruning loop would be one more thing running for a table that
+changes when a person or a pipeline does something.
+
+### People: signing in with an OpenID Connect provider
+
+A person in a browser is not given a token. The agent can be configured with
+an OpenID Connect provider (`agent/internal/config/oidc.go`,
+`agent/internal/oidc`), and what a sign-in there produces is the identity
+described above with the kind `user` and the e-mail address as its name.
+`authorize`, `serve` and the audit trail are not told the difference; the
+only place that knows about sessions is `identify`, which looks a presented
+credential up among the sessions when it is not a token
+(`agent/internal/api/signin.go`).
+
+**No users of its own.** The agent stores no password and no account. It
+stores rules — a role for an address, a group or a domain — and the sessions
+of people who are signed in. Second factors, password rules and offboarding
+stay with the provider, which is where a company already manages them.
+
+**Configured in the agent's environment, in one place.** The issuer, the
+client id and secret, the scopes and the name of the groups claim are
+variables next to the others; the dashboard is told what it needs by the
+agent. Two places to configure would be two places to get out of step, and
+the secret belongs with the component that uses it. The endpoints and the
+signing keys come from the issuer's discovery document, fetched when first
+needed — the agent starts whether or not the provider is up — and again
+after an hour, which is also the longest a key the provider withdrew is
+still believed. A key id the cache does not know fetches the keys at once,
+at most once a minute, so that a rotation is followed without a restart and
+a stream of forged tokens cannot turn the agent into a client hammering the
+provider. A discovery document that names another issuer than the
+configured one is not used: its keys would sign for someone else. The issuer
+must be `https`, or `http` towards localhost or a private address, the rule
+the webhook follows; every endpoint the document names is held to it too.
+The requests go out through an HTTP client of the package's own with a
+ten-second limit that follows no redirect, so that the client secret is
+sent to the token endpoint the document names and nowhere that endpoint
+points.
+
+**The authorization-code flow with PKCE, split between two servers.** The
+dashboard's server talks to the browser and the agent talks to the provider.
+The dashboard's server generates `state`, `nonce` and the PKCE verifier,
+keeps them in an `httpOnly` cookie, and redirects; on the callback it checks
+`state` and hands the code, the verifier and the nonce to
+`POST /auth/exchange`. The agent holds the client secret, redeems the code,
+verifies the ID token and decides. Each of the three values closes one hole:
+
+- `state` stays in the dashboard and is compared there, because what it
+  protects is the dashboard's callback: without it, a page elsewhere could
+  complete a sign-in in someone's browser with a code of its own choosing.
+- The verifier makes a code worthless to whoever reads it off the callback
+  URL: the provider redeems the code only with the verifier whose hash went
+  out with the authorization request, and the verifier never leaves the
+  dashboard's cookie until the exchange. This is what lets the exchange
+  endpoint take no token: what it is handed is the credential.
+- The nonce binds the ID token to this sign-in, and the agent accepts each
+  nonce once (a map of hashes kept for fifteen minutes, longer than an ID
+  token is accepted for). A code is redeemed once by the provider; the nonce
+  makes that true even of a provider that would redeem one twice. The agent
+  marks a nonce used only after the ID token verified, so the map grows with
+  sign-ins the provider vouched for and cannot be filled by guessing.
+
+The agent could have generated the nonce and kept the pending sign-in
+itself. That would have put state created by unauthenticated requests into
+the agent, to be bounded and expired; kept in the browser's cookie it costs
+the agent nothing until a provider has vouched for someone.
+
+The redirect URI is `https://` + `SHIPWICK_DASHBOARD_DOMAIN` +
+`/auth/callback`, taken from the configuration. The exchange refuses a
+request that names another, though the provider would refuse it as well:
+the agent never asks a provider to send anyone to a place a request chose.
+(`SHIPWICK_OIDC_REDIRECT_URL` replaces it for a dashboard on the developer's
+machine and accepts only a localhost URL.)
+
+**ID tokens are verified with the standard library.** A JWT library would be
+a dependency for little code: split, decode, check one signature. RS256 is
+accepted, which the providers the handbook names sign with by default, and
+ES256; the algorithm is read before any key is
+looked at, so `none` and the symmetric algorithms, where a public key would
+be taken for a secret, never reach a verification. A token must name the
+configured issuer and this client as its audience (and as its authorized
+party wherever it has one or several audiences), be within `exp` and `nbf`
+with a minute's allowance for clocks, be at most ten minutes old by `iat` —
+it comes straight from the token endpoint; an older one was kept from
+somewhere — and carry the nonce. RSA keys under 2048 bits are not loaded.
+`email_verified: false` is refused; a provider that omits the claim
+(Microsoft Entra) is trusted with its addresses, because trusting the
+provider is the premise.
+
+**The address is the identity.** Rules are about e-mail addresses because
+that is what an admin knows about a colleague; the `sub` claim would be
+stabler and unusable in a command. The address is lowercased and has to
+look like a company address — it ends up in the audit trail, in logs and in
+a deployment's `by`.
+
+**The most specific rule decides.** Address, then groups, then domain; the
+first kind with a match is the answer and the rest is not consulted
+(`api.ResolveAccess`). An order rather than "the highest role of everything
+that matches", because the common exception runs downwards: everyone in a
+group deploys, except the contractor who may only read. Within groups the
+highest role counts and limits to applications add up, since a person in two
+teams is expected to do what either does.
+
+**A session is a row, and is asked about on every request.** The credential
+is 32 random bytes behind `sws_`, stored as its SHA-256 like a token and
+presented like one, so the dashboard's cookie, the proxy and the rate limit
+needed nothing new. A signed token of the agent's own would have saved the
+lookup and could not have been taken back; a row can. The row holds what the
+provider said (address, groups) and what the rules gave (role,
+applications). Each request resolves the rules again for that address and
+those groups — one more small query — and a session whose answer differs
+from what it was given is ended there and then, with the reason. Comparing
+the outcome rather than remembering which rule matched means that adding an
+unrelated rule ends nobody's session, and that any change which does alter
+what a person may do — the rule revoked, its role changed, a more specific
+rule added — takes effect with the next request instead of at expiry. An
+ended session keeps its row until it would have expired, so that its holder
+is told why rather than "invalid token"; rows are removed a day after that,
+in the transaction that creates the next session.
+
+What a session cannot see is the provider: groups are as of the sign-in.
+That bounds the lifetime. Ten hours, fixed from the sign-in and not extended
+by use: longer than a working day, so the dashboard does not send anyone
+back to the provider in the middle of one, and shorter than the night
+between two, so a membership removed at the provider is gone here by the
+next morning at the latest. `DELETE /access/sessions/:email` is for when
+that is not soon enough.
+
+**Refusals that say what to do.** No matching rule is `ACCESS_NOT_GRANTED`
+with a sentence that names the address and the command an admin would run,
+because the person reading it cannot fix it and has to forward it. Ended and
+expired sessions have codes of their own for the reason expired tokens do:
+only the holder gets them, so they give nothing away, and they are not
+counted as guesses. A session nobody issued is a wrong token. Failed
+sign-ins are counted by the same limiter, and a limited address is answered
+before the provider is asked — otherwise the exchange endpoint, which takes
+no token, would let anyone make the agent present its client credentials to
+the provider as often as they liked.
+
+**Sign-ins are in the audit trail**, written by the handler since there is
+no authenticated request for the wrapper to record: the person the provider
+vouched for is the actor, admitted or not. A sign-in that failed before
+that has no actor and goes to the log.
+
+Rules, sessions and the audit trail are the server's own and are not part of
+an export, like tokens.
+
 ## Configuration as the API
 
 `POST /applications/:name/deploy` takes the `deploy.yaml` document itself as
@@ -1569,3 +1888,67 @@ names the hostname setting instead.
 dashboard without knowing how the server was installed. The agent builds it
 from `SHIPWICK_DASHBOARD_DOMAIN`, the same value its proxy route is built
 from, and it is always `https`: the route exists only behind Caddy.
+
+## Leaving the server
+
+What an installation reaches outside itself, and through what, on a network
+where the way out is a proxy, an authority of the company's own, or nothing.
+
+**Images are the daemon's.** The agent asks Docker to pull; the request to
+the registry is made by the daemon, with the daemon's proxy and the daemon's
+trust store. No setting of the agent can change that, so the agent does not
+pretend to: a pull that fails before the registry answers
+(`docker/pull_network.go` recognises a dial, DNS, proxy or certificate error
+in the daemon's message) ends in a sentence about `/etc/docker/daemon.json`
+or `/etc/docker/certs.d`, chosen after asking the daemon whether it has a
+proxy at all. `GET /server` reports both sides (`network.proxy`,
+`network.docker_proxy`), and `shipwick doctor` points at the mismatch.
+
+**One place decides how the agent goes out** (`pkg/outbound`). The webhook
+and the bucket take their transport from it; nothing else in the agent leaves
+the server over HTTP. The proxy is the environment's, read by `net/http` as
+everywhere, with two additions. A name without a dot is never proxied: it is
+a container on the installation's own networks, which only Docker's resolver
+knows, and requiring `NO_PROXY` to list every application would fail the day
+one is added. And a proxy's refusal of `CONNECT` is turned into an error that
+names the proxy, the destination and the status; `net/http` reports it as the
+bare status text, which in a log line reads as the destination's answer.
+Health checks, the Caddy admin client and the Docker client build transports
+of their own with no proxy, as before.
+
+The proxy's URL may hold a password. It is validated at startup with an
+error that names the variable and the rule; `net/http`'s own error quotes the
+value, and is replaced. The log and `GET /server` carry the host and port.
+
+**Caddy gets the same variables**, for the certificate authority and
+Cloudflare's API. Its reverse proxy would honour them too: with `HTTP_PROXY`
+set, Caddy sent requests for replicas to the proxy, which knows no
+container. The rendered configuration therefore
+sets `network_proxy: {"from": "none"}` on the transport to replicas.
+
+**Authorities are added, not replaced.** Go already reads `SSL_CERT_FILE`,
+which replaces the system's authorities: right for a container that should
+trust one authority, wrong for an agent that posts to Slack and to a bucket
+inside the company. `SHIPWICK_CA_FILE` adds to the system pool. It is checked
+at startup because every way it can be wrong — above all the directory Docker
+creates in place of a file that is missing on the host — otherwise shows up
+as a failed handshake blamed on the other side. Caddy needs no variable: it
+reads every certificate in `/etc/ssl/certs`, so the mount is the setting.
+
+**An ACME directory is one field** (`TLS.ACMEDirectory`): the `ca` of the
+ACME issuer, alone or next to the Cloudflare challenge. Naming an issuer
+replaces Caddy's defaults, so a server with no way out no longer asks Let's
+Encrypt and ZeroSSL for anything.
+
+**A bundle is the release, plus the images.** `shipwick server bundle` is a
+command of the CLI rather than a script because the machine with the
+connection is a laptop, often Windows. It verifies the release's files as
+`upgrade` does and calls `docker pull --platform` and `docker save`, as an
+argv. The images are the ones the registry serves under the release's tags —
+the trust an installation over the network has — and the archive's checksum,
+written into the bundle, guards the copy, not the origin. The installer is
+the same script in both modes: with a bundle, `fetch_release_asset` copies
+instead of downloading and verifies against the bundle's `checksums.txt`, and
+`docker load` stands where `docker compose pull` was. The release publishes
+`install.sh` for this, so that a bundle holds the installer of its own
+release and not that of `main`.

@@ -366,7 +366,7 @@ func (e *Engine) exportVolumes(ctx context.Context, xw *exportWriter, d store.De
 			return 0, err
 		}
 		if c.Running && len(b.Before) > 0 {
-			if err := e.backupBefore(ctx, source, b.Before); err != nil {
+			if err := e.backupBefore(ctx, source, b); err != nil {
 				return 0, err
 			}
 		}

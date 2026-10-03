@@ -27,6 +27,9 @@ type initAnswers struct {
 	// Project is what was recognised in the directory; nil with --image, or
 	// when nothing was. It replaces Image with `build: .` or `static: <dir>`.
 	Project *project
+	// Init asks for an init process in front of the image's own: set for a
+	// Dockerfile that init writes and that starts Node as the first process.
+	Init bool
 }
 
 func (c *cli) initCommand() *cobra.Command {
@@ -100,6 +103,8 @@ Run in a terminal, init asks for what it cannot tell (name, domain). With
 					answers.Project = &p
 				}
 			}
+
+			answers.Init = startsNode(answers.Project) && !exists(dir, "Dockerfile")
 
 			switch {
 			case answers.Project != nil:
@@ -424,6 +429,18 @@ func renderConfig(a initAnswers) string {
 	line("# entrypoint: [\"dotnet\"]")
 	line("# command: [\"App.dll\", \"--urls\", \"http://0.0.0.0:8080\"]")
 	line("# user: \"1000:1000\"")
+	line("")
+	if a.Init {
+		line("# Node as a container's first process ignores SIGTERM unless the application")
+		line("# handles it, and is killed when its grace period ends. An init process in")
+		line("# front of it passes the signal on: a replaced replica stops at once.")
+		line("init: true")
+	} else {
+		line("# Put an init process in front of the image's own, for a process that does")
+		line("# not handle SIGTERM (Node started as `node server.js`). Not for an image")
+		line("# that brings its own (tini, s6-overlay).")
+		line("# init: true")
+	}
 	line("")
 	if a.Port != 0 {
 		line("# The port your application listens on inside the container.")

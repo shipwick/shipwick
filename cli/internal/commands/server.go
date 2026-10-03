@@ -69,12 +69,20 @@ func (c *cli) serverCommand() *cobra.Command {
 			}
 			// An agent from before tokens had names leaves this empty.
 			if info.Token.Name != "" {
-				fields = append(fields, [2]string{"Token", fmt.Sprintf("%s (%s)", info.Token.Name, info.Token.Role)})
+				fields = append(fields, [2]string{"Token", describeCaller(info.Token, c.now())})
 			}
 			fields = append(fields, [2]string{"Dashboard", c.describeDashboard(info.DashboardURL)})
+			// People sign in to the dashboard only where a provider is configured.
+			if info.SignIn.Configured {
+				fields = append(fields, [2]string{"Sign-in", info.SignIn.Issuer})
+			}
 			// Absent from an older agent, and where the agent cannot measure it.
 			if info.Disk != nil {
 				fields = append(fields, [2]string{"Disk", describeDisk(*info.Disk)})
+			}
+			// Only a server that does not reach the internet the plain way has one.
+			if network := describeNetwork(info.Network); network != "" {
+				fields = append(fields, [2]string{"Network", network})
 			}
 			c.ui.Fields(fields)
 			c.printAlerts(info.Alerts)
@@ -84,6 +92,7 @@ func (c *cli) serverCommand() *cobra.Command {
 	server.AddCommand(c.serverInstallCommand())
 	server.AddCommand(c.serverRotateKeyCommand())
 	server.AddCommand(c.serverBackupCommand())
+	server.AddCommand(c.serverBundleCommand())
 	return server
 }
 

@@ -3,18 +3,15 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Readable } from 'node:stream'
 import type { H3Event } from 'h3'
+import type { ConfiguredAgent } from './agents'
+import { AgentsConfigError, parseAgents, sessionCookieFor } from './agents'
 import { HEADERS_TIMEOUT_MS } from './timeouts'
-
-/** Name of the httpOnly cookie that carries the agent token. */
-export const SESSION_COOKIE = 'shipwick_session'
 
 /** Header every state-changing request must carry; see assertSameOriginRequest. */
 export const CSRF_HEADER = 'x-shipwick-request'
 
 /** Everything the dashboard may reach on the agent lives under this prefix. */
 export const AGENT_API_PREFIX = '/api/v1/'
-
-const DEFAULT_AGENT_URL = 'http://127.0.0.1:9000'
 
 /** Seven days; the token is root-equivalent, so sessions do not live forever. */
 export const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -35,22 +32,49 @@ export class AgentProxyError extends Error {
 }
 
 /**
- * Base URL of the agent, without a trailing slash. SHIPWICK_AGENT_URL is read at
- * runtime (not baked in at build time), so one image serves every environment.
+ * The agents this dashboard serves, read at runtime (not baked in at build
+ * time), so one image serves every environment: SHIPWICK_AGENTS for several,
+ * SHIPWICK_AGENT_URL for the one. Parsed once per value.
  */
-export function agentBaseUrl(): string {
-  const configured = process.env.SHIPWICK_AGENT_URL || String(useRuntimeConfig().agentUrl || '') || DEFAULT_AGENT_URL
-  let url: URL
-  try {
-    url = new URL(configured)
+let parsedFrom: string | null = null
+let parsed: ConfiguredAgent[] = []
+
+export function configuredAgents(): ConfiguredAgent[] {
+  const agents = process.env.SHIPWICK_AGENTS ?? ''
+  const single = process.env.SHIPWICK_AGENT_URL || String(useRuntimeConfig().agentUrl || '')
+  const key = `${agents}\n${single}`
+  if (parsedFrom !== key) {
+    try {
+      parsed = parseAgents(agents, single)
+    }
+    catch (error) {
+      if (error instanceof AgentsConfigError) throw new AgentProxyError(500, 'INTERNAL_ERROR', error.message)
+      throw error
+    }
+    parsedFrom = key
   }
-  catch {
-    throw new AgentProxyError(500, 'INTERNAL_ERROR', `SHIPWICK_AGENT_URL is not a valid URL: ${configured}`)
+  return parsed
+}
+
+/**
+ * The agent a request is for. With one server configured the name may be left
+ * out; with several it must be given, so that nothing is ever sent to a server
+ * the page did not mean.
+ */
+export function agentFor(name: string | null | undefined): ConfiguredAgent {
+  const agents = configuredAgents()
+  if (name === null || name === undefined || name === '') {
+    if (agents.length === 1) return agents[0]!
+    throw new AgentProxyError(400, 'SERVER_REQUIRED', 'Several servers are configured: name one, as in /api/servers/<name>/agent/…', { servers: agents.map(a => a.name) })
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new AgentProxyError(500, 'INTERNAL_ERROR', `SHIPWICK_AGENT_URL must be http or https: ${configured}`)
-  }
-  return url.origin + url.pathname.replace(/\/+$/, '')
+  const agent = agents.find(a => a.name === name)
+  if (!agent) throw new AgentProxyError(404, 'UNKNOWN_SERVER', `This dashboard knows no server named ${JSON.stringify(String(name).slice(0, 64))}`, { servers: agents.map(a => a.name) })
+  return agent
+}
+
+/** The name of the httpOnly cookie that carries the token for one server. */
+export function sessionCookieName(agent: ConfiguredAgent): string {
+  return sessionCookieFor(agent, configuredAgents())
 }
 
 /** Writes `{error:{code,message,details}}`, the same shape the agent uses. */
@@ -92,12 +116,15 @@ export function isPlausibleToken(value: unknown): value is string {
 }
 
 export interface AgentRequestOptions {
+  /** Which agent: one of configuredAgents(). */
+  agent: ConfiguredAgent
   method: string
   /** Path below the agent's base URL; must start with /api/v1/. */
   path: string
   /** Raw query string including the leading "?", or "". */
   search?: string
-  token: string
+  /** Left out for the two endpoints that take none: what a sign-in asks before there is a session. */
+  token?: string
   headers?: Record<string, string>
   /** A buffered body, or a stream that is piped to the agent as it arrives (an archive upload). */
   body?: Buffer | Readable
@@ -121,10 +148,9 @@ export interface AgentRequestOptions {
  * the logs of a quiet application looks like.
  */
 export function agentRequest(options: AgentRequestOptions): Promise<IncomingMessage> {
-  let base: string
+  const base = options.agent.url
   let target: URL
   try {
-    base = agentBaseUrl()
     if (!options.path.startsWith(AGENT_API_PREFIX)) throw outsideApi()
     target = new URL(base + options.path + (options.search ?? ''))
     // Belt and braces: whatever normalization URL applied, the result must still be inside the API.
@@ -145,7 +171,7 @@ export function agentRequest(options: AgentRequestOptions): Promise<IncomingMess
       signal: options.signal,
       headers: {
         ...options.headers,
-        'authorization': `Bearer ${options.token}`,
+        ...(options.token === undefined ? {} : { authorization: `Bearer ${options.token}` }),
         'user-agent': 'shipwick-dashboard',
         ...(Buffer.isBuffer(body) ? { 'content-length': String(body.length) } : {}),
       },

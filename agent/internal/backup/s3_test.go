@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -128,6 +127,7 @@ func testBucket(t *testing.T, prefix string) (*S3, *backuptest.S3) {
 	s3, err := NewS3(S3Config{
 		Endpoint: fake.URL, Bucket: backuptest.Bucket, Region: backuptest.Region,
 		AccessKeyID: backuptest.AccessKeyID, SecretAccessKey: backuptest.SecretAccessKey, Prefix: prefix,
+		RetryPause: time.Nanosecond,
 	})
 	if err != nil {
 		t.Fatalf("NewS3: %v", err)
@@ -233,14 +233,6 @@ func TestS3ErrorsNameTheServicesReasonAndNoCredential(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "not-the-secret") || strings.Contains(err.Error(), backuptest.AccessKeyID) {
 		t.Fatalf("the error carries a credential: %v", err)
-	}
-}
-
-func TestS3RefusesAnArchiveLargerThanOneUploadTakes(t *testing.T) {
-	s3, fake := testBucket(t, "")
-	err := s3.Put(context.Background(), "db/1/data.tar", bytes.NewReader(nil), maxPutBytes+1, emptyPayload)
-	if err == nil || len(fake.Requests()) != 0 {
-		t.Fatalf("got %v after %d requests, want a refusal before any", err, len(fake.Requests()))
 	}
 }
 

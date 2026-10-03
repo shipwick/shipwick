@@ -155,7 +155,7 @@ function closeRemove() {
         </UiPanel>
 
         <UiPanel v-if="mayAdmin" :title="replacing ? 'Replace a secret' : 'Add a secret'">
-          <form class="grid gap-4 px-4 py-4 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_auto] sm:items-end" @submit.prevent="set">
+          <form class="grid gap-4 px-4 py-4 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_auto] sm:items-start" @submit.prevent="set">
             <div>
               <label for="secret-name" class="label block">Name</label>
               <input
@@ -201,7 +201,7 @@ function closeRemove() {
                 {{ valueProblem || 'Sent once, over this session, and cleared from the page as soon as it is sent. Up to 64 KB.' }}
               </p>
             </div>
-            <UiButton type="submit" variant="primary" class="sm:mb-[1.625rem]" :pending="setting" :disabled="!ready">
+            <UiButton type="submit" variant="primary" class="sm:mt-[1.375rem]" :pending="setting" :disabled="!ready">
               {{ replacing ? 'Replace secret' : 'Add secret' }}
             </UiButton>
             <p v-if="stored" class="flex items-center gap-2 font-medium text-ok sm:col-span-3" role="status">

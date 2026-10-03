@@ -126,7 +126,7 @@ func TestInitAddsAnEntryToShipwickYAML(t *testing.T) {
 
 	// The file as it was, then the entry: indented like its neighbours and
 	// set apart by an empty line as they are.
-	want := twoEntries + "\n  - name: web\n    build: ./web\n    port: 3000\n    domain: www.example.com\n    health:\n      path: /\n"
+	want := twoEntries + "\n  - name: web\n    build: ./web\n    init: true\n    port: 3000\n    domain: www.example.com\n    health:\n      path: /\n"
 	if got := readOrEmpty(t, dir, spec.MultiFile); got != want {
 		t.Errorf("shipwick.yaml:\n%s\nwant:\n%s", got, want)
 	}

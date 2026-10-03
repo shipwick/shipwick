@@ -127,7 +127,7 @@ const TONE_FRAME = { ok: 'border-line', warn: 'border-line', danger: 'border-dan
         </p>
         <p v-if="registry" class="mt-1.5 text-fg-muted">
           If the image is private, the server needs a credential for <span class="mono text-fg">{{ registry }}</span>:
-          <NuxtLink :to="{ path: '/registries', query: { registry } }" class="link">log it in on the Registries page</NuxtLink>, then deploy again.
+          <NuxtLink :to="{ path: '/settings/registries', query: { registry } }" class="link">log it in on the Registries page</NuxtLink>, then deploy again.
         </p>
         <template v-if="progress.logs.length > 0">
           <p class="label mt-3">

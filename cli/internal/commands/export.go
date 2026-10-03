@@ -566,9 +566,12 @@ func (c *cli) standbyStatus(ctx context.Context) error {
 		case p.LastAt != nil:
 			c.ui.Println(fmt.Sprintf("%s; export #%d imported %s", line, p.LastExport, ui.RelativeTime(*p.LastAt, c.now())))
 		default:
-			c.ui.Println(line + "; none imported since the agent started")
+			c.ui.Println(line + "; none imported yet")
 		}
 		c.ui.Println()
+	}
+	if p := standby.Promotion; p != nil {
+		c.describePromotion(*p)
 	}
 	if len(standby.Applications) == 0 {
 		c.ui.Println("No application is waiting for a promotion here.")
@@ -654,6 +657,11 @@ func (c *cli) standbyPromoteCommand() *cobra.Command {
 imported, waiting for each to be ready, and print the DNS records that make
 their hostnames reach this server.
 
+The promotion runs on the server. This command follows it and says what
+became of each application as it comes up; if the connection is lost or the
+agent restarts, it waits and carries on, and run again while a promotion is
+under way it follows that one.
+
 Run it when the first server is gone, or about to be. Nothing here checks
 that: two servers running the same applications against the same outside
 services is yours to rule out. Visitors arrive once the records have changed
@@ -668,53 +676,7 @@ its configuration and give its backups a bucket prefix of their own.`,
 			if err != nil {
 				return err
 			}
-			ctx := cmd.Context()
-			standby, err := cl.Standby(ctx)
-			if err != nil {
-				return err
-			}
-			if len(standby.Applications) == 0 {
-				c.ui.Println("No application is waiting for a promotion on " + c.describeServer(cl.URL()) + ".")
-				return nil
-			}
-			names := make([]string, 0, len(standby.Applications))
-			for _, a := range standby.Applications {
-				names = append(names, a.Name)
-			}
-			if !yes {
-				if !isTerminal(c.in) {
-					return errors.New("refusing to promote without confirmation; pass --yes")
-				}
-				c.ui.Printf("This starts %s on %s: %s.\nThe server they were exported from must no longer be serving.\nType promote to confirm: ",
-					plural(len(names), "application"), c.describeServer(cl.URL()), strings.Join(names, ", "))
-				answer, _ := bufio.NewReader(c.in).ReadString('\n')
-				if strings.TrimSpace(answer) != "promote" {
-					return errors.New("cancelled")
-				}
-			}
-			c.ui.Progress("Starting %s", strings.Join(names, ", "))
-			promotion, err := cl.Promote(ctx)
-			c.ui.Done()
-			if err != nil {
-				return c.stoppedWaiting(ctx, err, "Applications that were started keep running; see them with: shipwick ps")
-			}
-			failed := false
-			for _, a := range promotion.Applications {
-				switch a.Status {
-				case api.PromotedRunning:
-					c.ui.Success("%s is running", a.Name)
-				case api.PromotedStarted:
-					c.ui.Warn("%s: %s", a.Name, a.Message)
-				default:
-					failed = true
-					c.ui.Failure("%s could not be started: %s", a.Name, a.Message)
-				}
-			}
-			c.printRecords(promotion.Records)
-			if failed {
-				return ErrReported
-			}
-			return nil
+			return c.promote(cmd.Context(), cl, yes)
 		},
 	}
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation")

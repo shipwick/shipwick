@@ -229,6 +229,7 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 | `SHIPWICK_AGENT_DOMAIN` | — | Serve the agent's API over HTTPS at this hostname, through Caddy |
 | `SHIPWICK_DASHBOARD_DOMAIN` | — | Serve the dashboard over HTTPS at this hostname, through Caddy |
 | `SHIPWICK_DASHBOARD_UPSTREAM` | `dashboard:3000` | Where Caddy reaches the dashboard |
+| `SHIPWICK_AGENTS` | — | Read by the dashboard, not the agent: the servers one dashboard shows, as `name=URL` pairs separated by commas or spaces, names of at most 40 characters (`production=http://agent:9000,staging=https://agent.staging.example.com`). Unset, the dashboard shows the server it runs on (`SHIPWICK_AGENT_URL`, which the compose file sets). See [Dashboard](#dashboard) |
 | `SHIPWICK_PROXY_TLS_ADDR` | `caddy:443` | Where the agent reaches Caddy's TLS port, to report each hostname's certificate (§11) |
 | `SHIPWICK_WEBHOOK_URL` | — | Where to post notifications: a Slack or Discord webhook, or any HTTPS endpoint. See [Being told](#7-deployment) |
 | `SHIPWICK_WEBHOOK_SECRET` | — | Signs each notification (`X-Shipwick-Signature: sha256=<HMAC of the body>`), so your endpoint can tell it came from the agent |
@@ -245,9 +246,216 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 | `SHIPWICK_EXPORT_SCHEDULE` | — | A five-field cron expression, UTC: when an [export of the whole server](#moving-to-a-new-server) is written to where backups go. Needs `SHIPWICK_BACKUP_PASSPHRASE` |
 | `SHIPWICK_EXPORT_KEEP` | `3` | How many of those exports are kept |
 | `SHIPWICK_STANDBY_SCHEDULE` | — | Makes the server a [standby](#a-second-server-kept-ready): when it imports the newest export from the bucket, with every application stopped. Needs the `SHIPWICK_BACKUP_S3_*` variables and the passphrase of the server it stands by for; its own backups then stay on its disk. Not together with `SHIPWICK_EXPORT_SCHEDULE` |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | — | The proxy the agent's own requests go through — the webhook, the bucket, the sign-in provider — and Caddy's. Not the Docker daemon's, which pulls the images. See [Behind a corporate proxy](#behind-a-corporate-proxy) |
+| `SHIPWICK_CA_FILE` | — | A PEM file of certificate authorities trusted in addition to the system's, as the agent sees the path; in a container, mounted in `compose.override.yml`. The agent does not start with a file it cannot use |
+| `SHIPWICK_DNS_RESOLVERS` | public resolvers | Who is asked whether a hostname points at the server: `system`, the server's own resolver, or name servers by address, `10.0.0.2,10.0.0.3`. Unset, the public ones, and the server's own when they cannot be reached |
+| `SHIPWICK_ACME_DIRECTORY` | Let's Encrypt | The directory URL of an ACME server of your own, `https://…`: Caddy obtains every certificate there. Needs `SHIPWICK_CADDY_ADMIN` |
+| `SHIPWICK_OIDC_ISSUER` | — | The issuer URL of an OpenID Connect provider: people then [sign in to the dashboard](#signing-in-with-the-companys-accounts) with its accounts. `https`; plain `http` only for `localhost` and private addresses. Needs the next two and `SHIPWICK_DASHBOARD_DOMAIN` |
+| `SHIPWICK_OIDC_CLIENT_ID`, `SHIPWICK_OIDC_CLIENT_SECRET` | — | The client the provider registered for Shipwick. The secret is sent to the provider's token endpoint only; never logged, never returned |
+| `SHIPWICK_OIDC_SCOPES` | `openid email profile` | What is asked of the provider, separated by spaces; must contain `openid`. Okta wants `groups` added for group rules |
+| `SHIPWICK_OIDC_GROUPS_CLAIM` | `groups` | The claim of the ID token that lists a person's groups |
+| `SHIPWICK_OIDC_REDIRECT_URL` | `https://<SHIPWICK_DASHBOARD_DOMAIN>/auth/callback` | Development only: where the provider sends the browser back to when the dashboard runs on the developer's machine, `http://localhost:3000/auth/callback`. Anything but a localhost URL is refused |
 | `SHIPWICK_LOG_LEVEL` | `info` | `debug` `info` `warn` `error` |
 | `SHIPWICK_LOG_FORMAT` | `text` | `text` `json` |
 | `DOCKER_HOST`, `DOCKER_CONFIG` | Docker defaults | Standard Docker variables are honored |
+
+### Behind a corporate proxy
+
+A server whose way to the internet is a proxy has several programs that go
+out, and each has its own setting. Nothing below is needed on a server with a
+plain connection.
+
+| What goes out | Who sends it | What it follows |
+|---|---|---|
+| Image pulls | the Docker daemon | Docker's own configuration, below. Nothing set for Shipwick reaches a pull |
+| Notifications to the webhook, backups to the bucket | the agent | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`; `SHIPWICK_CA_FILE` |
+| Certificates: the certificate authority, Cloudflare's API | Caddy | the same three variables; `SHIPWICK_ACME_DIRECTORY` |
+| Whether a hostname points at the server | the agent, by DNS | `SHIPWICK_DNS_RESOLVERS` |
+| The installer's downloads | `curl` or `wget` | `HTTPS_PROXY` |
+| `shipwick` to the agent and to GitHub (`upgrade`, `doctor`) | the CLI | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`; `SHIPWICK_CA_FILE` |
+
+Health checks, requests from Caddy to replicas, the Docker socket and Caddy's
+admin socket never go through a proxy, whatever the variables say. Neither
+does a request to a name without a dot — a container or an application on the
+server's own networks — so those need no entry in `NO_PROXY`. The dashboard
+talks to the agent only, inside the server, and to nothing else.
+
+**The installer.** Give it the proxy and it uses it for its downloads and
+writes it to `/opt/shipwick/.env`, from where the compose file hands it to the
+agent and to Caddy:
+
+```bash
+export HTTPS_PROXY=http://proxy.example.com:3128
+curl -fsSL https://get.shipwick.com | sudo -E sh
+```
+
+A user name and a password go into the URL, `http://user:password@proxy.example.com:3128`,
+with characters that are special in a URL percent-encoded. They are a secret:
+the agent logs the proxy's host and port and nothing else of it, and no error
+repeats the URL. To add or change the proxy later, edit `HTTPS_PROXY`,
+`HTTP_PROXY` and `NO_PROXY` in `.env` and run `cd /opt/shipwick && docker
+compose up -d`.
+
+**Docker.** Images are pulled by the Docker daemon, which reads neither that
+file nor the shell's variables. It needs the proxy in `/etc/docker/daemon.json`,
+and a restart:
+
+```json
+{
+  "proxies": {
+    "http-proxy": "http://proxy.example.com:3128",
+    "https-proxy": "http://proxy.example.com:3128",
+    "no-proxy": "localhost,127.0.0.0/8"
+  }
+}
+```
+
+```bash
+systemctl restart docker
+```
+
+A registry whose certificate comes from an authority of your own — or a proxy
+that opens TLS and signs with one — is trusted by the daemon through
+`/etc/docker/certs.d/<registry>/ca.crt`. When a pull fails on the way to the
+registry, the deployment's error says which of the two it was and names the
+file to change. `shipwick doctor` compares the two sides:
+
+```text
+! The agent goes through the proxy proxy.example.com:3128, and the Docker daemon on the server has none configured: images are pulled by the daemon, not by the agent. If pulls fail, add "proxies" to /etc/docker/daemon.json on the server and restart Docker
+```
+
+**When the proxy refuses.** The agent's log names the proxy, the destination
+and the proxy's answer, so that a refusal is not mistaken for the
+destination's:
+
+```text
+level=WARN msg="notification not delivered" event=deployment.succeeded app=my-api host=hooks.example.com attempts=4 error="the proxy proxy.example.com:3128 refused to connect to hooks.example.com:443 (403 Forbidden): check that the proxy allows this destination"
+```
+
+**A certificate authority of your own.** A webhook endpoint or a bucket
+inside the company, or a proxy that opens TLS, presents a certificate that no
+public authority issued. Put the authority's certificate — PEM, one or
+several — on the server, name it in `.env` by the path the agent's container
+sees, and mount it in `/opt/shipwick/compose.override.yml`:
+
+```bash
+SHIPWICK_CA_FILE=/etc/shipwick/ca.pem          # in /opt/shipwick/.env
+```
+
+```yaml
+services:
+  agent:
+    volumes:
+      - /etc/shipwick/ca.pem:/etc/shipwick/ca.pem:ro
+  caddy:
+    volumes:
+      - /etc/shipwick/ca.pem:/etc/ssl/certs/shipwick-ca.pem:ro
+```
+
+The authorities in the file are trusted in addition to the system's, by the
+agent for the webhook, the bucket and the sign-in provider. The agent checks the file when it
+starts and does not start with one it cannot use; the message says what is
+wrong — the file is missing, is a directory (what Docker creates when the
+path left of the colon does not exist), holds a key, holds a server's
+certificate instead of its authority's, or holds only certificates that have
+expired. The second mount is for Caddy, which needs the authority only to
+reach an ACME server of your own (below): Caddy reads every certificate in
+`/etc/ssl/certs`. On a laptop, `SHIPWICK_CA_FILE` in the environment does the
+same for `shipwick`, for an agent whose certificate that authority issued.
+The Docker daemon has its own trust, above.
+
+**Certificates.** Let's Encrypt has to reach the server on ports 80 and 443
+from the internet, and Caddy has to reach Let's Encrypt; a proxy provides the
+second, not the first. With `SHIPWICK_CLOUDFLARE_API_TOKEN` only outgoing
+requests are needed, and they go through the proxy. Where neither works there
+are two ways:
+
+- an ACME server of your own. `SHIPWICK_ACME_DIRECTORY` is its directory URL,
+  `https://ca.example.internal/acme/acme/directory`; Caddy then obtains and
+  renews every certificate there and asks no public authority. Its own
+  certificate has to be trusted by Caddy: the second mount above;
+- certificates you supply, `shipwick cert set <hostname> --cert <file> --key
+  <file>` (§11), which need no authority to be reachable at all.
+
+**DNS.** Before a hostname is routed, the agent asks public name servers
+whether it points at the server (§11). Behind a firewall that lets no DNS out
+they do not answer; the agent then asks the server's own resolver and leaves
+the public ones alone for five minutes. Hostnames that exist only inside the
+company are found that way too. `SHIPWICK_DNS_RESOLVERS=system` skips the
+public ones from the start; a list of addresses, `10.0.0.2,10.0.0.3`, names
+the servers to ask instead.
+
+`shipwick server status` shows what is set, on a server where something is:
+
+```text
+Network         proxy proxy.example.com:3128 · certificate authorities of its own · DNS system
+```
+
+### A server with no way out
+
+A server that reaches neither GitHub nor a registry is installed from files.
+On a machine that has a connection and Docker:
+
+```bash
+shipwick server bundle --arch amd64
+```
+
+```text
+✓ Release v0.6.0: compose.production.yml, install.sh and shipwick_linux_amd64 match its checksums
+✓ Wrote shipwick-v0.6.0-linux-amd64.tar.gz (112 MB)
+
+Copy it to the server, and there, as root:
+  tar -xzf shipwick-v0.6.0-linux-amd64.tar.gz
+  sh shipwick-v0.6.0-linux-amd64/install.sh
+```
+
+The bundle holds the release's compose file, installer and checksums, the
+`shipwick` binary for the server, and the three images in one archive, pulled
+for the server's architecture (`--arch amd64` or `arm64`). `--version v0.6.0`
+picks a release other than the latest; a bundle can be made of 0.6.0 and
+later. The release's files are verified against its checksums when the bundle
+is made and again by the installer on the server; the image archive carries a
+checksum of its own, so a copy that arrived damaged is refused before
+anything is changed.
+
+Copy the file by whatever means the network allows, unpack it and run the
+installer inside it. It is the same installer and asks the same questions; it
+downloads nothing and pulls nothing:
+
+```text
+✓ The bundle is complete (/root/shipwick-v0.6.0-linux-amd64)
+✓ Docker 29.8.2 with Compose 5.5.1
+✓ Loaded the images from the bundle
+✓ Installed /opt/shipwick/compose.yml
+✓ Wrote /opt/shipwick/.env
+✓ Started the Shipwick services
+✓ The agent is healthy
+✓ Installed the shipwick CLI to /usr/local/bin/shipwick
+```
+
+`sh install.sh --bundle <directory or .tar.gz>` does the same from anywhere.
+**Upgrading** is the same procedure with the bundle of a newer release; `.env`
+and the token stay as they are, and the images of the release before are
+removed.
+
+What such a server needs besides:
+
+- **Docker.** The bundle does not bring it. Install Docker Engine and the
+  Compose plugin from your distribution's packages, copied to the server, or
+  from Docker's static binaries
+  ([docs.docker.com/engine/install/binaries](https://docs.docker.com/engine/install/binaries/));
+  the installer checks for both before it changes anything.
+- **Your applications' images.** With `build:` in `deploy.yaml`, `shipwick
+  deploy` builds on your machine and sends the image through the agent: no
+  registry is involved (§7). An `image:` has to come from a registry the
+  server reaches, inside the company; its certificate and credentials are
+  Docker's, as above, and `shipwick registry login`.
+- **Certificates.** Let's Encrypt is out of reach: an ACME server of your
+  own, or certificates you supply — see above.
+- **Nothing else.** DNS falls back to the server's resolver by itself. The
+  webhook, the bucket and the sign-in provider, if you use them, are inside the company, with
+  `SHIPWICK_CA_FILE` when their certificates are. `shipwick doctor` on such a
+  network reports that it could not check for a newer release, and goes on.
 
 ## 5. Quick start
 
@@ -459,22 +667,98 @@ supervisor's event feed, followed logs, scheduled jobs and their runs, volume
 backups — and the everyday actions: deploy another image, roll back, stop,
 start, delete, run a command, restore a backup, manage tokens.
 
-An application's page also shows what the proxy saw of it — requests, errors
-and durations over an hour, a day or a week, and the most recent requests —
-the certificate of each hostname when it is not in order, its `proxy` block,
-and, for an application with volumes, the backups the agent took: take one,
-verify one, download a volume of one, restore one into the stopped
-application. The server's page shows the disk, the alerts that hold right
-now (they are marked on every page), where backups go and whether the agent's
-own state is backed up, the exports in the backups, and on a standby what
-waits there and the button that promotes it. Registry credentials and
-supplied certificates have a page each, next to secrets; the encryption key
-is rotated from the server's page. What needs a file or a passphrase of your
-own stays with the CLI: the first deployment of an application, `shipwick
-export` to a file, and `shipwick import`.
+The overview answers whether everything is fine in one sentence, lists the
+applications that need attention and the alerts that hold right now, and
+shows the server in four facts. The navigation has three groups: what runs
+(applications, deployments, logs), the server (its status, volumes,
+certificates) and settings (secrets, registries, access).
 
-Sign in with an API token; what it may do follows the token's role. The
-browser never holds it: the dashboard's own server keeps it in an `httpOnly`
+An application's page has a tab for each thing you come for, each with an
+address of its own (`/applications/my-api/backups`):
+
+| Tab | What is there |
+|---|---|
+| Overview | What is wrong and where to look, the deployment in progress, live CPU and memory, the replicas, the latest deployments, events |
+| Metrics | What the proxy saw — requests, errors and response times over an hour, a day or a week, and the most recent requests — and CPU and memory over the same windows |
+| Logs | The replicas' output, followed |
+| Deployments | Every attempt, with its origin and who made it |
+| Jobs | Scheduled jobs, their runs, *Run now* and *Run command* |
+| Backups | For an application with volumes: the backups the agent took — take one, verify one, download a volume of one, restore one into the stopped application |
+| Configuration | The deploy.yaml of the version that runs, its `proxy` block included, read-only |
+
+The applications list and the overview mark an application that runs but has
+an alert, or a hostname whose certificate is not in order, with a few words
+next to its status. A container on its way out after a deployment is listed
+below the replicas as *Stopping*.
+
+**A new application from the dashboard.** *New application*, in the header of
+the applications list, takes a pasted `deploy.yaml`. The agent checks it
+first and the page lists every field it refuses with what it expects; a
+secret the document refers to and the server does not have links to the
+Secrets page with its name filled in. When the document is in order it is
+deployed and the application's page follows the deployment. This is for an
+image that is in a registry: a document with `build:` or `static:` is told
+that it is deployed with `shipwick deploy` from the project's directory,
+because the dashboard has neither a project to build from nor a folder to
+upload. The same page deploys a changed configuration of an existing
+application (*deploy a changed configuration* on its Configuration tab). It
+starts empty: the agent never returns the values of an application's
+environment, so the document has to come from the project.
+
+Deploy, roll back, stop, start and delete are in the page's header on every
+tab. A static application has no Logs or Jobs tab. The server's page works
+the same way: *Status* (alerts, disk, the proxy, notifications), *Backups*
+(where they go and the agent's own state), *Export and standby* (the exports,
+the last import, and on a standby what waits there and the button that
+promotes it) and *Encryption key*. A promotion is started and then shown as
+it runs — a row per application, and the DNS records to change from the
+first moment — and it goes on when the page is closed; opening the page while
+one runs shows it. *Status* names the proxy the agent leaves the server
+through when one is set, and warns when the Docker daemon has none. *Backups*
+has *Adopt backups* for admins, which is `shipwick backups adopt`.
+
+*Access* has three tabs. *API tokens* lists the tokens with the applications
+each is limited to and when it expires, and creates one: applications can be
+chosen for the `deploy` role, and an expiry of 30, 90 or 365 days or a date.
+*Sign-in* holds the rules that say who gets which role when they sign in
+through the provider, and who is signed in now. *Audit trail* is
+`shipwick audit`: who did what, from which address and how it was answered,
+filtered by application, name and time, with the deployment an entry made
+linked. Addresses from
+before the tabs — `/tokens`, `/secrets`, `/registries` — lead to the pages
+they became. What needs a file or a passphrase of your own stays with the CLI:
+the first deployment of an application, `shipwick export` to a file, and
+`shipwick import`.
+
+Sign in with an API token; what it may do follows the token's role, and for
+a `deploy` token limited to some applications the page of every other
+application says in words that it can be looked at and not changed. A token
+that expires says so in the sidebar from fourteen days before, and one that
+has expired returns you to the sign-in page with the agent's sentence. On an
+agent with a sign-in provider (§12) the page offers *Sign in with* the
+provider above the token field; the dashboard's server starts the sign-in and
+hands the provider's code to the agent, which holds the client secret.
+
+**Several servers in one dashboard.** Set `SHIPWICK_AGENTS` on the dashboard
+to `name=URL` pairs and it shows each of those servers:
+
+```bash
+# /opt/shipwick/.env on the server whose dashboard you use
+SHIPWICK_AGENTS=production=http://agent:9000,staging=https://agent.staging.example.com
+```
+
+Each server has its own sign-in, kept in a cookie of its own, and signing out
+of one leaves the others. The box under the logo names the server a page is
+about and switches between them; `/servers` lists them. Every address
+carries its server (`/applications/web?server=staging`), so a link someone
+shares opens on the server it was copied from, asks for a sign-in there if
+there is none, and says so when the dashboard has no server by that name. A
+URL in the list is the agent as the dashboard's server reaches it, the same
+address `shipwick login --url` takes: the other server's agent needs a
+hostname (`SHIPWICK_AGENT_DOMAIN`) or a private network between the two.
+With one server nothing changes.
+
+The browser never holds a token: the dashboard's own server keeps it in an `httpOnly`
 cookie and relays requests to the agent, so the agent needs no CORS and can
 stay off the public internet. It has no database and no state of its own —
 anything it does, `shipwick` and `curl` can do too.
@@ -498,7 +782,7 @@ proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 | `port` | — | Port the app listens on. Required with `domain` or `health` |
 | `domain` | — | Public hostname, served over HTTPS by Caddy. May be a wildcard, `"*.example.com"`: every name one label below the domain — see [Wildcards](#11-caddy) |
 | `aliases` | — | Up to 20 more hostnames served exactly like `domain`, wildcards included. Needs `domain` |
-| `redirects` | — | Up to 20 hostnames redirected (308) to `https://<domain>`, path and query kept: `www.example.com`, an old domain. Needs `domain` |
+| `redirects` | — | Up to 20 hostnames redirected (308) to `https://<domain>` — to `https://<domain><path>` for an application with a `path` — path and query kept: `www.example.com`, an old domain. Needs `domain` |
 | `path` | — | Serve only this path of the domain and everything under it: `/api` takes `example.com/api` and `example.com/api/users`, not `/apix`. Several applications share a domain under different paths; the longest path wins and an application without one takes the rest. Starts with `/`, no trailing slash, letters, digits and `. _ ~ -` between the slashes, at most 200 characters. Needs `domain` — see [Caddy](#11-caddy) |
 | `proxy.strip_prefix` | `false` | Remove `path` from a request before the application sees it: `/api/users` arrives as `/users`. Needs `path`. A static application's files are always looked up without it |
 | `proxy.headers` | — | Up to 50 response headers, set on every response the application or its folder gives, over what the application sent under the same name. Not the ones that belong to the connection (`Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, …) |
@@ -522,10 +806,12 @@ proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 | `backups.schedule` | — | When the agent backs up the application's volumes: a cron schedule (five fields, **UTC**). Needs `volumes` — see [Backups the server takes](#backups-the-server-takes) |
 | `backups.keep` | `7` | How many successful backups are kept, 1–365; the oldest go once a new one has succeeded |
 | `backups.before` | — | A command run inside the running replica before the archive is taken, as a list: a dump, a checkpoint. A non-zero exit fails the backup and nothing is archived |
+| `backups.before_timeout` | `1h` | How long `backups.before` may run, 1s–24h. A command still running at the limit fails the backup, and nothing is archived. Needs `backups.before` |
 | `backups.stop` | `false` | Stop the application while the archive is taken, and start it again whatever happens |
 | `restart.policy` | `always` | `always` `on-failure` `never` |
 | `deploy.strategy` | `rolling` | `rolling` `recreate` — see [Deployment](#7-deployment) |
 | `deploy.stop_timeout` | `10s` | How long a replica that is being stopped gets between `SIGTERM` and `SIGKILL`, 1s–10m: raise it for WebSockets or long uploads — see [Deployment](#7-deployment). Not for a static application |
+| `init` | `false` | `true` runs Docker's init process as the first process of every container of the application — replicas, the pre-deploy hook, jobs, one-off commands — with the image's own as its child: it passes `SIGTERM` on and reaps children. For a process that does not handle the signal as the first process, such as `node server.js`; not for an image that brings its own init (`tini`, s6-overlay) — see [Deployment](#7-deployment). Not for a static application |
 | `after` | — | `shipwick.yaml` only: names of the applications in the same file that must have deployed before this one starts — see [Quick start](#5-quick-start) |
 
 Mistakes are reported all at once, by field:
@@ -681,13 +967,37 @@ first process (`CMD ["node", "server.js"]`) ignores `SIGTERM` unless it
 installs a handler. Shipwick tells you when that happened:
 
 ```text
-The replaced container shipwick_my-api_6_1 did not exit within 10s of SIGTERM and was killed. To let it finish its requests, handle SIGTERM in the application; to give it longer, set deploy.stop_timeout
+The replaced container shipwick_my-api_6_1 did not exit within 10s of SIGTERM and was killed. If its process has no handler for SIGTERM, set init: true and the signal ends it at once; to let it finish its requests, handle SIGTERM in the application; to give it longer, set deploy.stop_timeout
 ```
 
 The line appears among the application's events (`shipwick status`, the
 dashboard) once the old container is gone, which is after the deployment has
-completed. Handle the signal, or start the program under an init such as
-`tini` in your image.
+completed; `shipwick stop` writes the same line about a replica it had to
+kill. Until it is gone, `shipwick status` lists the old container as
+`stopping`, apart from the replicas.
+
+**An init process.** The kernel hands the first process of a container no
+signal it has not installed a handler for, which is why `node server.js`
+sits out its grace period. `init: true` puts Docker's own init process in
+front of it:
+
+```yaml
+init: true
+```
+
+The init process passes `SIGTERM` on to the application, which is then an
+ordinary process and ends on it at once, and it reaps the children the
+application leaves behind. The same ten-line Node server, stopped with
+`shipwick stop`, took 0.3 seconds with `init: true` and 10.4 seconds — its
+whole grace period, then the kill — without. It applies to every container
+of the application: replicas, the pre-deploy hook, jobs and one-off
+commands. It is not the default, because an image that brings its own init
+does not want a second one: s6-overlay refuses to start unless it is the
+first process, and an image whose entrypoint is `tini` would run two.
+`shipwick init` writes `init: true` into the `deploy.yaml` of a Node project
+whose Dockerfile it writes. An application that handles `SIGTERM` to finish
+its requests still does under an init process; ending at once is what
+happens to one that does not.
 
 **`recreate`, for what cannot run twice.** A database, or anything that holds a
 lock, cannot have two versions running at once. With `deploy.strategy:
@@ -1142,6 +1452,7 @@ backups:
   schedule: "0 3 * * *"     # five cron fields, UTC, like jobs
   keep: 7                   # successful backups kept; default 7
   before: ["pg_dump", "-U", "postgres", "-f", "/var/lib/postgresql/data/backup.sql", "app"]
+  before_timeout: 1h        # how long `before` may run; default 1h, up to 24h
   stop: false               # stop the application for the archive; default false
 ```
 
@@ -1149,10 +1460,15 @@ A backup is one tar archive per volume, the same archive `shipwick backup`
 downloads. Two things decide whether what is in it can be trusted:
 
 - `before` runs inside the running replica first, as a list of arguments, never
-  through a shell: a dump written into the volume, a checkpoint. It has an
-  hour. If it exits non-zero the backup fails and nothing is archived — an
-  archive without the dump it was meant to hold is not the backup you asked
-  for.
+  through a shell: a dump written into the volume, a checkpoint. If it exits
+  non-zero the backup fails and nothing is archived — an archive without the
+  dump it was meant to hold is not the backup you asked for. It has an hour,
+  or what `before_timeout` says, up to 24h; the application is held for as
+  long as it runs. A command still running at the limit fails the backup the
+  same way, with an error that names the key. Docker has no way to end a
+  command once it was started in a container, so one that hangs stays there
+  until it ends by itself or the application is deployed or restarted; the
+  backup no longer waits for it.
 - `stop: true` stops the application for as long as the archive takes and
   starts it again whatever happens, a failed backup included. This is the one
   way to a consistent copy of files a process keeps open and has no dump tool
@@ -1179,6 +1495,7 @@ ID   WHEN      TRIGGER    SIZE      WHERE                   STATUS      VERIFIED
 | `shipwick backups download <app> <id> [-o dir]` | Fetch a backup's archives, decrypted, as `<app>-<volume>-backup-<id>.tar` |
 | `shipwick backups rm <app> <id>` | Remove one, from the server and the bucket |
 | `shipwick backups decrypt <file>` | Decrypt a file taken from the server or the bucket, on your machine |
+| `shipwick backups adopt [app]` | Record the backups that the directory and the bucket hold and the agent's database does not know, as after [restoring the agent's state](#backups-the-server-takes); everything, or one application's |
 
 `shipwick status` has a line for it — `Backups   daily at 03:00 UTC, last 5h
 ago (2.1 GB), 7 kept`, or the failure — and a scheduled backup that fails is
@@ -1203,11 +1520,25 @@ SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY=…
 
 then `cd /opt/shipwick && docker compose up -d`. Every backup then goes to the
 directory *and* to the bucket, under `<prefix>/<application>/<id>/`, and one
-that did not reach both has failed: nothing is kept of it. An archive larger
-than 5 GB does not fit one S3 upload and fails the same way; such a volume is
-backed up to the server only, until multipart uploads exist. `keep` applies in
+that did not reach both has failed: nothing is kept of it. `keep` applies in
 both places, and only successful backups count towards it: a week of failures
 never pushes out the one backup that worked.
+
+**Large archives.** An archive of more than 64 MiB goes to the bucket as a
+multipart upload: in parts of that size, read from the file on the server one
+after the other, so that its size costs no memory, and a part that fails is
+sent again, up to three times in all. The limit is the service's own for one
+object, 5 TiB on S3; the server's disk has to hold the archive first. An
+upload that fails or is interrupted is aborted, so that no parts are left in
+the bucket to be paid for. For the upload an agent did not live to abort —
+the server lost power in the middle of an archive — the agent leaves a note
+next to the file for as long as it is being sent, and the next agent aborts
+what the notes name before its own first upload. If the disk went with the
+agent, it asks the bucket for the unfinished uploads under its prefix and
+aborts those named like a backup's files. Not every service answers that
+question: MinIO lists unfinished uploads only under an exact key, and removes
+stale ones by itself. A lifecycle rule on the bucket that aborts incomplete
+multipart uploads after a few days costs nothing and is the last line.
 
 With `SHIPWICK_BACKUP_PASSPHRASE` set, everything is encrypted before it is
 written anywhere — AES-256-GCM with a key derived from the passphrase; the
@@ -1304,10 +1635,35 @@ shipwick backups restore postgres 12    # read from the bucket
 shipwick start postgres
 ```
 
-What the restored state cannot know is what happened after it was taken. A
-backup newer than it is still in the bucket, at
-`<prefix>/<application>/<id>/<volume>.tar.enc`: fetch it, `shipwick backups
-decrypt` it, and put it back with `shipwick restore`. Static applications are
+What the restored state does not know is what happened after it was taken.
+The backups taken since are still in the bucket, at
+`<prefix>/<application>/<id>/<volume>.tar.enc`, and the database has no
+record of them. Have the agent record them, before or after the restore
+above:
+
+```text
+$ shipwick backups adopt
+BACKUP OF           ID   WHEN     SIZE     WHERE
+postgres            13   5h ago   39 MB    s3 (encrypted)
+the agent's state   14   4h ago   212 KB   s3 (encrypted)
+
+✓ Adopted 2 backups
+```
+
+An adopted backup is listed with the trigger `adopted` and with what its
+files say: the volumes, their sizes, when they were written, encrypted or
+not. From then on it is a backup like any other — `verify`, `restore`,
+`download`, `rm`, and `keep` counts it. What the files cannot say is whether
+the backup was finished. For the agent's state and for exports, whose files
+are known, an unfinished one is left alone and reported; an application's is
+adopted with the volumes that are there, so run `shipwick backups verify` on
+one before you rely on it. The command changes nothing in the bucket or the
+directory, adopts nothing twice, and refuses a bucket that another
+installation writes to; `shipwick backups adopt <app>` looks at one
+application only. A backup of an application the restored state does not know
+is recorded too, and listed once an application of that name is deployed.
+
+Static applications are
 deployed again from their folders, and API tokens other than the one in `.env`
 come back with the database. Until the state is restored, the new server
 refuses to write into the old one's bucket and `shipwick doctor` says why;
@@ -1332,8 +1688,8 @@ shipwick --context new import move.swexport
 credentials and certificates with their keys; the images that exist nowhere
 but on the server, which are the ones `shipwick deploy` built; the folders of
 static applications; and a tar archive of every volume. Deployment history,
-metrics, events, API tokens and backups stay behind: they describe the old
-server. `--app <name>` (repeatable) limits it to some applications; the
+metrics, events, API tokens, the audit trail, access rules, sessions and
+backups stay behind: they describe the old server. `--app <name>` (repeatable) limits it to some applications; the
 secrets, credentials and certificates come along either way.
 
 **It is encrypted, always.** The file holds every secret the server has, in
@@ -1382,6 +1738,19 @@ application that fails does not stop the rest; `shipwick import --status`
 shows the import that is running or ran last, and the command exits non-zero
 when anything failed.
 
+An application's configuration is checked on the new server by every rule
+a `deploy.yaml` is checked by, before anything of the application is
+touched. One that does not pass — an export from a newer Shipwick, a
+damaged file — fails with the fields named, as `shipwick validate` would
+name them.
+
+An import ends with its upload. If the agent is restarted under one, the
+import has failed and says so in `shipwick import --status`, which the
+restarted agent still answers; what it had finished is in place, the
+deployment it was at is resumed like any deployment — an application that
+was being deployed stopped stays stopped — and running the import again
+with `--overwrite` does the rest.
+
 Images from a registry are pulled on the new server with the credentials the
 export brought. `pre_deploy` runs as in any deployment, except for an
 application that is deployed stopped. Hostnames wait for DNS as always: the
@@ -1400,8 +1769,7 @@ its backups go, encrypted with `SHIPWICK_BACKUP_PASSPHRASE`:
 `shipwick export --list` shows them. In the bucket it is
 `<prefix>/_export/<id>/export.tar.enc`; fetched and passed to
 `shipwick import` with that passphrase, it is the same file. Like every
-backup it is one upload, so an export larger than 5 GB fails when a bucket is
-configured.
+backup, a large one goes to the bucket in parts.
 
 ### A second server kept ready
 
@@ -1435,7 +1803,9 @@ shows what is waiting and when it arrived; `shipwick standby pull` imports
 now; `shipwick import <file> --stopped --overwrite` does the same from a file,
 for a standby without a bucket. A standby only reads the bucket: its own
 backups stay on its disk, so the two servers never write to the same place.
-An export the schedule has already imported is not imported again.
+An export the schedule has already imported is not imported again, across
+restarts of the agent as well; one whose import failed or was cut off is
+taken again at the next scheduled minute.
 
 Nobody has seen these applications run on the standby until the day they
 must. Promote it once on purpose, on a quiet day, before you rely on it.
@@ -1458,7 +1828,25 @@ api.example.com   A      203.0.113.77
 The applications are started in the order they were imported, each waited
 for until it is ready or its startup budget is spent; one that does not come
 up is reported and left to the supervisor, and the rest are started
-regardless. The records are every hostname of the promoted applications with
+regardless.
+
+The promotion runs on the server, not in the command. `shipwick standby
+promote` asks for it and then follows it, printing each application as it
+comes up. If the connection drops, the command waits and carries on; if the
+agent is restarted in the middle, the agent that starts goes on with the
+promotion where it was, and so does the command. If you lose the terminal,
+run the command again: while a promotion is under way it follows that one,
+without asking, and afterwards `shipwick standby` says when the server was
+promoted and names what did not start. An import is refused while a
+promotion runs, and a promotion while an import runs.
+
+A `shipwick` older than 0.6 still promotes a 0.6 server, in one request
+that is held until the end: it prints the outcome if its connection lasts
+that long, and nothing if it does not, though the promotion goes on. A
+0.6 `shipwick` promotes an older server the same way and says so when the
+connection is lost.
+
+The records are every hostname of the promoted applications with
 the server's own addresses, which the agent knows when
 `SHIPWICK_AGENT_DOMAIN` or `SHIPWICK_DASHBOARD_DOMAIN` is set. Certificates
 are obtained when the records point at the server, unless you supplied them:
@@ -1782,7 +2170,9 @@ than the server's own, which remembers that a record did not exist for as long
 as the zone's negative TTL says — half an hour on Cloudflare — and would keep
 saying so after the record was created; a certificate authority looks from
 the outside too. When none of them can be reached, the server's resolver
-decides. The agent's and the dashboard's own hostnames are never held back.
+decides, and `SHIPWICK_DNS_RESOLVERS` names others to ask (see
+[Behind a corporate proxy](#behind-a-corporate-proxy)). The agent's and the
+dashboard's own hostnames are never held back.
 
 **Behind Cloudflare.** With the orange cloud on, a visitor's connection ends
 at Cloudflare, and so does the certificate authority's: Caddy cannot prove
@@ -1897,7 +2287,16 @@ old.example.com     expires in 9 days, on 2026-03-10 (Let's Encrypt E7)
 ```
 
 `--verbose` lists the ones that are in order too, with their issuer and last
-day. The agent learns this the way a browser would: once a minute — every ten
+day. `shipwick ps` marks an application that has such a hostname, and one
+with active alerts, at the end of its line:
+
+```text
+NAME     STATUS    VERSION   REPLICAS   DOMAIN            UPDATED
+my-api   HEALTHY   1.4.2     2/2        api.example.com   5m ago    certificate waiting for DNS, 2 alerts
+blog     HEALTHY   2.0.1     1/1        blog.example.com  3d ago
+```
+
+The agent learns this the way a browser would: once a minute — every ten
 seconds while a certificate is still being obtained — it connects
 to Caddy with the hostname as the server name and reads the certificate it is
 handed, without verifying it — on a development machine the issuer is Caddy's
@@ -1985,7 +2384,10 @@ to `web`. Without an application that takes the rest, the rest is a `404`. A
 path matches whole segments — `/api` and `/api/users`, not `/apix` — and
 without regard to case, so `/API` and `/api` are one path. Each application
 keeps its own replicas, health checks, rollouts and rollbacks. Aliases are
-served under the same path; `redirects` remain whole hostnames. Two
+served under the same path; `redirects` remain whole hostnames, and lead to
+the application's path: with `redirects: [api.example.net]` on `api`,
+`https://api.example.net/users?page=2` is answered with a `308` to
+`https://example.com/api/users?page=2`. Two
 applications cannot have the same path of a hostname, or both none: the
 second deployment is refused and says which application has it.
 
@@ -2115,15 +2517,87 @@ credentials and certificates, and rotates the encryption key:
 
 ```bash
 shipwick token create ci --role deploy      # printed once; put it in the CI secret
-shipwick token ls                           # NAME  ROLE  CREATED  LAST USED
+shipwick token ls                           # NAME  ROLE  APPLICATIONS  EXPIRES  CREATED  LAST USED
 shipwick token revoke ci
 ```
 
-Give CI a `deploy` token and people `admin` ones. A token with too small a role
+Give CI a `deploy` token and people `admin` ones — or no tokens at all:
+people can [sign in with the company's accounts](#signing-in-with-the-companys-accounts). A token with too small a role
 is told so, and what it needs; `shipwick server status` shows which token and
 role you are using. Deployments record which token made them (`by` in the API
 and the dashboard's history), and a stop or start by a token other than root says so in the
 application's events.
+
+**A token for some applications.** A `deploy` token can be limited to the
+applications you name:
+
+```bash
+shipwick token create ci --role deploy --app my-api --app web
+```
+
+Such a token does to `my-api` and `web` what the `deploy` role allows — deploy
+(the first deployment included: the application need not exist yet), redeploy,
+roll back, stop, start, run commands and jobs, take and verify backups — and
+reads everything, as every token does: the other applications, their logs and
+history, the server. It changes nothing else: another application is refused
+with a message that names the token's applications, and so is anything of
+the `deploy` role that is not about one application. What takes `admin` stays
+refused, also for its own applications. Only `deploy` can be limited — a
+`read` token changes nothing, and `admin` is for the whole server — and the
+list is fixed when the token is created: for a different list, create another
+token. A limit narrows what a token can be used for by mistake or after a
+leak; it is not a wall between tenants, because a limited token still reads
+every application's logs and configuration (never the values of `env`).
+
+**A token with an end.** `--expires` takes days or hours from now, or a date:
+
+```bash
+shipwick token create ci --role deploy --expires 90d
+shipwick token create contractor --role read --expires 2027-01-31   # works through that day, UTC
+```
+
+From then on the token is refused, and whoever presents it is told that it
+expired and when — a wrong token is told nothing of the kind. An expired token
+stays in `shipwick token ls` until you revoke it; the list marks what expires
+within 14 days, and `shipwick doctor` and `shipwick server status` say when
+the token they run with does. A token cannot be extended: create its
+replacement, hand it over, revoke the old one. The root token, the one in the
+agent's environment, does not expire.
+
+**Who did what.** Every request that changes something is written down: who
+made it (the token's name), when, from which address, what it was about and
+how it was answered.
+
+```bash
+shipwick audit                              # the last 50, newest first; needs admin
+shipwick audit --app my-api --since 7d
+shipwick audit --actor ci -n 200
+```
+
+```
+WHEN                  WHO    ACTION         ON            RESULT    FROM          DETAIL
+2026-10-03 20:20:44   root   secret.set     DB_PASSWORD   ok        203.0.113.9
+2026-10-03 20:20:22   ci     deploy         web           refused   203.0.113.40
+2026-10-03 20:20:17   ci     deploy         my-api        ok        203.0.113.40  deployment 2
+2026-10-03 20:20:06   root   token.create   ci            ok        203.0.113.9   role deploy, limited to my-api, expires 2027-01-01T17:20:06Z
+```
+
+Recorded are deployments, redeployments and rollbacks, stops and starts,
+deletions, commands and jobs started by hand, uploaded images and folders,
+secrets set and removed (the name, never the value), registry logins and
+logouts, certificates, tokens created and revoked, key rotation, backups
+taken, verified, restored, removed and downloaded, volume downloads, restores
+and removals, exports, imports and promotions. A request that was refused for
+its role or its application limit is recorded as `refused`, any other failure
+as `failed` with the error's code; `ok` means the request was accepted — how
+a deployment then went is in its own record, which the detail names. Reading
+is not recorded, and neither is what the agent does by itself: scheduled
+backups and jobs, restarts. Behind the proxy the address is the one Caddy saw the
+request come from — Cloudflare's, for an agent hostname behind Cloudflare's
+proxy; on a direct connection, such as an SSH tunnel, it is that
+connection's. Nothing from a request's body is kept except names. The trail
+is kept for a year and at most 100,000 entries, whichever is reached first;
+it lives in the agent's database and travels with its backups.
 
 What Shipwick does:
 
@@ -2245,10 +2719,152 @@ the API; the log names the bucket and its host. Taking and verifying a backup
 needs the `deploy` role; downloading, restoring or removing one, and anything
 about the agent's state, needs `admin`.
 
-Not yet: roles per application rather than per server. Protect the data
-directory regardless; it is created `0700`.
+Protect the data directory regardless; it is created `0700`.
 
 Found a vulnerability? Please report it privately: [SECURITY.md](../SECURITY.md).
+
+### Signing in with the company's accounts
+
+A token is right for the CLI and for CI. For people in a browser, the agent
+can leave the question of who someone is to the place that already answers
+it: an OpenID Connect provider — Google Workspace, Microsoft Entra, Okta,
+Keycloak, or any other. People then sign in to the dashboard there, with
+whatever second factor and password rules the provider enforces, and a table
+on the agent says what each of them may do. Shipwick keeps no passwords and
+no list of users. Tokens keep working exactly as before, and the dashboard
+still takes one.
+
+**Turning it on.** Register Shipwick at the provider as a web application
+(a *confidential* client, the authorization-code flow) with one redirect
+URI, the dashboard's hostname followed by `/auth/callback`. The provider
+issues a client id and a client secret; they go into `/opt/shipwick/.env`
+together with the provider's issuer URL:
+
+```bash
+SHIPWICK_DASHBOARD_DOMAIN=dashboard.example.com
+SHIPWICK_OIDC_ISSUER=https://accounts.example.com/realms/company
+SHIPWICK_OIDC_CLIENT_ID=shipwick
+SHIPWICK_OIDC_CLIENT_SECRET=…
+```
+
+```bash
+cd /opt/shipwick && docker compose up -d      # the agent reads its environment at start
+shipwick server status                        # Sign-in   https://accounts.example.com/realms/company
+```
+
+The issuer is the URL under which the provider publishes
+`/.well-known/openid-configuration`, written exactly as the provider writes
+it there. It must be `https`; plain `http` is accepted for `localhost` and
+private addresses only. The agent reads the provider's endpoints and signing
+keys from there and reads them again every hour, so a key the provider
+rotates needs nothing done here. A provider that is down at that moment
+stops sign-ins, not the agent: tokens and sessions that exist are not
+affected.
+
+| Provider | Issuer | Where to register, and what else it needs |
+|---|---|---|
+| Google Workspace | `https://accounts.google.com` | Google Cloud console → *APIs & Services* → *Credentials* → *Create credentials* → *OAuth client ID*, type *Web application*, with the redirect URI under *Authorized redirect URIs*. Set the consent screen's user type to *Internal* to admit your organisation only. Google's ID tokens name no groups: use rules for addresses and for your domain |
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant id>/v2.0` | *App registrations* → *New registration*, *Accounts in this organizational directory only*, redirect URI of the platform *Web*; the secret under *Certificates & secrets*. The tenant's own issuer is required: the shared `common` and `organizations` endpoints name no single issuer and are refused. For group rules add a groups claim under *Token configuration*; Entra sends each group's **object id**, so a rule reads `group:0f3c…`, and leaves the claim out for a person in more groups than fit a token — limit it to the groups assigned to the application. An account without a mail address has no `email` claim and cannot sign in |
+| Okta | `https://<your org>.okta.com` | *Applications* → *Create App Integration* → *OIDC – OpenID Connect* → *Web Application*, with the redirect URI under *Sign-in redirect URIs*. For group rules add a groups claim filter to the application's ID token (claim name `groups`) and set `SHIPWICK_OIDC_SCOPES="openid email profile groups"` |
+| Keycloak | `https://<host>/realms/<realm>` | A client with *Client authentication* on and the *Standard flow*, the redirect URI under *Valid redirect URIs*. For group rules add a mapper of the type *Group Membership* to the client's dedicated scope: token claim name `groups`, *Add to ID token* on, and *Full group path* off for plain names (`developers`) or on for paths (`/developers`). An account whose e-mail address is not verified in Keycloak is refused |
+
+Sign-in was tested against Keycloak 26; the rows for the other three follow
+what those providers document. Two more variables exist for a provider that
+differs from the defaults: `SHIPWICK_OIDC_SCOPES` (`openid email profile`)
+is what is asked of it, and `SHIPWICK_OIDC_GROUPS_CLAIM` (`groups`) names
+the claim of the ID token that lists a person's groups.
+
+**Who gets in, and as what.** Nobody, until a rule says so:
+
+```bash
+shipwick access grant ada@example.com --role admin
+shipwick access grant group:backend --role deploy --app my-api --app worker
+shipwick access grant '*@example.com' --role read
+shipwick access ls                          # WHO  ROLE  APPLICATIONS  GRANTED  BY
+shipwick access revoke group:backend
+```
+
+A rule gives a role — the same three a token has, and for `deploy` the same
+optional limit to applications — to one address, to a group as the provider
+names it, or to every address at a domain (exactly that domain, not its
+subdomains). Granting again to the same address, group or domain replaces
+the rule. The most specific rule that matches a person decides, and the
+others are not looked at: the one for their address; else the ones for their
+groups; else the one for their domain. So `*@example.com` can let the whole
+company read, a group can deploy, and a rule for one address can give that
+person less than their group as well as more. Of several groups the highest
+role counts; where that is `deploy`, a group without a limit lifts it, and
+the limits of the others add up.
+
+Someone without a matching rule who signs in is refused with a sentence
+they can forward to whoever administers the server:
+
+```
+grace@example.com signed in, and no rule on this server gives that address a role.
+An admin grants one with: shipwick access grant grace@example.com --role read
+```
+
+The agent takes the address from the provider's ID token, and only one the
+provider does not mark as unverified. Rules are kept whether or not a
+provider is configured, so the table can be prepared first. Managing it
+needs `admin`.
+
+**What signing in gives.** A session of ten hours: longer than a working
+day, so nobody signs in twice in one, and shorter than the night between
+two, so every day starts with what the provider says about the person that
+day. It is not extended by use. To the agent a signed-in person is the same
+kind of caller a token is, with a role and perhaps a list of applications,
+so everything above about roles and limits holds unchanged, deployments name
+the address in `by`, and `shipwick audit` shows the person:
+
+```
+WHEN                  WHO               ACTION    ON       RESULT   FROM          DETAIL
+2026-10-03 09:14:02   ada@example.com   deploy    my-api   ok       203.0.113.9   deployment 31
+2026-10-03 09:00:11   ada@example.com   signin    server   ok       203.0.113.9   role deploy, limited to my-api, expires 2026-10-03T19:00:11Z
+```
+
+Sign-ins are recorded, the refused ones too, and so is every change to the
+rules.
+
+**Taking access away.** A session rests on what the rules gave the person
+when they signed in, and every request asks the rules again. Revoke the
+rule, or change what it gives, and the sessions that rested on it end with
+their next request — not when they expire — and say why; signing in again
+gives what the rules give now, or nothing. What the agent cannot see is a
+change at the provider: someone removed from a group there, or whose account
+was disabled, keeps a session that exists until it ends, ten hours at most.
+To end it now:
+
+```bash
+shipwick access sessions                    # who is signed in, as what, until when
+shipwick access signout ada@example.com     # ends every session of that person
+```
+
+`signout` signs a person out and does not keep them out: while a rule covers
+them and the provider lets them in, they can sign in again. Offboarding
+happens at the provider; a rule for a single address is revoked here.
+
+What Shipwick does about it:
+
+- The client secret is read from the agent's environment, sent to the
+  provider's token endpoint and nowhere else, and never logged or returned.
+  The dashboard and the browser never see it.
+- The sign-in is the authorization-code flow with PKCE. The code the
+  provider appends to the callback is useless to anyone who reads it there:
+  redeeming it takes a verifier that never left the dashboard's server-side
+  cookie, and the provider redeems each code once.
+- The agent believes an ID token only if one of the provider's keys signed
+  it (RS256 or ES256; a token that claims to be unsigned is refused), if it
+  was issued by the configured issuer for this client, is within its time
+  and minutes old, and carries the one-time value of this sign-in. Each such
+  value is accepted once.
+- The provider is only ever asked to send people back to the dashboard's
+  configured hostname, never to an address taken from a request.
+- Of a session the agent keeps the SHA-256, as of a token. A failed sign-in
+  and a session nobody issued count towards the same limit as a wrong token.
+- Rules, sessions and sign-ins stay on the server: an
+  [export](#moving-to-a-new-server) takes none of them along, as it takes no
+  tokens.
 
 ## 13. Development
 

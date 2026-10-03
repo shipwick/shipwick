@@ -99,6 +99,7 @@ func (e *Engine) Application(ctx context.Context, name string) (api.ApplicationD
 		view := containerView(c)
 		view.Restarts = restarts[c.ID]
 		view.Health, view.CrashLoop = e.sup.snapshot(c.ID)
+		view.Stopping = e.draining(c.ID)
 		detail.Containers = append(detail.Containers, view)
 	}
 	return detail, nil
@@ -165,7 +166,9 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 				out.Replicas.Healthy++
 			}
 		}
+		out.CertificateProblem = e.certificateProblem(active.Spec)
 	}
+	out.AlertCount, out.AlertSeverity = e.alertSummary(app.Name)
 	out.Status = applicationStatus(active != nil, app.DesiredState, out.Replicas, deploying, crashLoop)
 	return out
 }
@@ -403,5 +406,6 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		Alerts:        e.Alerts(),
 		Disk:          e.Disk(),
 		Backups:       e.BackupStatus(ctx),
+		Network:       e.networkStatus(info),
 	}, nil
 }

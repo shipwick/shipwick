@@ -27,6 +27,11 @@ start. admin also does the rest: delete applications, manage tokens and
 secrets. Give CI a
 deploy token and keep admin tokens for people. Managing tokens needs admin.
 
+A deploy token can be limited to applications with --app: it deploys, stops
+and runs commands in those, reads everything like any token, and is refused
+whatever is not about one of its applications. A token can be given an end
+with --expires; from then on it is refused, and says that it expired.
+
 The token the agent is configured with (SHIPWICK_AGENT_TOKEN, or the one it
 generated on first start) is "root": admin, not listed here, not revocable
 here — change it on the agent.`,
@@ -36,11 +41,17 @@ here — change it on the agent.`,
 }
 
 func (c *cli) tokenCreateCommand() *cobra.Command {
-	var role string
+	var (
+		role, expires string
+		apps          []string
+	)
 	cmd := &cobra.Command{
 		Use:   "create <name> --role read|deploy|admin",
 		Short: "Create a token; its value is shown once",
-		Args:  cobra.ExactArgs(1),
+		Example: `  shipwick token create laptop --role admin
+  shipwick token create ci --role deploy --app my-api --app web --expires 90d
+  shipwick token create auditor --role read --expires 2027-01-31`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			if err := api.ValidateTokenName(name); err != nil {
@@ -52,16 +63,43 @@ func (c *cli) tokenCreateCommand() *cobra.Command {
 			if err := api.ValidateRole(api.Role(role)); err != nil {
 				return err
 			}
+			req := api.CreateTokenRequest{Name: name, Role: api.Role(role)}
+			if len(apps) > 0 {
+				limited, err := api.ValidateTokenApplications(req.Role, apps)
+				if err != nil {
+					return fmt.Errorf("--app: %w", err)
+				}
+				req.Applications = limited
+			}
+			if expires != "" {
+				at, err := api.ParseExpiry(expires, c.now())
+				if err != nil {
+					return fmt.Errorf("--expires: %w", err)
+				}
+				req.ExpiresAt = &at
+			}
 			cl, err := c.connect()
 			if err != nil {
 				return err
 			}
-			created, err := cl.CreateToken(cmd.Context(), name, api.Role(role))
+			created, err := cl.CreateToken(cmd.Context(), req)
 			if err != nil {
+				// An agent from before limits and expiry refuses the fields it
+				// does not know, rather than create a token without them.
+				if (len(req.Applications) > 0 || req.ExpiresAt != nil) && client.IsCode(err, api.CodeInvalidRequest) && strings.Contains(err.Error(), "unknown field") {
+					return errors.New("the agent is older than this shipwick: it knows neither --app nor --expires, and created nothing\n\nCompare versions with: shipwick server status")
+				}
 				return err
 			}
 
-			c.ui.Success("Created token %s with the %s role", created.Name, created.Role)
+			summary := fmt.Sprintf("Created token %s with the %s role", created.Name, created.Role)
+			if len(req.Applications) > 0 {
+				summary += ", limited to " + strings.Join(req.Applications, ", ")
+			}
+			c.ui.Success("%s", summary)
+			if req.ExpiresAt != nil {
+				c.ui.Println("  It expires on " + req.ExpiresAt.Local().Format("2006-01-02 at 15:04") + ", in " + span(req.ExpiresAt.Sub(c.now())) + ".")
+			}
 			c.ui.Println()
 			c.ui.Println("    " + c.ui.Styled(ui.Bold, created.Token))
 			c.ui.Println()
@@ -71,6 +109,8 @@ func (c *cli) tokenCreateCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&role, "role", "", "what the token may do: read, deploy or admin")
+	cmd.Flags().StringArrayVar(&apps, "app", nil, "limit a deploy token to this application; repeat for several")
+	cmd.Flags().StringVar(&expires, "expires", "", "when the token stops working: days or hours from now (90d, 12h) or a date (2027-01-31)")
 	return cmd
 }
 
@@ -78,7 +118,7 @@ func (c *cli) tokenListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
-		Short:   "List the tokens and when each was last used",
+		Short:   "List the tokens, what each may do, when it expires and when it was last used",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := c.connect()
@@ -96,19 +136,34 @@ func (c *cli) tokenListCommand() *cobra.Command {
 
 			now := c.now()
 			rows := make([][]ui.Cell, 0, len(tokens))
+			var lapsing []string
 			for _, t := range tokens {
 				lastUsed := "never"
 				if t.LastUsedAt != nil {
 					lastUsed = ui.RelativeTime(*t.LastUsedAt, now)
 				}
+				applications := "all"
+				if len(t.Applications) > 0 {
+					applications = strings.Join(t.Applications, ", ")
+				}
+				expires, style := expiryText(t.ExpiresAt, now)
+				if style != ui.Plain {
+					lapsing = append(lapsing, t.Name)
+				}
 				rows = append(rows, []ui.Cell{
 					ui.C(t.Name),
 					ui.C(string(t.Role)),
+					ui.C(applications),
+					{Text: expires, Style: style},
 					ui.C(ui.RelativeTime(t.CreatedAt, now)),
 					ui.C(lastUsed),
 				})
 			}
-			c.ui.Table([]string{"NAME", "ROLE", "CREATED", "LAST USED"}, rows)
+			c.ui.Table([]string{"NAME", "ROLE", "APPLICATIONS", "EXPIRES", "CREATED", "LAST USED"}, rows)
+			if len(lapsing) > 0 {
+				c.ui.Println()
+				c.ui.Println("Expired, or expiring within 14 days: " + strings.Join(lapsing, ", ") + ". A token cannot be extended: create a new one, hand it over, then revoke the old one.")
+			}
 			return nil
 		},
 	}

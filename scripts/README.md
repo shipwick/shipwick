@@ -60,6 +60,18 @@ Properties worth keeping if you change it:
 - **Everything comes from one release** — `SHIPWICK_VERSION`, by default the
   latest — never from a branch, so the compose file, the images and the CLI
   always belong together.
+- **A bundle is the same release, brought along.** With `--bundle <directory
+  or .tar.gz>` (or run from inside an unpacked bundle, made by `shipwick
+  server bundle`) the installer makes no network call: `fetch_release_asset`
+  copies from the bundle and verifies against the bundle's `checksums.txt`,
+  `images.tar` is checked against `images.tar.sha256` before anything is
+  changed and handed to `docker load` before the compose file is replaced,
+  and nothing is pulled. Every other step is shared; keep it that way.
+- **Behind a proxy** it reads `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in
+  either case, exports both spellings (`wget` reads the lower one only), and
+  writes them to a new `.env`. When a pull fails while the installer has a
+  proxy and `docker info` reports none, it says that the daemon needs its
+  own.
 
 Testing it without a server — it only needs a Docker socket. With
 `SHIPWICK_COMPOSE_FILE` set (or run from a checkout) it uses that compose file

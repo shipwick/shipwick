@@ -76,6 +76,27 @@ func IsEncrypted(head []byte) bool {
 	return len(head) >= len(magic) && string(head[:len(magic)]) == magic
 }
 
+// PlainSize returns how many bytes of plaintext a file of the given size
+// holds, for files this package writes: the header and one tag per chunk are
+// all that encryption adds, so the size says it without the passphrase. The
+// second result is false for a size no such file has.
+func PlainSize(encrypted int64) (int64, bool) {
+	body := encrypted - int64(headerSize)
+	const sealedChunk = ChunkSize + tagSize
+	full, rest := body/sealedChunk, body%sealedChunk
+	switch {
+	case body < tagSize:
+		return 0, false
+	case rest == 0:
+		return full * ChunkSize, true
+	case rest < tagSize, rest == tagSize && full > 0:
+		// Less than a tag, or an empty last chunk after full ones: the writer
+		// seals a full buffer as the last chunk instead.
+		return 0, false
+	}
+	return full*ChunkSize + rest - tagSize, true
+}
+
 func newAEAD(passphrase string, salt []byte, iter int) (cipher.AEAD, error) {
 	key, err := pbkdf2.Key(sha256.New, passphrase, salt, iter, keySize)
 	if err != nil {

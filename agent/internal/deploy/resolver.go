@@ -18,8 +18,10 @@ var publicResolvers = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
 // the system's when none of them can be reached. The default for
 // Options.LookupHost.
 func PublicLookupHost(ctx context.Context, host string) ([]string, error) {
-	return lookupThrough(ctx, host, publicResolvers, askResolver, net.DefaultResolver.LookupHost)
+	return public.LookupHost(ctx, host)
 }
+
+var public = NewResolvers(publicResolvers)
 
 // lookupThrough asks the servers in turn. The first that knows the hostname
 // decides; "no such host" from all of them is believed; a server that cannot
@@ -53,6 +55,10 @@ func lookupThrough(ctx context.Context, host string, servers []string,
 }
 
 func askResolver(ctx context.Context, server, host string) ([]string, error) {
+	// A share of lookupTimeout, so that three servers a firewall keeps
+	// silent leave time for the system's resolver.
+	ctx, cancel := context.WithTimeout(ctx, resolverTimeout)
+	defer cancel()
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {

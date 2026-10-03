@@ -129,13 +129,21 @@ func (s *Storage) Write(ctx context.Context, owner string, run int64, name strin
 	}
 
 	if s.s3 != nil {
-		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			return n, fmt.Errorf("read backup file: %w", err)
+		// A multipart upload is noted next to the file before its first part
+		// goes: an agent that dies in the middle cannot abort it, and the next
+		// one must be able to (AbortLeftovers). The note goes when the upload
+		// is over, unless it ended with its parts still in the bucket.
+		note := final + uploadSuffix
+		err := s.s3.Upload(ctx, runKey(owner, run)+name, tmp, size, hex.EncodeToString(hash.Sum(nil)), func(id string) error {
+			if err := os.WriteFile(note, []byte(id), 0o600); err != nil {
+				return fmt.Errorf("note the upload: %w", err)
+			}
+			return nil
+		})
+		if !errors.Is(err, errPartsRemain) {
+			os.Remove(note)
 		}
-		// NopCloser: the transport closes a body it is given, and the file is
-		// still to be renamed.
-		body := io.NopCloser(&contextReader{ctx: ctx, r: tmp})
-		if err := s.s3.Put(ctx, runKey(owner, run)+name, body, size, hex.EncodeToString(hash.Sum(nil))); err != nil {
+		if err != nil {
 			return n, err
 		}
 	}
@@ -188,11 +196,22 @@ type decrypted struct {
 
 func (d *decrypted) Close() error { return d.src.Close() }
 
-// Remove deletes every file of a run, in the directory and in the bucket.
-// A run that has none is not an error.
+// Remove deletes every file of a run, in the directory and in the bucket,
+// and aborts an upload of it that was left unfinished. A run that has none is
+// not an error.
 func (s *Storage) Remove(ctx context.Context, owner string, run int64) error {
 	var errs []error
-	if err := os.RemoveAll(s.runDir(owner, run)); err != nil {
+	if _, err := s.abortNoted(ctx, owner, run); err != nil {
+		// The note is all that says which upload to abort: it stays, with
+		// the directory around it, for the next start of the agent.
+		errs = append(errs, err)
+		entries, _ := os.ReadDir(s.runDir(owner, run))
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), uploadSuffix) {
+				os.RemoveAll(filepath.Join(s.runDir(owner, run), e.Name()))
+			}
+		}
+	} else if err := os.RemoveAll(s.runDir(owner, run)); err != nil {
 		errs = append(errs, fmt.Errorf("remove backup directory: %w", err))
 	}
 	// The owner's directory goes with its last run; it is not empty otherwise,

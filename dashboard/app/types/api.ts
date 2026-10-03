@@ -22,6 +22,22 @@ export interface ApiEnvelope<T> {
 /** Error codes the agent produces, plus the ones the dashboard proxy adds. */
 export type ApiErrorCode =
   | 'UNAUTHORIZED'
+  /** The token was valid until a moment that has passed; details: {name, expired_at}. Answered 401, only to its holder. */
+  | 'TOKEN_EXPIRED'
+  /** A person's session reached its end, ten hours after the sign-in; details: {name, expired_at}. Answered 401. */
+  | 'SESSION_EXPIRED'
+  /** A person's session was ended: their rule was removed or changed, or an admin signed them out; details: {name, reason}. Answered 401. */
+  | 'SESSION_ENDED'
+  /** The provider's answer to a sign-in was not accepted; details: {reason}. */
+  | 'SIGN_IN_FAILED'
+  /** Somebody signed in at the provider and no rule gives them a role; details: {email}. */
+  | 'ACCESS_NOT_GRANTED'
+  /** The agent has no sign-in provider: it takes API tokens only. */
+  | 'SIGN_IN_NOT_CONFIGURED'
+  /** The sign-in provider cannot be reached or used. */
+  | 'SIGN_IN_UNAVAILABLE'
+  /** A deploy token limited to some applications asked to change another, or something that is not about one application; details: {applications, application?}. */
+  | 'TOKEN_LIMITED'
   /** The token's role does not cover the endpoint; details: {role, required}. */
   | 'FORBIDDEN'
   | 'INVALID_REQUEST'
@@ -71,6 +87,10 @@ export type ApiErrorCode =
   | 'EXPORT_IN_PROGRESS'
   /** The agent has no bucket to fetch exports from. */
   | 'STANDBY_NOT_CONFIGURED'
+  /** A promotion is running: a second one, an import and a fetch from the bucket wait for it. */
+  | 'PROMOTION_IN_PROGRESS'
+  /** The bucket holds another installation's backups; nothing in it is adopted. */
+  | 'FOREIGN_BUCKET'
   | 'RUNTIME_UNAVAILABLE'
   | 'INTERNAL_ERROR'
   // Added by the dashboard's server-side proxy, never by the agent:
@@ -78,6 +98,10 @@ export type ApiErrorCode =
   | 'AGENT_TIMEOUT'
   | 'CSRF_REJECTED'
   | 'METHOD_NOT_ALLOWED'
+  /** Several servers are configured and the request named none; details: {servers}. */
+  | 'SERVER_REQUIRED'
+  /** The request named a server the dashboard was not configured with; details: {servers}. */
+  | 'UNKNOWN_SERVER'
 
 /** What a token may do. A role includes the ones below it: read < deploy < admin. */
 export type Role = 'read' | 'deploy' | 'admin'
@@ -137,6 +161,20 @@ export interface Application {
   updated_at: string
   /** A folder the proxy serves itself: no containers, `replicas` all zero, `image` empty. */
   static: boolean
+  /** The hostname whose certificate is worst off, or null when all are in order. Absent on agents before 0.6. */
+  certificate_problem?: CertificateProblem | null
+  /** The active alerts about this application. Absent on agents before 0.6. */
+  alert_count?: number
+  /** "critical" if any of them is, else "warning", else "". Absent on agents before 0.6. */
+  alert_severity?: '' | AlertSeverity | string
+}
+
+/** One hostname of an application whose certificate is not in order, with the status and message of its entry in `certificates`. */
+export interface CertificateProblem {
+  hostname: string
+  /** Worst first: waiting_for_dns, expiring, obtaining. Never ok or unknown. */
+  status: CertificateStatus | string
+  message: string
 }
 
 /**
@@ -230,6 +268,8 @@ export interface SpecBackups {
   keep: number
   /** Run in the replica before the volumes are archived (a database dump or checkpoint). */
   before?: string[]
+  /** How long `before` gets, a Go duration ("1h0m0s"). Present with `before` on deployments made by 0.6; absent means one hour. */
+  before_timeout?: string
   /** The application is stopped while the archive is taken, and started again. */
   stop?: boolean
 }
@@ -262,6 +302,8 @@ export interface AppSpec {
   /** Commands run on a schedule in one-off containers from the application's image. */
   jobs?: SpecJob[]
   logging?: SpecLogging
+  /** Replicas, jobs and commands run under an init process that passes signals on and reaps what they leave behind; absent when unset. */
+  init?: boolean
   /** The part of the domain the application serves; absent when it serves all of it. */
   path?: string
   proxy?: SpecProxy
@@ -306,6 +348,12 @@ export interface Container {
   health: ReplicaHealth
   restarts: number
   crash_loop: boolean
+  /**
+   * The agent is retiring the container in the background: replaced by a
+   * rollout, or a leftover. Its `state` stays "running" until the process
+   * exits; `health` and `restarts` mean nothing for it. Absent on agents before 0.6.
+   */
+  stopping?: boolean
 }
 
 export interface Deployment {
@@ -420,11 +468,19 @@ export interface ProxyStatus {
   dns_challenge?: boolean
 }
 
-/** Who a request was made as: the token's name and role. */
+/** Who a request was made as: the token's name and role, and what narrows it. */
 export interface TokenIdentity {
   name: string
   role: Role
+  /** "token"; a person signed in through an identity provider is "user". Absent on agents before 0.6. */
+  kind?: ActorKind | string
+  /** The applications a deploy token is limited to; [] means not limited. Absent on agents before 0.6. */
+  applications?: string[]
+  /** When the token stops working; null for one that does not expire. Absent on agents before 0.6. */
+  expires_at?: string | null
 }
+
+export type ActorKind = 'token' | 'user'
 
 export interface NotificationStatus {
   /** SHIPWICK_WEBHOOK_URL is set on the agent. The URL itself is never exposed. */
@@ -456,6 +512,71 @@ export interface Server {
   disk?: DiskUsage | null
   /** Where backups go and how the agent's own state is doing. Absent on agents before 0.5. */
   backups?: BackupStatus
+  /** How the agent leaves the server. Absent on agents before 0.6. */
+  network?: NetworkStatus
+  /** Whether people can sign in through an OpenID Connect provider. Absent on agents before 0.6. */
+  sign_in?: SignInStatus
+}
+
+export interface SignInStatus {
+  configured: boolean
+  /** The provider's issuer URL; "" when none is configured. */
+  issuer: string
+}
+
+export type AccessRuleKind = 'email' | 'group' | 'domain'
+
+/** Who gets which role when they sign in through the provider: an address, a group of the provider's, or a whole domain. */
+export interface AccessRule {
+  id: number
+  kind: AccessRuleKind | string
+  /** The address, the group's name as the provider sends it, or the domain without "*@". */
+  subject: string
+  role: Role
+  /** For the deploy role; [] means every application. */
+  applications: string[]
+  created_at: string
+  /** The token or person that granted it. */
+  created_by: string
+}
+
+/** Body of POST /access/rules; granting again for the same kind and subject replaces the rule. */
+export interface GrantAccessRequest {
+  kind: AccessRuleKind
+  subject: string
+  role: Role
+  applications?: string[]
+}
+
+/** One session of a person who signed in and would be served right now: GET /access/sessions. */
+export interface PersonSession {
+  id: number
+  email: string
+  role: Role
+  applications: string[]
+  created_at: string
+  expires_at: string
+  /** Kept to the minute; null until first used. */
+  last_used_at: string | null
+}
+
+/** The answer of DELETE /access/sessions/:email: how many sessions were ended. */
+export interface SignedOut {
+  sessions: number
+}
+
+/** The `network` object of GET /server: what was configured for a server behind a proxy or without a way out. */
+export interface NetworkStatus {
+  /** host:port of the proxy the agent uses, never its credentials; "" when none. */
+  proxy: string
+  /** The Docker daemon has a proxy configured: images are pulled by the daemon, not by the agent. */
+  docker_proxy: boolean
+  /** SHIPWICK_CA_FILE adds certificate authorities to the system's. */
+  ca_file: boolean
+  /** [] for the public resolvers, ["system"], or addresses. */
+  dns_resolvers: string[]
+  /** "" for Let's Encrypt. */
+  acme_directory: string
 }
 
 export type AlertKind = 'memory' | 'disk' | 'restarts' | 'unhealthy'
@@ -593,11 +714,20 @@ export interface Token {
   created_at: string
   /** Kept to the minute; null until first used. */
   last_used_at: string | null
+  /** The applications a deploy token may change, sorted; [] means all. Absent on agents before 0.6. */
+  applications?: string[]
+  /** Null for a token that does not expire; one whose time has passed stays listed until it is revoked. Absent on agents before 0.6. */
+  expires_at?: string | null
 }
 
+/** Both optional fields are left out when unused: an agent before 0.6 refuses a field it does not know. */
 export interface CreateTokenRequest {
   name: string
   role: Role
+  /** Only with the deploy role; at most 50. */
+  applications?: string[]
+  /** RFC 3339, in the future. */
+  expires_at?: string
 }
 
 /** The answer to POST /tokens: the one time the token value itself is shown. */
@@ -607,6 +737,39 @@ export interface CreatedToken {
   role: Role
   created_at: string
   token: string
+  applications?: string[]
+  expires_at?: string | null
+}
+
+export interface Actor {
+  kind: ActorKind | string
+  name: string
+}
+
+export type AuditOutcome = 'ok' | 'refused' | 'failed'
+
+/** One request that changed something, or tried to: GET /audit, newest first. */
+export interface AuditEntry {
+  id: number
+  at: string
+  actor: Actor
+  /** The address the agent saw: the dashboard's, for what was done here. */
+  address: string
+  /** What the proxy in front said the request came from; "" without one. */
+  forwarded_for: string
+  /** deploy, rollback, token.create, secret.set, … */
+  action: string
+  /** "" for what is not about one application. */
+  application: string
+  /** The token, secret, registry, hostname, volume, job or backup the action names; "" otherwise. */
+  target: string
+  /** ok: answered 2xx (for background work: accepted). refused: 403. failed: anything else. */
+  outcome: AuditOutcome | string
+  status: number
+  /** The error code of a refusal or failure. */
+  code: string
+  /** "deployment 12", "run 3", "role deploy, limited to a b", … */
+  detail: string
 }
 
 /**
@@ -782,7 +945,8 @@ export interface BackupVolume {
  */
 export interface BackupRun {
   id: number
-  trigger: 'schedule' | 'manual' | string
+  /** adopted: found in the backup destination and recorded afterwards; how it was taken is not known. */
+  trigger: 'schedule' | 'manual' | 'adopted' | string
   status: BackupRunStatus
   started_at: string
   completed_at: string | null
@@ -880,17 +1044,65 @@ export interface Standby {
   records: DNSRecord[]
   /** Null when the agent does not fetch exports on a schedule. */
   pull: StandbyPull | null
+  /** The promotion that runs or ran last; null on a server that was never promoted. Absent on agents before 0.6. */
+  promotion?: Promotion | null
 }
 
 export interface PromotedApplication {
   name: string
-  /** running: started and ready. started: not ready within its startup budget. failed: could not be started. */
-  status: 'running' | 'started' | 'failed' | string
+  /**
+   * pending: its turn has not come. starting: being started. running: started
+   * and ready. started: not ready within its startup budget. failed: could not
+   * be started.
+   */
+  status: 'pending' | 'starting' | 'running' | 'started' | 'failed' | string
   message: string
 }
 
-/** The answer of POST /standby/promote. */
+export type PromotionStatus = 'running' | 'succeeded' | 'failed'
+
+/**
+ * A promotion: POST /standby/promote?wait=false begins one (202) and
+ * GET /standby/promotion follows it until `completed_at` is set. An agent
+ * before 0.6 answers the POST when everything has been started, with
+ * `applications` and `records` only.
+ */
 export interface Promotion {
   applications: PromotedApplication[]
   records: DNSRecord[]
+  /** Counts the server's promotions from 1; 0 when there was nothing to promote. */
+  id?: number
+  /** failed: at least one application could not be started. */
+  status?: PromotionStatus | string
+  started_at?: string
+  completed_at?: string | null
+}
+
+export type BackupKind = 'application' | 'state' | 'export'
+
+/** A backup found in the backup destination and recorded. */
+export interface AdoptedBackup {
+  kind: BackupKind | string
+  /** "" unless `kind` is application. */
+  application: string
+  backup: BackupRun
+}
+
+/** A backup that was found and left alone, with the reason. */
+export interface SkippedBackup {
+  kind: BackupKind | string
+  application: string
+  id: number
+  reason: string
+}
+
+/** The answer of POST /server/backups/adopt; both lists are always arrays. */
+export interface BackupAdoption {
+  adopted: AdoptedBackup[]
+  skipped: SkippedBackup[]
+}
+
+/** Body of POST /server/backups/adopt; without an application, everything that is found. */
+export interface BackupAdoptRequest {
+  application?: string
 }

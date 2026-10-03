@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shipwick/shipwick/pkg/outbound"
 	"github.com/shipwick/shipwick/pkg/version"
 )
 
@@ -161,7 +162,7 @@ func NewWebhook(opts Options) (*Webhook, error) {
 		server:  opts.Server,
 		format:  formatFor(u),
 		log:     opts.Logger,
-		client:  &http.Client{Timeout: attemptTimeout},
+		client:  &http.Client{Timeout: attemptTimeout, Transport: outbound.Transport()},
 		backoff: []time.Duration{time.Second, 5 * time.Second, 25 * time.Second},
 		drain:   drainTimeout,
 		queue:   make(chan Event, queueSize),

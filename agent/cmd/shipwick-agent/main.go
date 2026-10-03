@@ -25,6 +25,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/disk"
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/agent/internal/notify"
+	"github.com/shipwick/shipwick/agent/internal/oidc"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
 	"github.com/shipwick/shipwick/agent/internal/store"
 	sharedapi "github.com/shipwick/shipwick/pkg/api"
@@ -88,6 +89,9 @@ func run() error {
 	}
 	log := newLogger(cfg)
 	slog.SetDefault(log)
+	if err := useOutbound(cfg, log); err != nil {
+		return err
+	}
 
 	// First SIGINT/SIGTERM starts a graceful shutdown; a second one kills
 	// the process the default way, since stop() restores default handling.
@@ -146,6 +150,7 @@ func run() error {
 	}
 
 	opts := deploy.Options{Logger: log, ReservedHostPorts: reservedHostPorts(cfg.ListenAddr), UploadDir: cfg.UploadDir()}
+	opts.LookupHost, opts.Network = lookupHost(cfg, log), networkOptions(cfg)
 	if cfg.CaddyAdmin != "" {
 		caddy, err := proxy.NewCaddy(cfg.CaddyAdmin)
 		if err != nil {
@@ -164,7 +169,7 @@ func run() error {
 			// Streaming for the same reason: the dashboard relays followed logs.
 			opts.ExtraRoutes = append(opts.ExtraRoutes, proxy.Route{Domain: cfg.DashboardDomain, Upstreams: []string{cfg.DashboardUpstream}, Streaming: true})
 		}
-		opts.ServerAddresses = serverAddresses(startCtx, log, cfg.AgentDomain, cfg.DashboardDomain)
+		opts.ServerAddresses = serverAddresses(startCtx, log, opts.LookupHost, cfg.AgentDomain, cfg.DashboardDomain)
 	} else {
 		log.Warn("no reverse proxy configured: applications with a domain will not be reachable", "set", config.EnvCaddyAdmin)
 	}
@@ -197,6 +202,12 @@ func run() error {
 		}
 	}
 
+	if cfg.Outbound.ACMEDirectory != "" {
+		if caddy, ok := opts.Proxy.(*proxy.Caddy); ok {
+			caddy.UseACMEDirectory(cfg.Outbound.ACMEDirectory)
+			log.Info("certificates are obtained from an ACME server of your own, not from Let's Encrypt", "directory", cfg.Outbound.ACMEDirectory)
+		}
+	}
 	opts.ProxyTLSAddr = cfg.ProxyTLSAddr
 	if opts.Backups, err = backupOptions(cfg, encryptionKey, log); err != nil {
 		return err
@@ -223,6 +234,11 @@ func run() error {
 	engine.StartTransfers()
 
 	apiServer := api.New(engine, st, tokenHash, log)
+	if cfg.SignIn != nil {
+		apiServer.UseSignIn(oidc.New(oidc.Config{Issuer: cfg.SignIn.Issuer, ClientID: cfg.SignIn.ClientID, ClientSecret: cfg.SignIn.ClientSecret,
+			Scopes: cfg.SignIn.Scopes, GroupsClaim: cfg.SignIn.GroupsClaim, RedirectURL: cfg.SignIn.RedirectURL, Logger: log}))
+		log.Info("people sign in to the dashboard with an OpenID Connect provider", "issuer", cfg.SignIn.Issuer, "redirect", cfg.SignIn.RedirectURL)
+	}
 	srv := &http.Server{
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -287,14 +303,14 @@ func reservedHostPorts(listenAddr string) []int {
 // operator could not be using them. An application's hostname is handed to the
 // proxy only once it resolves to one of them. With none known, resolving at
 // all has to do.
-func serverAddresses(ctx context.Context, log *slog.Logger, domains ...string) []string {
+func serverAddresses(ctx context.Context, log *slog.Logger, lookup func(context.Context, string) ([]string, error), domains ...string) []string {
 	var addresses []string
 	for _, domain := range domains {
 		if domain == "" {
 			continue
 		}
 		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		found, err := deploy.PublicLookupHost(lookupCtx, domain)
+		found, err := lookup(lookupCtx, domain)
 		cancel()
 		if err != nil {
 			log.Warn("could not resolve Shipwick's own hostname", "domain", domain, "error", err)

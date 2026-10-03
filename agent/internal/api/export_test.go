@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shipwick/shipwick/agent/internal/docker/dockertest"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/backupfile"
 )
@@ -120,8 +121,9 @@ func TestExportIsEncryptedAndImportsOnAnotherServer(t *testing.T) {
 
 	status, body = b.do("POST", "/api/v1/standby/promote", "")
 	promotion := decode[api.Promotion](t, body)
-	if status != http.StatusOK || len(promotion.Applications) != 1 || promotion.Applications[0].Status != api.PromotedRunning {
-		t.Fatalf("promote: %d %s", status, body)
+	if status != http.StatusOK || len(promotion.Applications) != 1 || promotion.Applications[0].Status != api.PromotedRunning ||
+		promotion.Status != api.PromotionSucceeded || promotion.CompletedAt == nil {
+		t.Fatalf("promote, as a client that cannot follow one asks: %d %s", status, body)
 	}
 	if !b.rt.Containers()[0].Running {
 		t.Error("the promotion did not start the database")
@@ -166,6 +168,9 @@ func TestExportImportAndPromotionTakeAdmin(t *testing.T) {
 	if status, body := f.doWithAuth("GET", "/api/v1/standby", "", reader); status != http.StatusOK {
 		t.Errorf("GET /standby with a read token: %d %s", status, body)
 	}
+	if status, body := f.doWithAuth("POST", "/api/v1/standby/promote?wait=false", "", reader); status != http.StatusForbidden {
+		t.Errorf("POST /standby/promote with a read token: %d %s", status, body)
+	}
 }
 
 func TestExportsToTheBackupDestinationAndPullsSayWhatIsMissing(t *testing.T) {
@@ -196,5 +201,90 @@ func TestExportsToTheBackupDestinationAndPullsSayWhatIsMissing(t *testing.T) {
 	runs := decode[[]api.BackupRun](t, body)
 	if len(runs) != 1 || runs[0].Status != api.BackupSucceeded || !runs[0].Encrypted || runs[0].Volumes[0].Volume != "export.tar" {
 		t.Fatalf("exports = %s", body)
+	}
+}
+
+// checkedConfig is an application whose readiness the test decides: its
+// health check is a command, and the fake runtime answers it as it is told.
+const checkedConfig = `
+name: db
+image: postgres:17
+health:
+  command: ["pg_isready"]
+  interval: 1s
+  retries: 60
+`
+
+func TestAPromotionIsStartedAndFollowed(t *testing.T) {
+	a := newFixture(t)
+	if status, body := a.do("POST", "/api/v1/applications/db/deploy", checkedConfig); status != http.StatusAccepted {
+		t.Fatalf("deploy: %d %s", status, body)
+	}
+	a.engine.Wait()
+	_, archive := a.exportOf("Bearer "+testToken, `{"passphrase":"`+exportPassphrase+`"}`)
+
+	b := newFixture(t)
+	if status, body := b.importInto("?stopped=true", archive, exportPassphrase); status != http.StatusOK {
+		t.Fatalf("import: %d %s", status, body)
+	}
+	status, body := b.do("GET", "/api/v1/standby/promotion", "")
+	if e := decodeError(t, body); status != http.StatusNotFound || e.Code != api.CodeNotFound {
+		t.Fatalf("the promotion of a server that was never promoted: %d %s", status, body)
+	}
+	if status, body := b.do("POST", "/api/v1/standby/promote?wait=perhaps", ""); status != http.StatusBadRequest {
+		t.Fatalf("wait=perhaps: %d %s", status, body)
+	}
+
+	// Not ready until the test says so: the promotion stays under way.
+	replica := b.rt.Containers()[0].Name
+	b.rt.SetExecResult(replica, dockertest.ExecResult{ExitCode: 1})
+
+	req, _ := http.NewRequest("POST", b.srv.URL+"/api/v1/standby/promote?wait=false", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	begun := decode[api.Promotion](t, body)
+	if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Location") != "/api/v1/standby/promotion" ||
+		begun.ID != 1 || begun.Status != api.PromotionRunning || begun.CompletedAt != nil ||
+		len(begun.Applications) != 1 || begun.Applications[0].Status != api.PromotedPending || begun.Records == nil {
+		t.Fatalf("promote: %d %s", resp.StatusCode, body)
+	}
+
+	for _, query := range []string{"", "?wait=false"} {
+		status, body = b.do("POST", "/api/v1/standby/promote"+query, "")
+		if e := decodeError(t, body); status != http.StatusConflict || e.Code != api.CodePromotionInProgress {
+			t.Errorf("a second promotion%s while one runs: %d %s", query, status, body)
+		}
+	}
+	reader := "Bearer " + b.createToken("viewer", api.RoleRead).Token
+	status, body = b.doWithAuth("GET", "/api/v1/standby/promotion", "", reader)
+	if got := decode[api.Promotion](t, body); status != http.StatusOK || got.ID != 1 || got.CompletedAt != nil {
+		t.Errorf("the promotion while it runs, with a read token: %d %s", status, body)
+	}
+	_, body = b.do("GET", "/api/v1/standby", "")
+	if standby := decode[api.Standby](t, body); standby.Promotion == nil || standby.Promotion.Status != api.PromotionRunning {
+		t.Errorf("standby while a promotion runs = %s", body)
+	}
+
+	b.rt.SetExecResult(replica, dockertest.ExecResult{})
+	b.engine.Wait()
+	_, body = b.do("GET", "/api/v1/standby/promotion", "")
+	final := decode[api.Promotion](t, body)
+	if final.Status != api.PromotionSucceeded || final.CompletedAt == nil || final.Applications[0].Status != api.PromotedRunning {
+		t.Fatalf("the promotion when it has ended = %s", body)
+	}
+
+	// Nothing is left to start: answered at once, and the record stays.
+	status, body = b.do("POST", "/api/v1/standby/promote?wait=false", "")
+	if again := decode[api.Promotion](t, body); status != http.StatusOK || again.CompletedAt == nil || len(again.Applications) != 0 || again.ID != 0 {
+		t.Errorf("a promotion with nothing to start: %d %s", status, body)
+	}
+	_, body = b.do("GET", "/api/v1/standby/promotion", "")
+	if kept := decode[api.Promotion](t, body); kept.ID != 1 || len(kept.Applications) != 1 {
+		t.Errorf("the last promotion = %s", body)
 	}
 }

@@ -24,7 +24,7 @@ import (
 //
 //	docker run -d --name shipwick-test-minio -p 127.0.0.1:19000:9000 \
 //	    -e MINIO_ROOT_USER=shipwick -e MINIO_ROOT_PASSWORD=shipwick-test-secret \
-//	    cgr.dev/chainguard/minio server /data
+//	    --user 0 cgr.dev/chainguard/minio server /data
 //	SHIPWICK_TEST_S3_ENDPOINT=http://127.0.0.1:19000 \
 //	SHIPWICK_TEST_S3_ACCESS_KEY_ID=shipwick \
 //	SHIPWICK_TEST_S3_SECRET_ACCESS_KEY=shipwick-test-secret \

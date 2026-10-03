@@ -118,8 +118,22 @@ func (c *Client) StandbyPull(ctx context.Context) (api.Import, error) {
 	return call[api.Import](ctx, c, http.MethodPost, "/standby/pull", nil, nil)
 }
 
-// Promote starts every application that was imported stopped. It answers
-// when each is ready or has spent its startup budget.
+// StartPromotion begins starting every application that was imported stopped
+// and returns the promotion as it begins; Promotion follows it. With nothing
+// to start, the promotion returned has completed.
+func (c *Client) StartPromotion(ctx context.Context) (api.Promotion, error) {
+	return call[api.Promotion](ctx, c, http.MethodPost, "/standby/promote", url.Values{"wait": {"false"}}, nil)
+}
+
+// Promotion returns the promotion the server is running, or ran last. An
+// agent that keeps no record of one answers ENDPOINT_NOT_FOUND.
+func (c *Client) Promotion(ctx context.Context) (api.Promotion, error) {
+	return get[api.Promotion](ctx, c, "/standby/promotion", nil)
+}
+
+// Promote is the promotion as an agent without a record of it runs one: the
+// request is held until every application is ready or has spent its startup
+// budget, and the answer is lost with the connection.
 func (c *Client) Promote(ctx context.Context) (api.Promotion, error) {
 	return callVia[api.Promotion](ctx, c, c.stream, http.MethodPost, "/standby/promote", nil, nil)
 }

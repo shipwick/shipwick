@@ -17,7 +17,7 @@ func TestTokensAreCreatedListedAndLookedUpByHash(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
 	hash := sha256.Sum256([]byte("swk_secret"))
-	created, err := s.CreateToken(ctx, "ci", api.RoleDeploy, hash[:], now)
+	created, err := s.CreateToken(ctx, Token{Name: "ci", Role: api.RoleDeploy, Hash: hash[:], CreatedAt: now})
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -37,10 +37,10 @@ func TestTokensAreCreatedListedAndLookedUpByHash(t *testing.T) {
 		t.Errorf("unknown hash: err = %v, want ErrNotFound", err)
 	}
 
-	if _, err := s.CreateToken(ctx, "ci", api.RoleRead, other[:], now); !errors.Is(err, ErrTokenExists) {
+	if _, err := s.CreateToken(ctx, Token{Name: "ci", Role: api.RoleRead, Hash: other[:], CreatedAt: now}); !errors.Is(err, ErrTokenExists) {
 		t.Errorf("duplicate name: err = %v, want ErrTokenExists", err)
 	}
-	if _, err := s.CreateToken(ctx, "reader", api.RoleRead, other[:], now.Add(time.Hour)); err != nil {
+	if _, err := s.CreateToken(ctx, Token{Name: "reader", Role: api.RoleRead, Hash: other[:], CreatedAt: now.Add(time.Hour)}); err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestTokenUseIsRecordedAndRevocationRemovesIt(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
 	hash := sha256.Sum256([]byte("swk_secret"))
-	created, _ := s.CreateToken(ctx, "ci", api.RoleDeploy, hash[:], now)
+	created, _ := s.CreateToken(ctx, Token{Name: "ci", Role: api.RoleDeploy, Hash: hash[:], CreatedAt: now})
 	if err := s.TouchToken(ctx, created.ID, now.Add(time.Minute)); err != nil {
 		t.Fatalf("TouchToken: %v", err)
 	}

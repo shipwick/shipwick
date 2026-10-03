@@ -7,7 +7,9 @@ const props = withDefaults(defineProps<{
   deployments: Deployment[]
   /** Hide the application column on an application's own page. */
   showApplication?: boolean
-}>(), { showApplication: true })
+  /** More deployments than the rows shown, to name the source of a rollback that is not among them. */
+  known?: Deployment[]
+}>(), { showApplication: true, known: undefined })
 
 const now = useNow()
 const router = useRouter()
@@ -70,7 +72,7 @@ function open(d: Deployment, event: MouseEvent) {
           {{ d.version || '—' }}
         </td>
         <td :data-label="hasOrigin(d) ? 'Origin' : undefined" :class="hasOrigin(d) ? '' : 'max-sm:!hidden'">
-          <DeploymentOrigin :deployment="d" :known="props.deployments" />
+          <DeploymentOrigin :deployment="d" :known="props.known ?? props.deployments" />
         </td>
         <td v-if="anyBy" :data-label="d.by ? 'By' : undefined" class="mono text-fg-muted" :class="d.by ? '' : 'max-sm:!hidden'">
           {{ d.by ?? '' }}

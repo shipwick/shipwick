@@ -99,7 +99,7 @@ func (e *Engine) retireInBackground(c docker.Container, timeout time.Duration, o
 			return
 		}
 		if notify != nil {
-			e.noteKilled(ctx, notify, c, timeout)
+			e.noteKilled(ctx, notify.ApplicationID, notify.Application, c, timeout, "replaced")
 		}
 		if err := e.removeContainer(ctx, c.ID); err != nil && ctx.Err() == nil {
 			// Once it is no longer draining, the supervisor sees a leftover
@@ -113,23 +113,36 @@ func (e *Engine) retireInBackground(c docker.Container, timeout time.Duration, o
 // sigkilled is the exit code of a process ended by SIGKILL.
 const sigkilled = 137
 
-// noteKilled says so when a retired replica used up its grace period and was
-// killed: whatever it was serving at that moment was cut, and the application
-// can do something about it. It goes to the application's own feed — the
-// deployment that replaced the replica has completed by now, and its events
-// are its story, which ended.
-func (e *Engine) noteKilled(ctx context.Context, d *store.Deployment, c docker.Container, timeout time.Duration) {
+// noteKilled says so when a replica that was replaced or stopped used up its
+// grace period and was killed: whatever it was serving at that moment was cut,
+// and the application can do something about it. It goes to the application's
+// own feed — the deployment that replaced the replica has completed by now,
+// and its events are its story, which ended.
+func (e *Engine) noteKilled(ctx context.Context, appID int64, app string, c docker.Container, timeout time.Duration, what string) {
 	in, err := e.rt.InspectContainer(ctx, c.ID)
 	if err != nil || in.Running || in.ExitCode != sigkilled || in.OOMKilled {
 		return
 	}
-	msg := fmt.Sprintf(
-		"The replaced container %s did not exit within %s of SIGTERM and was killed. To let it finish its requests, handle SIGTERM in the application; to give it longer, set deploy.stop_timeout",
-		c.Name, shortDuration(timeout))
-	e.log.Warn(msg, "app", d.Application)
-	if err := e.store.AddEvent(context.WithoutCancel(ctx), d.ApplicationID, nil, api.LevelWarn, api.EventApp, msg, time.Now()); err != nil {
-		e.log.Warn("could not record event", "app", d.Application, "error", err)
+	msg := fmt.Sprintf("The %s container %s did not exit within %s of SIGTERM and was killed. %s",
+		what, c.Name, shortDuration(timeout), e.killedAdvice(ctx, c.DeploymentID))
+	e.log.Warn(msg, "app", app)
+	if err := e.store.AddEvent(context.WithoutCancel(ctx), appID, nil, api.LevelWarn, api.EventApp, msg, time.Now()); err != nil {
+		e.log.Warn("could not record event", "app", app, "error", err)
 	}
+}
+
+// killedAdvice is what to do about a container that was killed, which depends
+// on the configuration it ran with. Without an init process the likeliest
+// cause is a process that runs as PID 1 and has no handler for the signal:
+// the kernel delivers none to PID 1 that it did not ask for, and `init: true`
+// is the whole remedy. With one, the signal arrived, and the process took
+// longer than it was given.
+func (e *Engine) killedAdvice(ctx context.Context, deploymentID int64) string {
+	const longer = "to give it longer, set deploy.stop_timeout"
+	if d, err := e.store.GetDeployment(ctx, deploymentID); err == nil && d.Spec.Init {
+		return "It runs under an init process, so the signal reached it: " + longer
+	}
+	return "If its process has no handler for SIGTERM, set init: true and the signal ends it at once; to let it finish its requests, handle SIGTERM in the application; " + longer
 }
 
 // draining reports whether the container is being retired in the background.
@@ -141,6 +154,29 @@ func (e *Engine) draining(id string) bool {
 }
 
 // awaitDrains waits until none of the application's containers is draining.
+// awaitAllDrains waits for every container that is being retired, whatever
+// application it belongs to.
+func (e *Engine) awaitAllDrains(ctx context.Context) error {
+	for {
+		var pending []chan struct{}
+		e.mu.Lock()
+		for _, dr := range e.drains {
+			pending = append(pending, dr.done)
+		}
+		e.mu.Unlock()
+		if len(pending) == 0 {
+			return nil
+		}
+		for _, done := range pending {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+}
+
 func (e *Engine) awaitDrains(ctx context.Context, app string) error {
 	for {
 		var pending []chan struct{}

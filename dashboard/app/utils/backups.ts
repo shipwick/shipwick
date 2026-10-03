@@ -1,5 +1,6 @@
 import type { BackupRun, BackupStatus, SpecBackups } from '~/types/api'
 import { formatBytes, formatRelativeTime } from '~/utils/format'
+import { tidyDuration } from '~/utils/jobs'
 import { formatArgv } from '~/utils/spec'
 import type { StatusDisplay, Tone } from '~/utils/status'
 
@@ -22,12 +23,32 @@ export function describeSchedule(expression: string): string {
   return `on ${expression} (UTC)`
 }
 
-/** "daily at 03:00 UTC, 7 kept, after pg_dump -f /data/dump.sql, with the application stopped": what the `backups` block has the server do. */
+/** What `backups.before` gets when `before_timeout` says nothing. */
+const DEFAULT_BEFORE_TIMEOUT = '1h'
+
+/**
+ * "daily at 03:00 UTC, 7 kept, after pg_dump -f /data/dump.sql (2h at most),
+ * with the application stopped": what the `backups` block has the server do.
+ * The time the command gets is said only when it is not the default hour, as
+ * `shipwick status` does.
+ */
 export function describeBackupPlan(backups: SpecBackups): string {
   let plan = `${describeSchedule(backups.schedule)}, ${backups.keep} kept`
-  if (backups.before?.length) plan += `, after ${formatArgv(backups.before)}`
+  if (backups.before?.length) {
+    plan += `, after ${formatArgv(backups.before)}`
+    const limit = backups.before_timeout ? tidyDuration(backups.before_timeout) : DEFAULT_BEFORE_TIMEOUT
+    if (limit !== DEFAULT_BEFORE_TIMEOUT) plan += ` (${limit} at most)`
+  }
   if (backups.stop) plan += ', with the application stopped'
   return plan
+}
+
+/** "schedule", "by hand", "adopted": who started a backup; an adopted one was found in the destination and recorded afterwards. */
+export function triggerLabel(trigger: string, scheduleWord = 'schedule'): string {
+  if (trigger === 'schedule') return scheduleWord
+  if (trigger === 'manual') return 'by hand'
+  if (trigger === 'adopted') return 'adopted'
+  return trigger
 }
 
 /** The archives of a backup added up; they are measured before encryption. */

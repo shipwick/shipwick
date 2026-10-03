@@ -27,6 +27,7 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [], changed: [] }>()
 
 const agent = useAgent()
+const { deployHint } = useApplication()
 const path = computed(() => `/applications/${encodeURIComponent(props.application)}/backups/${props.backupId}`)
 
 const backup = usePolling<BackupRunDetail>(
@@ -153,7 +154,7 @@ const title = computed(() => `Backup #${props.backupId ?? ''} of ${props.applica
     <div v-else-if="b && status" class="space-y-4">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
         <StatusBadge :tone="status.tone" :label="status.label" :raw="b.activity || b.status" size="md" />
-        <span class="text-fg-muted">{{ b.trigger === 'schedule' ? 'taken by the schedule' : 'taken by hand' }}</span>
+        <span class="text-fg-muted">{{ b.trigger === 'schedule' ? 'taken by the schedule' : b.trigger === 'adopted' ? 'found in the backup destination and adopted' : 'taken by hand' }}</span>
       </div>
 
       <dl class="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm">
@@ -264,7 +265,7 @@ const title = computed(() => `Backup #${props.backupId ?? ''} of ${props.applica
             Remove
           </UiButton>
           <template v-if="usable">
-            <UiButton :disabled="!props.mayDeploy || inUse" :pending="pending" :title="!props.mayDeploy ? roleHint('deploy') : inUse ? 'This backup is in use' : undefined" @click="verify">
+            <UiButton :disabled="!props.mayDeploy || inUse" :pending="pending" :title="!props.mayDeploy ? (deployHint ?? roleHint('deploy')) : inUse ? 'This backup is in use' : undefined" @click="verify">
               Verify
             </UiButton>
             <UiButton :disabled="!props.admin || inUse || props.busy || !props.stopped" :title="restoreTitle" @click="mode = 'restore'">

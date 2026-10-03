@@ -1057,6 +1057,8 @@ func TestStartBackupsSettlesWhatAnEarlierAgentLeftBehind(t *testing.T) {
 	if err := h.engine.StartBackups(ctx); err != nil {
 		t.Fatalf("StartBackups: %v", err)
 	}
+	// Leftover containers are retired in the background.
+	h.engine.Wait()
 	if got := h.backupRun("db", interrupted.ID); got.Status != api.BackupFailed || !strings.Contains(got.Error, "restarted") {
 		t.Errorf("the interrupted backup: %+v", got)
 	}

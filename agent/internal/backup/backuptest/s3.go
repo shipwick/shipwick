@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Credentials and names the server accepts.
@@ -32,6 +33,18 @@ type S3 struct {
 
 	mu      sync.Mutex
 	objects map[string][]byte
+	// modified is when each object was written.
+	modified map[string]time.Time
+	// uploads are the multipart uploads in progress, by upload id; the rest
+	// is what multipart.go's knobs set.
+	uploads      map[string]*upload
+	nextUpload   int
+	minPartSize  int
+	failNext     int
+	failComplete bool
+	failAborts   bool
+	// uploadsByKeyOnly: see ListUploadsByKeyOnly.
+	uploadsByKeyOnly bool
 	// pageSize is how many keys one listing page holds, 0 meaning 1000;
 	// failPuts makes every upload answer 500. See SetPageSize and FailPuts.
 	pageSize int
@@ -44,7 +57,7 @@ type S3 struct {
 
 // NewS3 starts the server; it stops with the test.
 func NewS3(t *testing.T) *S3 {
-	s := &S3{objects: map[string][]byte{}}
+	s := &S3{objects: map[string][]byte{}, modified: map[string]time.Time{}, uploads: map[string]*upload{}, minPartSize: 5 << 20}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	s.URL = srv.URL
@@ -119,16 +132,31 @@ func (s *S3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := strings.TrimPrefix(rest, "/")
+	q := r.URL.Query()
 
 	switch {
+	case r.Method == http.MethodGet && key == "" && q.Has("uploads"):
+		s.listUploads(w, r)
 	case r.Method == http.MethodGet && key == "":
 		s.list(w, r)
+	case r.Method == http.MethodPost && q.Has("uploads"):
+		s.createUpload(w, key)
+	case r.Method == http.MethodPost && q.Has("uploadId"):
+		s.completeUpload(w, key, q.Get("uploadId"), body)
+	case r.Method == http.MethodDelete && q.Has("uploadId"):
+		s.abortUpload(w, key, q.Get("uploadId"))
 	case r.Method == http.MethodPut:
-		if s.failPuts {
+		if s.failPuts || s.failNext > 0 {
+			s.failNext = max(s.failNext-1, 0)
 			fail(w, http.StatusInternalServerError, "InternalError", "We encountered an internal error.")
 			return
 		}
+		if q.Has("uploadId") {
+			s.putPart(w, key, q.Get("uploadId"), q.Get("partNumber"), body)
+			return
+		}
 		s.objects[key] = body
+		s.modified[key] = time.Now()
 		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodGet:
 		data, ok := s.objects[key]
@@ -139,6 +167,7 @@ func (s *S3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(data)
 	case r.Method == http.MethodDelete:
 		delete(s.objects, key)
+		delete(s.modified, key)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		fail(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed.")
@@ -161,8 +190,9 @@ func (s *S3) list(w http.ResponseWriter, r *http.Request) {
 		size = 1000
 	}
 	type content struct {
-		Key  string
-		Size int
+		Key          string
+		Size         int
+		LastModified string
 	}
 	var page struct {
 		XMLName               xml.Name `xml:"ListBucketResult"`
@@ -175,7 +205,7 @@ func (s *S3) list(w http.ResponseWriter, r *http.Request) {
 		keys = keys[:size]
 	}
 	for _, k := range keys {
-		page.Contents = append(page.Contents, content{Key: k, Size: len(s.objects[k])})
+		page.Contents = append(page.Contents, content{Key: k, Size: len(s.objects[k]), LastModified: s.modified[k].UTC().Format("2006-01-02T15:04:05.000Z")})
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	xml.NewEncoder(w).Encode(page)
@@ -273,9 +303,15 @@ func (s *S3) HoldPuts() (arrived <-chan struct{}, release func()) {
 
 // Put places an object in the bucket directly, as another writer would have.
 func (s *S3) Put(key string, content []byte) {
+	s.PutAt(key, content, time.Now())
+}
+
+// PutAt is Put for an object written at a time of the test's choosing.
+func (s *S3) PutAt(key string, content []byte, modified time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.objects[key] = content
+	s.modified[key] = modified
 }
 
 // SetPageSize makes listings come in pages of n keys.

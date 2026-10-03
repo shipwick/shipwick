@@ -42,7 +42,8 @@ port: 8080
 domain: api.example.com
 
 # More hostnames served exactly like `domain`, and hostnames redirected to it
-# (308, same path and query) — www, an old domain. Each gets a certificate.
+# (308, same path and query; below `path`, if the application has one) — www,
+# an old domain. Each gets a certificate.
 # `domain` and aliases may be a wildcard, "*.example.com", when the agent has
 # a Cloudflare API token or you supplied a certificate that covers it
 # (shipwick cert set).
@@ -133,6 +134,7 @@ deploy:
 #   schedule: "0 3 * * *"
 #   keep: 7       # successful backups kept; default 7, up to 365
 #   before: ["pg_dump", "-U", "postgres", "-f", "/var/lib/postgresql/data/backup.sql", "app"]
+#   before_timeout: 1h   # how long `before` may run; default 1h, up to 24h
 #   stop: false   # default false
 
 # Ports that are not HTTP, published on the server itself: a database reached
@@ -157,6 +159,13 @@ deploy:
 # deploy:
 #   strategy: recreate
 #   stop_timeout: 2m
+
+# Docker's init process in front of the image's own, in every container of
+# the application: it passes SIGTERM on and reaps children. For a process that
+# does not handle the signal as the container's first process — Node started
+# as `node server.js` — and is otherwise killed when stop_timeout ends. Leave
+# it out for an image that brings its own init (tini, s6-overlay).
+# init: true
 
 # Ship logs to a collector instead of the server's disk: json-file (default),
 # local, syslog, journald, gelf, fluentd, awslogs or splunk, with the driver's

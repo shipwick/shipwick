@@ -1,25 +1,28 @@
 import type { ApiEnvelope } from '~/types/api'
 import { AgentError, errorFromResponse, isAbortError } from '~/utils/agentError'
-import { REQUEST_HEADERS } from '~/composables/useSession'
+import { REQUEST_HEADERS, currentAgentBase } from '~/composables/useSession'
 
 type QueryValue = string | number | boolean | null | undefined
 
 export interface AgentRequestOptions {
   query?: Record<string, QueryValue>
   body?: unknown
+  /** A body sent as it is, with its own content type: a deploy.yaml is YAML, not JSON. */
+  text?: { content: string, type: string }
   signal?: AbortSignal
 }
 
-/** Base path of the server-side proxy; the agent's /api/v1 is mounted below it. */
-const PROXY_BASE = '/api/agent'
-
+/**
+ * An address below the server-side proxy, where the agent's /api/v1 is mounted:
+ * /api/agent, or /api/servers/<name>/agent when the dashboard has several servers.
+ */
 export function agentUrl(path: string, query?: Record<string, QueryValue>): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
   }
   const search = params.toString()
-  return `${PROXY_BASE}${path}${search ? `?${search}` : ''}`
+  return `${currentAgentBase()}${path}${search ? `?${search}` : ''}`
 }
 
 /**
@@ -37,6 +40,10 @@ export function useAgent() {
     if (options.body !== undefined) {
       headers['Content-Type'] = 'application/json'
       body = JSON.stringify(options.body)
+    }
+    else if (options.text !== undefined) {
+      headers['Content-Type'] = options.text.type
+      body = options.text.content
     }
 
     let response: Response
@@ -56,8 +63,9 @@ export function useAgent() {
     }
 
     if (response.status === 401) {
-      session.expire()
-      throw await errorFromResponse(response)
+      const error = await errorFromResponse(response)
+      session.expire(error)
+      throw error
     }
     if (!response.ok) throw await errorFromResponse(response)
     return response

@@ -101,7 +101,7 @@ async function submit() {
         </p>
       </div>
       <p v-if="!isStatic" class="text-xs text-fg-muted">
-        The running version keeps serving until the new replicas are healthy. To change anything other than the image, use <span class="mono text-fg">shipwick deploy</span>.
+        The running version keeps serving until the new replicas are healthy. To change anything other than the image, use <span class="mono text-fg">shipwick deploy</span><template v-if="!buildOrigin">, or <NuxtLink :to="{ path: '/deploy', query: { application: props.application.name } }" class="link" @click="emit('close')">paste the changed deploy.yaml</NuxtLink></template>.
       </p>
       <InlineError :error="error" />
     </form>

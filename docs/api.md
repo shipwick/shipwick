@@ -4,7 +4,8 @@ Base URL: `http://<agent>:9000/api/v1` · JSON everywhere · wire types in [`pkg
 
 ## Authentication
 
-Every endpoint except `GET /health` requires
+Every endpoint except `GET /health`, `GET /auth` and `POST /auth/exchange`
+requires
 
 ```http
 Authorization: Bearer <token>
@@ -15,15 +16,34 @@ ones below it:
 
 | Role | May |
 |---|---|
-| `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics, traffic and requests, jobs and their runs, volumes, the backups of an application, `/registries`, `/certificates`, `/standby`, `GET /metrics`, the names of `/secrets` |
+| `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics, traffic and requests, jobs and their runs, volumes, the backups of an application, `/registries`, `/certificates`, `/standby` and `/standby/promotion`, `GET /metrics`, the names of `/secrets`; `DELETE /auth/session`, which ends the caller's own session |
 | `deploy` | And change what runs: `deploy`, `validate`, `redeploy`, `rollback`, `stop`, `start`, `run`, starting a job, sending an image or a static folder, taking and verifying a backup |
-| `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints, setting and removing `/secrets`, `/registries` and `/certificates`, rotating the key, restoring, downloading and removing a backup, the backups of the agent's state, `/export`, `/import`, `/exports`, pulling to and promoting a standby |
+| `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints, setting and removing `/secrets`, `/registries` and `/certificates`, rotating the key, restoring, downloading and removing a backup, the backups of the agent's state, adopting backups, `/export`, `/import`, `/exports`, pulling to and promoting a standby, `GET /audit`, the `/access` endpoints |
+
+A `deploy` token may be **limited to applications**. It then has the `deploy`
+row for the applications it names and the `read` row for everything. Every
+endpoint of the `deploy` row is under `/applications/:name`, and `:name` is
+what is checked — also when a `deploy` would create the application. For
+another application the answer is `403 TOKEN_LIMITED`:
+
+```json
+{ "error": { "code": "TOKEN_LIMITED",
+             "message": "this token is limited to my-api and web; it can read worker and not change it",
+             "details": { "applications": ["my-api", "web"], "application": "worker" } } }
+```
+
+An endpoint that takes `deploy` and is not about one application is refused
+to a limited token in the same way, without `application` in the details;
+there is none today. The role is judged first: what takes `admin` is
+`403 FORBIDDEN` for a limited token as for any other `deploy` token. `read`
+and `admin` tokens cannot be limited.
 
 There are two kinds of token. The **root token** is the one the agent is
 configured with — `SHIPWICK_AGENT_TOKEN`, or the one generated on first start.
 It has the `admin` role and the name `root`, is not stored in the database and
 cannot be revoked through the API. Every other token is created with
-[`POST /tokens`](#tokens), named, given a role, and shown exactly once.
+[`POST /tokens`](#tokens), named, given a role, optionally a list of
+applications and a time at which it expires, and shown exactly once.
 
 The agent holds only the SHA-256 of each token and compares in constant time.
 A wrong or revoked token is `401 UNAUTHORIZED`. After 20 failed
@@ -41,7 +61,38 @@ and which the endpoint wants:
              "details": { "role": "read", "required": "deploy" } } }
 ```
 
-`GET /server` tells a client who it is: `"token": {"name": "ci", "role": "deploy"}`.
+A token past its `expires_at` is `401 TOKEN_EXPIRED`:
+
+```json
+{ "error": { "code": "TOKEN_EXPIRED",
+             "message": "token ci expired on 2026-10-02 at 12:00 UTC; an admin creates a new one with: shipwick token create",
+             "details": { "name": "ci", "expired_at": "2026-10-02T12:00:00Z" } } }
+```
+
+Only the token itself gets this answer, so it tells nothing to anyone who does
+not hold it; a wrong token is `401 UNAUTHORIZED` whatever else exists. An
+expired token does not count towards the rate limit and is never answered
+`429`. The root token does not expire.
+
+`GET /server` tells a client who it is and what it may do:
+
+```json
+"token": { "name": "ci", "role": "deploy", "kind": "token",
+           "applications": ["my-api"], "expires_at": "2027-01-01T00:00:00Z" }
+```
+
+`kind` is `"token"`, or `"user"` for a person who [signed in](#signing-in):
+`name` is then the e-mail address, and what follows is said of the session.
+`applications` is the list a token is limited to, and empty for one that is not limited;
+`expires_at` is `null` for one that does not expire. From these a client
+knows what to offer: what takes `deploy` on an application is allowed when
+`role` is `admin`, or when `role` is `deploy` and `applications` is empty or
+names that application. An agent before 0.6 sends `name` and `role` only.
+
+Next to it, `"sign_in": {"configured": true, "issuer": "https://accounts.example.com"}`
+says whether people can sign in at all; an agent before 0.6 leaves it out.
+A session that is refused for its role or its limit gets the same codes as a
+token, `FORBIDDEN` and `TOKEN_LIMITED`, with "this session" in the message.
 
 ## Envelope
 
@@ -75,7 +126,13 @@ Failure — `details` is always an object:
 | 400 | `INVALID_CONFIG` | Also for a wildcard hostname (`*.example.com` as `domain` or an alias) that no certificate can be had for: the agent has no DNS challenge configured and no supplied [certificate](#certificates) covers it. One entry on the field that names it; `expected` says both ways out |
 | 400 | `INVALID_CERTIFICATE` | The certificate or key in a `PUT /certificates/:hostname` cannot serve that hostname; `message` is a sentence that says why, see [Certificates](#certificates) |
 | 401 | `UNAUTHORIZED` | Missing, wrong or revoked token |
+| 401 | `TOKEN_EXPIRED` | The token is a real one, past its `expires_at`; `details: {name, expired_at}` |
+| 401 | `SESSION_EXPIRED` | The session of a person who signed in is past its ten hours; `details: {name, expired_at}` |
+| 401 | `SESSION_ENDED` | The session was ended before its time: its rule was removed or changed, or an admin signed the person out; `details: {name, reason}`, see [Signing in](#signing-in) |
+| 401 | `SIGN_IN_FAILED` | A sign-in the provider or the ID token did not carry; `details: {reason}` |
 | 403 | `FORBIDDEN` | The token's role does not cover this endpoint; `details: {role, required}` |
+| 403 | `TOKEN_LIMITED` | The role would do, and the token is limited to other applications; `details: {applications}`, and `application` when the request was about one |
+| 403 | `ACCESS_NOT_GRANTED` | A person signed in whom no [access rule](#access-rules) gives a role; `details: {email}` |
 | 404 | `NOT_FOUND` | Unknown application, deployment or token, including a rollback's `deployment_id` that does not exist; a `deploy` whose `?static=` digest names no upload the agent has |
 | 404 | `ENDPOINT_NOT_FOUND` | This agent has no such operation — an older agent, a typo in the path, or a method the path does not support (there is no `405`). Answered without checking the token |
 | 409 | `DEPLOYMENT_IN_PROGRESS` | Another operation holds this application |
@@ -92,13 +149,17 @@ Failure — `details` is always an object:
 | 409 | `BACKUP_BUSY` | The backup is still being taken, verified, restored or removed; or a backup of the agent's state is already running |
 | 409 | `BACKUP_NOT_USABLE` | A verification, a restore or a download was asked of a backup that failed, so nothing was kept of it; or of one whose files do not decrypt with the agent's passphrase. Also when backups or exports are asked of an agent that has no backup destination |
 | 409 | `NO_VOLUMES` | A backup was asked of an application without volumes |
+| 409 | `FOREIGN_BUCKET` | Backups were to be adopted from a bucket that, under the agent's prefix, another installation writes to |
 | 400 | `INVALID_EXPORT` | The body of an import is not an export, its passphrase does not match, or it breaks off |
 | 409 | `IMPORT_IN_PROGRESS` | An import is running; a server takes one at a time |
 | 409 | `EXPORT_IN_PROGRESS` | An export to where backups go is being written already |
 | 409 | `STANDBY_NOT_CONFIGURED` | An import from the bucket was asked of an agent that has no bucket to read exports from |
+| 409 | `PROMOTION_IN_PROGRESS` | A promotion is running: a second one was asked for, or an import. `GET /standby/promotion` follows the one that runs |
+| 409 | `SIGN_IN_NOT_CONFIGURED` | A sign-in was asked of an agent without an OpenID Connect provider |
 | 409 | `BACKUPS_NOT_ENCRYPTED` | A backup of the agent's state was asked for and `SHIPWICK_BACKUP_PASSPHRASE` is not set; or an encrypted backup was asked for and the agent no longer has a passphrase |
 | 429 | `RATE_LIMITED` | A wrong token, after 20 authentications from this address failed within a minute; `Retry-After` says in how many seconds wrong tokens are answered `401` again. A valid token is never refused |
 | 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB; a volume archive larger than 10 GB; an image archive larger than 4 GB; a static folder larger than 512 MB |
+| 502 | `SIGN_IN_UNAVAILABLE` | The sign-in provider could not be reached or used; `message` says what to change |
 | 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down |
 | 500 | `INTERNAL_ERROR` | Anything else; `message` carries the cause |
 
@@ -107,8 +168,8 @@ Failure — `details` is always an object:
 | Method | Path | Role | |
 |---|---|---|---|
 | `GET` | `/health` | — | Liveness. No token. `{status, version}` |
-| `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `proxy: {enabled, reachable, error, routes, dns_challenge}` (`dns_challenge`: certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards), `notifications: {webhook}`, `backups: {destination, encrypted, state_last_at, state_error}` (see [Backups the agent takes](#backups-the-agent-takes)), `token: {name, role}` — the caller's own — `dashboard_url`: `https://<SHIPWICK_DASHBOARD_DOMAIN>`, or `""` when the dashboard has no hostname (an agent before 0.5 leaves the field out), and `disk` and `alerts`, see [Alerts and disk](#alerts-and-disk) |
-| `GET` | `/applications` | read | Summaries of all applications; each with `domain` and, when it serves only a part of it, `path` |
+| `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `proxy: {enabled, reachable, error, routes, dns_challenge}` (`dns_challenge`: certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards), `notifications: {webhook}`, `backups: {destination, encrypted, state_last_at, state_error}` (see [Backups the agent takes](#backups-the-agent-takes)), `token: {name, role, kind, applications, expires_at}` — the caller's own, see [Authentication](#authentication) — `sign_in: {configured, issuer}`, `dashboard_url`: `https://<SHIPWICK_DASHBOARD_DOMAIN>`, or `""` when the dashboard has no hostname (an agent before 0.5 leaves the field out), and `disk` and `alerts`, see [Alerts and disk](#alerts-and-disk) |
+| `GET` | `/applications` | read | Summaries of all applications; each with `domain` and, when it serves only a part of it, `path`, and with `certificate_problem`, `alert_count` and `alert_severity`, see [Application status](#application-status) |
 | `GET` | `/applications/:name` | read | Detail: status, active spec (env values and basic-auth passwords masked), containers, and the [certificate](#certificate-status) of each hostname |
 | `POST` | `/applications/:name/deploy` | deploy | Start a deployment → `202`. A static application adds `?static=<digest>`, see [Static folders](#static-folders) |
 | `POST` | `/applications/:name/validate` | deploy | Ask whether a deployment of the document in the body would be accepted, without deploying it → `{valid}`, see [Validating before deploying](#validating-before-deploying) |
@@ -127,6 +188,15 @@ Failure — `details` is always an object:
 | `GET` | `/tokens` | admin | The stored tokens, without their values, see [Tokens](#tokens) |
 | `POST` | `/tokens` | admin | Create a token; the value is in this response and nowhere else → `201` |
 | `DELETE` | `/tokens/:name` | admin | Revoke a token → `204` |
+| `GET` | `/audit?application=&actor=&since=&limit=50&before=` | admin | Who changed what, newest first (max 500), see [Audit trail](#audit-trail) |
+| `GET` | `/auth` | — | Whether people can sign in, and what an authorization request needs. No token, see [Signing in](#signing-in) |
+| `POST` | `/auth/exchange` | — | Turn the code the provider sent the browser back with into a session. No token; body `{"code", "code_verifier", "nonce", "redirect_uri"}` |
+| `DELETE` | `/auth/session` | read | Forget the session the request is made with → `204` |
+| `GET` | `/access/rules` | admin | Who may sign in, and as what, see [Access rules](#access-rules) |
+| `POST` | `/access/rules` | admin | Give an address, a group or a domain a role, creating or replacing the rule; body `{"kind", "subject", "role", "applications"?}` → `201` or `200` |
+| `DELETE` | `/access/rules/:id` | admin | Remove a rule → `204`; sessions that rested on it end with their next request |
+| `GET` | `/access/sessions` | admin | Who is signed in right now |
+| `DELETE` | `/access/sessions/:email` | admin | End every session of a person → `{sessions}` |
 | `GET` | `/secrets` | read | The secrets stored on the server, names and dates only, see [Secrets](#secrets) |
 | `PUT` | `/secrets/:name` | admin | Store a secret, creating or replacing it; body `{"value": "…"}` → `204` |
 | `DELETE` | `/secrets/:name` | admin | Remove a secret → `204` |
@@ -162,15 +232,17 @@ Failure — `details` is always an object:
 | `GET` | `/server/backups?limit=50` | admin | The backups of the agent's own state, newest first |
 | `GET` | `/server/backups/:id` | admin | One of them |
 | `POST` | `/server/backups` | admin | Back up the agent's state now → `202` |
+| `POST` | `/server/backups/adopt` | admin | Record the backups the destinations hold and the database does not know; body `{"application"?}` → `{adopted, skipped}` |
 | `POST` | `/export` | admin | Everything the server runs as one encrypted file; body `{"passphrase", "applications"?}`, see [Export, import and the standby](#export-import-and-the-standby) |
 | `POST` | `/import?stopped=false&overwrite=false` | admin | Take in an export sent as the body and deploy what it holds; answers when it is done |
 | `GET` | `/import` | admin | The import that is running, or ran last |
 | `GET` | `/exports?limit=50` | admin | The exports written to where backups go, newest first |
 | `GET` | `/exports/:id` | admin | One of them |
 | `POST` | `/exports` | admin | Write one there now → `202` |
-| `GET` | `/standby` | read | The applications that were imported stopped, the DNS records a promotion asks for, and how the scheduled import is doing |
+| `GET` | `/standby` | read | The applications that were imported stopped, the DNS records a promotion asks for, how the scheduled import is doing, and the promotion that runs or ran last |
 | `POST` | `/standby/pull` | admin | Import the newest export in the bucket now, stopped → `202` |
-| `POST` | `/standby/promote` | admin | Start the applications that were imported stopped, in order |
+| `POST` | `/standby/promote?wait=false` | admin | Start the applications that were imported stopped, in order → `202`, poll `/standby/promotion` |
+| `GET` | `/standby/promotion` | read | The promotion that is running, or ran last |
 
 `GET /metrics` is the one authenticated endpoint outside `/api/v1`, because
 that is where a scraper looks; it needs the `read` role and answers in the
@@ -242,8 +314,9 @@ unless something else needs it, and says so in a step.
 `completed_at` does not wait for the replicas that were replaced to exit.
 They are out of rotation and have been sent `SIGTERM`; each then has the
 application's `deploy.stop_timeout` (10s unless set) before it is killed, and
-is removed after that. One that had to be killed is reported in the
-application's [events](#events), at level `warn`. A deployment that starts
+is removed after that. Until then it is listed among the application's
+`containers` with `stopping: true`. One that had to be killed is reported in
+the application's [events](#events), at level `warn`. A deployment that starts
 while one is still stopping waits for it before it starts a replica, and says
 how long it waited.
 
@@ -313,6 +386,11 @@ Each of `path`, `proxy` and its four members is left out when it is not set,
 and so is `static.fallback`; `basic_auth[].path` is left out for an account
 of the whole application; `redirects[].status` is always present, `308` when
 the document named none. `path: /` is stored as no path.
+
+`init: true` in the deploy.yaml comes back as `"init": true` in the `spec`;
+the key is left out when it is not set or `false`. A redirect hostname of an
+application with a `path` is answered with `308` to
+`https://<domain><path>` plus the request's path and query.
 
 **A password is always `********`** in a response, like an `env` value. In
 the request it is the password, or a `${NAME}` that the agent fills in from
@@ -439,7 +517,8 @@ deploy.yaml, or on request. A *backup* is one run:
   "restored_at": null, "restore_error": "" }
 ```
 
-`trigger` is `schedule` or `manual`. `status` is `running`, `succeeded` or
+`trigger` is `schedule`, `manual`, or `adopted` for a backup that was recorded
+from its files (below). `status` is `running`, `succeeded` or
 `failed`; a failed backup has `error` set, empty `volumes` and `destinations`,
 and no files anywhere. `size_bytes` is the tar archive's size, before
 encryption. `destinations` lists where it went, of `local` (the agent's backup
@@ -454,7 +533,9 @@ verification's container wrote.
 `POST /applications/:name/backups` answers `202` with the backup (`status:
 "running"`) and a `Location` to poll until `completed_at` is set. It works
 without a `backups` block in deploy.yaml; with one, its `before` command runs
-first and `stop` is honoured. The application is held until the archives are
+first, for at most `before_timeout` (`"1h0m0s"` in the stored configuration
+unless set; an older deployment has no such field, and an hour),
+and `stop` is honoured. The application is held until the archives are
 written: other operations get `409 DEPLOYMENT_IN_PROGRESS`, as during a
 deployment, and wait up to 30 seconds instead when the backup was started by
 the schedule. `409 NO_VOLUMES` if the application has none.
@@ -498,6 +579,51 @@ BACKUPS_NOT_ENCRYPTED` without `SHIPWICK_BACKUP_PASSPHRASE`: the key is never
 written unencrypted. There is no endpoint that restores the state; that is
 done with the agent stopped (handbook, *Restoring the agent's state*).
 
+**Adopting backups.** A database restored from a backup of the agent's state
+does not know the backups taken after it, whose files are still in the
+directory and in the bucket. `POST /server/backups/adopt` records them. The
+body is optional: `{"application": "postgres"}` looks at one application's
+backups; without it, at every application's, the agent's state and the
+exports. The answer is `200`, once the destinations have been listed:
+
+```json
+{ "data": { "adopted": [
+    { "kind": "application", "application": "postgres",
+      "backup": { "id": 13, "trigger": "adopted", "status": "succeeded",
+        "started_at": "2026-03-02T03:00:41Z", "completed_at": "2026-03-02T03:00:41Z",
+        "volumes": [{ "volume": "data", "size_bytes": 2254857830 }],
+        "destinations": ["s3"], "encrypted": true, "error": "",
+        "activity": "", "verified_at": null, "verify_error": "",
+        "restored_at": null, "restore_error": "" } },
+    { "kind": "state", "application": "", "backup": { "id": 14, "trigger": "adopted", "…": "…" } }
+  ],
+  "skipped": [
+    { "kind": "state", "application": "", "id": 15,
+      "reason": "encryption.key.enc is missing: the backup was not finished" }
+  ] } }
+```
+
+`kind` is `application`, `state` or `export`; `application` is empty for the
+last two, whose backups are then listed by `GET /server/backups` and
+`GET /exports`. A backup is recorded under the id its files carry, with what
+they say: `volumes` from their names, `size_bytes` from their sizes — for an
+encrypted file the size of what it holds — `started_at` and `completed_at`
+both from when the newest of them was written, `destinations` from where all
+of them are, `encrypted` from their names. `skipped` lists the runs whose
+files are not a backup that can be recorded — one of the agent's state or an
+export that lacks a file, files that are partly encrypted, a file that has
+one size in the directory and another in the bucket — and nothing is changed
+for them. Both lists are empty when the database knows everything; nothing is
+adopted twice, and no file is written, moved or removed. An adopted backup is
+verified, restored, downloaded, removed and counted towards `backups.keep`
+like any other. Whether an application's backup was finished cannot be told
+from its files: it is adopted with the volumes that are there.
+
+`409 FOREIGN_BUCKET` when the bucket, under the agent's prefix, is marked by
+another installation; `409 BACKUP_NOT_USABLE` on an agent without a backup
+destination; `400 INVALID_REQUEST` for a name that is not an application's. A
+bucket that cannot be listed is a `500` with the service's answer.
+
 `GET /server` summarizes it:
 
 ```json
@@ -520,7 +646,8 @@ secrets, registry credentials and certificates, the images that exist only on
 the server, the folders of static applications and an archive of every volume.
 It exists only encrypted, in the format backups use
 ([architecture.md](architecture.md#moving-a-server-and-standing-by) has its
-layout). Everything here takes `admin`, except `GET /standby`.
+layout). Everything here takes `admin`, except `GET /standby` and
+`GET /standby/promotion`.
 
 **`POST /export`** streams one:
 
@@ -582,14 +709,25 @@ to do. `volumes` are the volumes that were filled before the application
 first started. A deployment made by an import has the `kind` `import`, or
 `standby` when it was deployed stopped for a standby.
 
+The configuration of every application in an export is validated by the
+rules a deploy.yaml is held to, all of them, before anything of the
+application is touched; one that does not pass is `failed` with the fields
+and what is wrong with each in `message`, and the import goes on with the
+next.
+
 `400 INVALID_EXPORT`: the body is not an export, the passphrase does not
 match, or the file breaks off; what had been imported until then stays, and
 `GET /import` shows it. `409 IMPORT_IN_PROGRESS`: a server takes one import
-at a time.
+at a time. `409 PROMOTION_IN_PROGRESS`: nothing is imported into a server
+while it is being promoted.
 
 **`GET /import`** is the import that is running, or ran last, in the same
-shape: poll it from a second connection to follow an upload. It is kept in
-memory; `404 NOT_FOUND` when the agent has run none since it started.
+shape: poll it from a second connection to follow an upload. `404 NOT_FOUND`
+when the server has run none. The record outlives the agent that wrote it.
+An import does not: it ends with the upload or the download that feeds it,
+so an import the agent was restarted under is `failed`, and says so. A
+deployment it had begun is resumed like any other, and an application that
+was being deployed stopped stays stopped.
 
 **Exports on the server.** `POST /exports` writes an export of the whole
 server to where backups go, encrypted with the agent's
@@ -610,7 +748,8 @@ day it has to take over:
     { "name": "my-api", "version": "1.4.2", "hostnames": ["api.example.com"], "imported_at": "2026-03-01T04:15:09Z" }
   ],
   "records": [{ "hostname": "api.example.com", "type": "A", "value": "203.0.113.77" }],
-  "pull": { "schedule": "15 * * * *", "last_at": "2026-03-01T04:15:11Z", "last_export": 42, "last_error": "" }
+  "pull": { "schedule": "15 * * * *", "last_at": "2026-03-01T04:15:11Z", "last_export": 42, "last_error": "" },
+  "promotion": null
 }
 ```
 
@@ -618,30 +757,72 @@ day it has to take over:
 promotion starts them. `records` are the DNS records a promotion will ask
 for; `value` is empty when the agent does not know its own address. `pull` is
 `null` unless `SHIPWICK_STANDBY_SCHEDULE` is set; `last_export` is the id of
-the export imported last, `0` if none.
+the export imported last, `0` if none; both survive a restart of the agent,
+so an export is imported once. `promotion` is the promotion that is running
+or ran last, as `GET /standby/promotion` returns it, and `null` on a server
+that was never promoted (an agent before 0.6 leaves the field out).
 
 `POST /standby/pull` imports the newest export in the bucket now, stopped
 and overwriting: `202` with the import as it begins and `Location:
 /api/v1/import` to poll. `409 STANDBY_NOT_CONFIGURED` without a bucket to read
 from, `404 NOT_FOUND` when the bucket holds no export.
 
-`POST /standby/promote` starts those applications in order and waits for
-each to be ready, so it answers after as long as their startup budgets
-together:
+**Promoting.** `POST /standby/promote?wait=false` begins a promotion: those
+applications are started in order, each waited for until it is ready or has
+spent its startup budget. The promotion runs on the server, whatever becomes
+of the request, and has a record. The answer is `202` with that record as the
+promotion begins and `Location: /api/v1/standby/promotion`:
 
 ```json
 {
+  "id": 1,
+  "status": "running",
+  "started_at": "2026-03-01T09:30:00Z",
+  "completed_at": null,
   "applications": [
-    { "name": "postgres", "status": "running", "message": "" },
-    { "name": "my-api", "status": "started", "message": "started, and not ready yet: …" }
+    { "name": "postgres", "status": "pending", "message": "" },
+    { "name": "my-api", "status": "pending", "message": "" }
   ],
   "records": [{ "hostname": "api.example.com", "type": "A", "value": "203.0.113.77" }]
 }
 ```
 
-`status` is `running` (ready), `started` (not ready within its startup
-budget; the supervisor has it) or `failed` (it could not be started). With
-nothing to promote both lists are empty.
+**`GET /standby/promotion`** (`read`) returns the record while the promotion
+runs and after it has ended; poll it until `completed_at` is set. `404
+NOT_FOUND` on a server that was never promoted.
+
+- `status` is `running`, then `succeeded`, or `failed` when at least one
+  application could not be started.
+- An application's `status` is `pending` (not reached yet), `starting`
+  (being started, or waited for), `running` (ready), `started` (not ready
+  within its startup budget; the supervisor has it, and `message` says what
+  it last answered) or `failed` (it could not be started; `message` says
+  why). One application that fails does not stop the promotion.
+- `records` are the DNS records to change, fixed when the promotion begins.
+- `id` counts the promotions of the server. A client that lost the answer
+  to its `POST` reads the record: an `id` it has not seen means the request
+  arrived.
+
+`409 PROMOTION_IN_PROGRESS` when a promotion is running: there is one at a
+time, and the record of the one that runs is the one to follow. `409
+IMPORT_IN_PROGRESS` while an import runs. With nothing to promote, no
+promotion begins: the answer is `200` with a record that has completed,
+`"id": 0` and no applications, and the record of the last promotion stays.
+
+A promotion outlives the agent. One that an agent was restarted under is
+resumed by the agent that starts next, from its record: applications it had
+finished with keep their outcome, the one it was at is started if it is not
+running and waited for again, the rest follow. While the agent is away the
+proxy answers `502`, `503` or `504` in its place, and an agent that is
+shutting down answers `503`; a client keeps polling.
+
+Without `wait=false` the request is held until the promotion has ended and
+answered `200` with the completed record, as agents before 0.6 answered —
+they have no record: no `id`, `status` or times in the answer, and
+`404 ENDPOINT_NOT_FOUND` for `GET /standby/promotion`. The promotion is the
+same one either way; a held request that loses its connection loses only the
+answer, which `GET /standby/promotion` still has. `503` when the agent is
+stopped while the request is held.
 
 ### Images built by the CLI
 
@@ -810,6 +991,30 @@ an application being upgraded reads `HEALTHY`, not `DEGRADED`. `containers`
 lists every container of the application, of both versions, each with its
 `deployment_id`.
 
+Every application, in the list and on its own, says whether it wants a look:
+
+```json
+{ "name": "my-api", "status": "HEALTHY", "…": "…",
+  "certificate_problem": { "hostname": "www.example.com", "status": "waiting_for_dns",
+    "message": "does not resolve yet; create an A record for it that points to 203.0.113.10" },
+  "alert_count": 2, "alert_severity": "critical" }
+```
+
+- `certificate_problem` is `null` while no certificate of the application is
+  known to be out of order. Otherwise it names one hostname — the domain, an
+  alias or a redirect — with the `status` and `message` that
+  [`certificates`](#certificate-status) carries for it: the worst among them,
+  `waiting_for_dns` before `expiring` before `obtaining`, and of two equally
+  bad the first in the order of `certificates`. `unknown` (no proxy, not
+  checked yet, the proxy does not answer) is not a problem.
+- `alert_count` is how many [alerts](#alerts-and-disk) about the application are
+  active and `alert_severity` the highest severity among them: `warning`,
+  `critical`, or `""` when there is none. The alerts themselves are in
+  `GET /server`.
+
+Both are read from what the agent has in memory; listing costs no more for
+them. An agent older than 0.6 sends neither field.
+
 Each entry of `containers` in the application detail carries what the
 supervisor knows about it:
 
@@ -818,6 +1023,7 @@ supervisor knows about it:
 | `health` | `""` no health check configured · `unknown` not probed yet, e.g. right after an agent restart (counts as healthy) · `starting` (re)started, within its startup budget · `healthy` · `unhealthy` |
 | `restarts` | Restarts performed by the supervisor over the container's lifetime |
 | `crash_loop` | Restarts of this replica are currently rate-limited |
+| `stopping` | `true` for a container the agent is retiring in the background: replaced by a deployment, or left over. It is out of rotation, has been sent `SIGTERM`, and is gone once its process exits or its `deploy.stop_timeout` is over. It is not a replica any more — `replicas` never counted it — and its `health` and `restarts` are not kept up. Absent from agents older than 0.6 |
 
 ### Events
 
@@ -847,10 +1053,25 @@ curl -X POST …/tokens -d '{"name": "ci", "role": "deploy"}'
 {
   "data": {
     "id": 3, "name": "ci", "role": "deploy", "created_at": "2026-03-01T10:00:00Z",
-    "token": "swk_Xk3nM9…"
+    "token": "swk_Xk3nM9…", "applications": [], "expires_at": null
   }
 }
 ```
+
+Two optional fields narrow the token:
+
+```bash
+curl -X POST …/tokens -d '{"name": "ci", "role": "deploy",
+  "applications": ["my-api", "web"], "expires_at": "2027-01-01T00:00:00Z"}'
+```
+
+`applications` limits a `deploy` token to those applications (see
+[Authentication](#authentication)): one to 50 application names, which need
+not exist yet; with another role it is `400`. The answer carries them sorted,
+each once. `expires_at` is an RFC 3339 time in the future, after which the
+token is `401 TOKEN_EXPIRED`; a time that has passed is `400`. Neither can be
+changed afterwards. An agent before 0.6 answers a request with either field
+`400 INVALID_REQUEST`, `unknown field`, and creates nothing.
 
 `token` is shown here and never again: the agent stores its SHA-256 and
 nothing else. Values are 32 random bytes in unpadded base64url behind the
@@ -866,16 +1087,227 @@ Names match `^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`, are unique
 ```json
 { "data": [
   { "id": 3, "name": "ci", "role": "deploy", "created_at": "2026-03-01T10:00:00Z",
-    "last_used_at": "2026-03-01T10:42:00Z" }
+    "last_used_at": "2026-03-01T10:42:00Z",
+    "applications": ["my-api", "web"], "expires_at": "2027-01-01T00:00:00Z" }
 ] }
 ```
 
 `last_used_at` is `null` until the token is first used, and is then kept to
-the minute: it says whether a token is still in use, not what it did last.
+the minute: it says whether a token is still in use, not what it did last; a
+request refused because the token had expired is not a use.
+`applications` is empty for a token that is not limited, `expires_at` is
+`null` for one that does not expire. A token whose `expires_at` has passed
+stays listed until it is revoked.
 The root token is not listed: it is configured on the agent, not stored.
 
 `DELETE /tokens/ci` → `204`; requests with the token are `401` from then on.
 `DELETE /tokens/root` is `400`. A token may revoke itself.
+
+### Audit trail
+
+Every request that changes something leaves an entry, whatever became of it.
+`GET /audit` lists them, newest first:
+
+```json
+{ "data": [
+  { "id": 42, "at": "2026-10-03T17:20:17.276658220Z",
+    "actor": { "kind": "token", "name": "ci" },
+    "address": "172.18.0.3", "forwarded_for": "203.0.113.40",
+    "action": "deploy", "application": "my-api", "target": "",
+    "outcome": "ok", "status": 202, "code": "", "detail": "deployment 12" }
+] }
+```
+
+| Field | |
+|---|---|
+| `actor` | Who made the request: `kind` is `"token"` and `name` the token's name (`root` for the agent's own), or `kind` is `"user"` and `name` the e-mail address of a person who signed in |
+| `address` | Where the connection came from. Behind the proxy this is the proxy |
+| `forwarded_for` | The client address the proxy reported in `X-Forwarded-For`, `""` without one. On a connection that does not come through the proxy the header is the caller's own word, which is why both are kept |
+| `action` | What was asked for, see below |
+| `application` | The application it was about, `""` for what is not about one |
+| `target` | What else the request named: the job, the volume, the backup's id, the secret, the registry, the hostname of a certificate, the token |
+| `outcome` | `ok`: answered 2xx — for what runs in the background, accepted. `refused`: `403`, the role or the application limit. `failed`: anything else |
+| `status`, `code` | The HTTP status of the answer, and the error code of one that was not 2xx |
+| `detail` | What was started (`deployment 12`, `run 4`, `backup 7`, `export 3`), or what was asked for: a created token's role, applications and expiry; the volume of a backup download; `stopped` and `overwrite` of an import; the applications of an export |
+
+Actions: `deploy`, `redeploy`, `rollback`, `stop`, `start`,
+`application.delete`, `run`, `job.run`, `image.upload`, `static.upload`,
+`backup.create`, `backup.verify`, `backup.restore`, `backup.download`,
+`backup.delete`, `server.backup`, `backup.adopt`, `volume.download`, `volume.restore`,
+`volume.delete`, `secret.set`, `secret.delete`, `registry.login`,
+`registry.logout`, `certificate.set`, `certificate.delete`, `token.create`,
+`token.revoke`, `key.rotate`, `export.download` (`POST /export`),
+`export.create` (`POST /exports`), `import`, `standby.pull`,
+`standby.promote`, and `signin`, `signout`, `access.grant`, `access.revoke`
+and `access.signout`, see [Signing in](#signing-in). Every endpoint that is
+not a `GET` is recorded, except
+`validate` and `images/missing`, which change nothing; of the `GET`s, the two
+that hand out an application's data — a volume's archive and a backup's —
+are.
+
+Not recorded: reading; a request without a valid token, which has no actor
+(it is in the agent's log, and counted by the rate limit); what the agent
+does on its own — scheduled jobs, backups and exports, restarts by the
+supervisor. Nothing from a request's body is kept except names: no `env`, no
+secret's value, no command, no passphrase.
+
+Query parameters, all optional: `application` and `actor` match exactly;
+`since` is a number of days or hours back (`7d`, `24h`), a date
+(`2026-09-01`, from its start in UTC) or an RFC 3339 time; `limit` is 1 to
+500, 50 by default; `before` is the `id` of the last entry of the page before
+and continues after it — a page shorter than `limit` is the last.
+
+Entries are kept for a year, and the newest 100,000 at most.
+
+### Signing in
+
+With an OpenID Connect provider configured on the agent
+(`SHIPWICK_OIDC_ISSUER`, `SHIPWICK_OIDC_CLIENT_ID`,
+`SHIPWICK_OIDC_CLIENT_SECRET`), a person signs in at the provider and the
+agent issues a **session**: a credential that is presented exactly like a
+token, `Authorization: Bearer sws_…`, and is the same kind of caller —
+`kind: "user"`, `name` the e-mail address, a role, optionally a list of
+applications, `expires_at`. Everything under [Authentication](#authentication)
+holds for it: the role table, the application limit, `GET /server` → `token`,
+the audit trail. Tokens are not affected.
+
+The flow is the authorization-code flow with PKCE, and it is the dashboard's
+server that drives it; the client secret never leaves the agent. Two
+endpoints take no token.
+
+`GET /auth` says where to send a browser. All of it is public:
+
+```json
+{ "data": { "configured": true,
+            "issuer": "https://accounts.example.com",
+            "authorization_endpoint": "https://accounts.example.com/authorize",
+            "client_id": "shipwick",
+            "scopes": ["openid", "email", "profile"],
+            "redirect_uri": "https://dashboard.example.com/auth/callback" } }
+```
+
+Without a provider it answers `{"configured": false, …}` with the other
+fields empty; `502 SIGN_IN_UNAVAILABLE` when the provider's discovery
+document cannot be read. `redirect_uri` is `https://` +
+`SHIPWICK_DASHBOARD_DOMAIN` + `/auth/callback`, from the agent's
+configuration and never from a request.
+
+The caller generates three random values of 32 bytes each, base64url
+without padding — `state`, `nonce` and the PKCE `code_verifier` — keeps them
+with the browser, and redirects it to `authorization_endpoint` with
+`response_type=code`, `client_id`, `redirect_uri`, `scope` (the scopes joined
+by spaces), `state`, `nonce`, `code_challenge` (the base64url SHA-256 of the
+verifier) and `code_challenge_method=S256`. When the provider sends the
+browser back with `code` and `state`, the caller compares `state` with what
+it kept and hands the rest to the agent:
+
+```http
+POST /api/v1/auth/exchange
+Content-Type: application/json
+
+{ "code": "…", "code_verifier": "…", "nonce": "…",
+  "redirect_uri": "https://dashboard.example.com/auth/callback" }
+```
+
+```json
+{ "data": { "session": "sws_Zm9v…",
+            "identity": { "kind": "user", "name": "ada@example.com", "role": "deploy",
+                          "applications": ["my-api"], "expires_at": "2026-10-03T19:00:00Z" } } }
+```
+
+`session` is in this response and nowhere else; the agent keeps its SHA-256.
+The agent redeems the code at the provider's token endpoint with the client
+secret and the verifier, and believes the ID token only if it is signed by
+one of the provider's keys (RS256 or ES256), was issued by the configured
+issuer for this client, is within its time and at most ten minutes old, and
+carries `nonce`. It accepts each nonce once. An `email_verified: false` is
+refused; a provider that does not send the claim is taken at its word. Then
+the [access rules](#access-rules) are asked what the person may do.
+
+| HTTP | `code` | |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | A field is missing or malformed (`code_verifier`: 43 to 128 characters; `nonce`: at least 22 of base64url), or `redirect_uri` is not the configured one (`details: {redirect_uri}`) |
+| 401 | `SIGN_IN_FAILED` | `details.reason`: `code_rejected` — the provider refused the code: used before, expired, issued to another client or for another verifier; `invalid_id_token` — signature, issuer, audience or times; `nonce_mismatch` — the ID token answers another sign-in; `nonce_reused` — this sign-in was completed before; `email_missing` — the ID token names no usable address; `email_not_verified` |
+| 403 | `ACCESS_NOT_GRANTED` | The person is who they say, and no rule gives them a role; `details: {email}`. The message is written to be forwarded to an admin |
+| 409 | `SIGN_IN_NOT_CONFIGURED` | The agent has no provider |
+| 429 | `RATE_LIMITED` | Failed sign-ins count like wrong tokens, see [Authentication](#authentication); a limited address is answered without the provider being asked |
+| 502 | `SIGN_IN_UNAVAILABLE` | The provider could not be reached, did not answer like one, calls itself by another issuer, or refused the agent's client id or secret |
+
+A session lasts ten hours from the sign-in, whatever its use. It rests on
+what the rules gave the person then: every request asks the rules again, and
+a session whose answer has changed is ended with that request, not at its
+expiry. A session that no longer works says why, to its holder only — like
+an expired token, and like it not counted by the rate limit:
+
+```json
+{ "error": { "code": "SESSION_ENDED",
+             "message": "no rule on this server gives ada@example.com a role any more. An admin grants one with: shipwick access grant ada@example.com --role read",
+             "details": { "name": "ada@example.com", "reason": "rule_removed" } } }
+```
+
+`reason` is `rule_removed`, `access_changed` (the rules give the person
+something else now: sign in again to get it) or `signed_out` (an admin ended
+it). A session past its time is `401 SESSION_EXPIRED` with
+`details: {name, expired_at}`. A session nobody issued is a wrong token:
+`401 UNAUTHORIZED`, counted.
+
+`DELETE /auth/session`, sent with the session itself, forgets it → `204`.
+Sent with a token it is `400`: a token is revoked, not signed out.
+
+Recorded in the [audit trail](#audit-trail): `signin` (the actor is the
+person; `ok` with what they got in `detail`, or `refused` with
+`ACCESS_NOT_GRANTED`; a sign-in the provider did not vouch for has no actor
+and is not recorded) and `signout`.
+
+### Access rules
+
+Who may sign in, and as what. `GET /access/rules`:
+
+```json
+{ "data": [
+  { "id": 1, "kind": "email",  "subject": "ada@example.com", "role": "admin",  "applications": [],
+    "created_at": "2026-10-03T09:00:00Z", "created_by": "root" },
+  { "id": 2, "kind": "group",  "subject": "backend",         "role": "deploy", "applications": ["my-api", "worker"],
+    "created_at": "2026-10-03T09:01:00Z", "created_by": "ada@example.com" },
+  { "id": 3, "kind": "domain", "subject": "example.com",     "role": "read",   "applications": [],
+    "created_at": "2026-10-03T09:02:00Z", "created_by": "root" }
+] }
+```
+
+| `kind` | `subject` | Matches |
+|---|---|---|
+| `email` | an address, lowercase | the person whose ID token carries that `email` |
+| `group` | a group's name as the provider sends it, case and all | a person whose groups claim (`SHIPWICK_OIDC_GROUPS_CLAIM`, `groups` by default) lists it |
+| `domain` | the part after the `@` | every address at exactly that domain; a subdomain is another domain |
+
+The most specific kind that matches decides, and the others are not looked
+at: the rule for the address, else the rules for the person's groups, else
+the rule for the domain. A rule for an address can therefore give one person
+less than their group has. Of several groups the highest role counts; where
+that is `deploy`, a group without `applications` lifts the limit, and the
+lists of the others add up. Nobody without a matching rule gets in.
+
+`POST /access/rules` with `{"kind", "subject", "role", "applications"?}`
+creates the rule → `201`, or replaces the one with the same kind and subject
+→ `200`; either way the rule is the answer. `applications` is for `deploy`
+only, as on a token. At most 200 rules. `DELETE /access/rules/:id` removes
+one → `204`. Rules can be written before a provider is configured.
+
+`GET /access/sessions` lists who is signed in right now:
+
+```json
+{ "data": [ { "id": 7, "email": "ada@example.com", "role": "deploy", "applications": ["my-api"],
+              "created_at": "2026-10-03T09:00:00Z", "expires_at": "2026-10-03T19:00:00Z",
+              "last_used_at": "2026-10-03T09:41:00Z" } ] }
+```
+
+`DELETE /access/sessions/:email` ends every session of that person →
+`{"sessions": 2}`, the number ended. It signs out and does not keep out:
+while a rule covers the person, they can sign in again.
+
+Audit actions: `access.grant` (target: the subject as the CLI writes it —
+`ada@example.com`, `group:backend`, `*@example.com`; detail: the role and
+applications), `access.revoke`, `access.signout` (target: the address).
 
 ### Secrets
 
@@ -1195,6 +1627,45 @@ JSON form has one more field, absent from the other events:
 
 `application` is empty for a `disk` alert. `alert.raised` is sent again when a
 warning turns critical; `alert.cleared` carries the severity the alert had.
+
+### Network
+
+`GET /server` says how the server reaches what is outside it:
+
+```json
+{
+  "data": {
+    "…": "…",
+    "network": {
+      "proxy": "proxy.example.com:3128",
+      "docker_proxy": false,
+      "ca_file": true,
+      "dns_resolvers": ["system"],
+      "acme_directory": "https://ca.example.internal/acme/acme/directory"
+    }
+  }
+}
+```
+
+- `proxy` is the proxy the agent's own requests go through — the webhook, the
+  bucket — as `host:port`, from `HTTPS_PROXY` or `HTTP_PROXY`; `""` when there
+  is none. The proxy's URL may hold a password, which is never part of it.
+- `docker_proxy` says whether the Docker daemon has a proxy configured.
+  Images are pulled by the daemon: `proxy` set and `docker_proxy` false is the
+  usual reason a pull fails behind a proxy.
+- `ca_file` is true when certificate authorities of the operator's own are
+  trusted in addition to the system's (`SHIPWICK_CA_FILE`).
+- `dns_resolvers` are the name servers asked whether a hostname points at the
+  server: addresses with their port, or `["system"]`. `[]` means the public
+  ones.
+- `acme_directory` is the ACME server certificates are obtained from; `""`
+  is Let's Encrypt.
+- An agent older than 0.6 sends no `network`.
+
+A pull that fails before the registry answers — no route, a proxy that
+refuses, a certificate the daemon does not trust — fails the deployment with
+the daemon's message followed by what to change on the server; it has no
+error code of its own.
 
 ### Prometheus metrics
 

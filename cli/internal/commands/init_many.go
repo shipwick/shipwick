@@ -150,6 +150,9 @@ func renderEntry(a initAnswers, dir string) []string {
 	default:
 		add("image: %s", a.Image)
 	}
+	if a.Init {
+		add("init: true")
+	}
 	if a.Port != 0 {
 		add("port: %d", a.Port)
 	}

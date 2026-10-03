@@ -172,13 +172,13 @@ const crumbs = computed(() => [
           </p>
           <p v-if="registry" class="mt-1.5 text-fg-muted">
             If the image is private, the server needs a credential for <span class="mono text-fg">{{ registry }}</span>:
-            <NuxtLink :to="{ path: '/registries', query: { registry } }" class="link">log it in on the Registries page</NuxtLink>, then deploy again.
+            <NuxtLink :to="{ path: '/settings/registries', query: { registry } }" class="link">log it in on the Registries page</NuxtLink>, then deploy again.
           </p>
         </div>
 
         <!-- Metadata -->
         <UiPanel title="Details">
-          <dl class="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-4">
+          <dl class="facts sm:grid-cols-2 lg:grid-cols-4">
             <div class="bg-bg px-4 py-2.5">
               <dt class="label">
                 Version
@@ -248,7 +248,7 @@ const crumbs = computed(() => [
 
         <!-- Spec -->
         <UiPanel title="Configuration deployed">
-          <dl class="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-4">
+          <dl class="facts sm:grid-cols-2 lg:grid-cols-4">
             <!-- A static configuration is a folder and a hostname; the container settings do not exist for it. -->
             <div v-if="d.spec.static" class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">

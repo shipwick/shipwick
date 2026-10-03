@@ -3,7 +3,7 @@ import type { BackupRun, BackupStatus } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
 import { durationBetween, formatBytes, formatDuration } from '~/utils/format'
-import { backupBusy, backupSize, backupStatusDisplay, backupUsable, describeDestination, describeDestinations, stateBackupDisplay } from '~/utils/backups'
+import { backupBusy, backupSize, backupStatusDisplay, backupUsable, describeDestination, describeDestinations, stateBackupDisplay, triggerLabel } from '~/utils/backups'
 import { roleHint } from '~/utils/roles'
 
 /**
@@ -40,6 +40,7 @@ watch(runs.data, (list) => {
 
 const starting = ref(false)
 const startError = shallowRef<AgentError | null>(null)
+const adopting = ref(false)
 
 async function backUpNow() {
   if (starting.value) return
@@ -71,13 +72,17 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
 <template>
   <UiPanel title="Backups">
     <template #actions>
+      <!-- Admin only, and rarely needed: after the agent's state was restored, it finds the backups taken since. -->
+      <UiButton v-if="props.admin" size="sm" variant="ghost" title="Record backups that are in the backup destination and missing from the agent's lists" @click="adopting = true">
+        Adopt backups…
+      </UiButton>
       <UiButton size="sm" :disabled="!props.admin || !display.possible || anyBusy" :pending="starting" :title="startTitle" @click="backUpNow">
         <UiIcon name="download" :size="12" />
         Back up state now
       </UiButton>
     </template>
 
-    <dl class="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-4">
+    <dl class="facts sm:grid-cols-2 lg:grid-cols-4">
       <div class="bg-bg px-4 py-2.5">
         <dt class="label">
           Kept in
@@ -136,7 +141,7 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
                 <TimeAgo :time="r.started_at" />
               </td>
               <td data-label="Started by" class="text-fg-muted">
-                {{ r.trigger === 'schedule' ? 'daily schedule' : 'by hand' }}
+                {{ triggerLabel(r.trigger, 'daily schedule') }}
               </td>
               <td data-label="Size" class="mono right text-fg-muted" :title="r.volumes.map(v => `${v.volume} ${formatBytes(v.size_bytes)}`).join(' · ') || undefined">
                 {{ backupUsable(r) ? formatBytes(backupSize(r)) : '—' }}
@@ -156,6 +161,7 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
         </table>
       </div>
     </template>
+    <AdoptDialog :open="adopting" @close="adopting = false" @adopted="runs.refresh()" />
     <p class="border-t border-line px-4 py-2 text-xs text-fg-subtle">
       The state is the database and the key that encrypts the secrets in it: taken daily, seven kept, only ever encrypted. It is restored with the agent stopped; the handbook says how under <span class="text-fg-muted">Restoring the agent's state</span>. Backups of an application's volumes are on its own page.
     </p>

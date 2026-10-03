@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import type { AgentEvent } from '~/types/api'
 import { formatAbsoluteUtc } from '~/utils/format'
-import { eventLevelTone } from '~/utils/status'
+import { deploymentStatusDisplay, eventLevelTone } from '~/utils/status'
 
 const props = withDefaults(defineProps<{
   events: AgentEvent[]
   /** Also print the absolute UTC time next to the relative one (deployment timelines). */
   absolute?: boolean
-  /** Show the event type (step / state / log / app / supervisor). */
+  /** Show what kind of line each event is: a step, a change of phase, output. */
   showType?: boolean
 }>(), { absolute: false, showType: false })
 
 const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', muted: 'text-fg' } as const
+
+// The agent's event types, in the words of the page. A state event's message is the status the deployment entered.
+const TYPE_LABEL: Record<string, string> = { state: 'Phase', step: 'Step', log: 'Output', job: 'Job', app: 'Application', supervisor: 'Agent' }
 </script>
 
 <template>
@@ -27,13 +30,14 @@ const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', mut
         <span v-if="props.absolute" class="mono text-fg-faint">{{ formatAbsoluteUtc(event.created_at) }}</span>
       </div>
       <div class="flex min-w-0 gap-2" :class="event.type === 'log' ? 'items-start' : 'items-baseline'">
-        <span v-if="props.showType" class="label w-16 shrink-0">{{ event.type }}</span>
+        <span v-if="props.showType" class="label w-20 shrink-0" :title="event.type">{{ TYPE_LABEL[event.type] ?? event.type }}</span>
         <span v-if="event.level !== 'info'" class="label shrink-0" :class="TONE_TEXT[eventLevelTone(event.level)]">{{ event.level }}</span>
         <pre
           v-if="event.type === 'log'"
           class="mono min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-sm border border-line bg-inset px-3 py-2 text-xs leading-[1.125rem]"
         >{{ event.message }}</pre>
         <!-- The level label carries the color; the message stays in ink so a crash loop is not a wall of amber. -->
+        <span v-else-if="event.type === 'state'" class="min-w-0 break-words text-fg-muted" :title="event.message">{{ deploymentStatusDisplay(event.message).label }}</span>
         <span v-else class="min-w-0 break-words">{{ event.message }}</span>
       </div>
     </li>

@@ -22,6 +22,10 @@ type TLS struct {
 	// Certificates are the ones the operator supplied. The hostnames they
 	// cover are served with them, and Caddy asks no authority for those.
 	Certificates []Certificate
+	// ACMEDirectory, when set, is the certificate authority certificates are
+	// obtained from in place of Let's Encrypt: the directory URL of an ACME
+	// server inside the operator's network.
+	ACMEDirectory string
 }
 
 // Certificate is a certificate chain and its key, both PEM, as the agent
@@ -55,13 +59,19 @@ func (t TLS) app() obj {
 		// certificate no longer depends on the server being reachable from
 		// the authority — which it is not, behind Cloudflare's proxy.
 		app["automation"] = obj{"policies": []any{obj{
-			"issuers": []any{obj{
+			"issuers": []any{t.directory(obj{
 				"module": "acme",
 				"challenges": obj{"dns": obj{"provider": obj{
 					"name":      "cloudflare",
 					"api_token": t.CloudflareToken,
 				}}},
-			}},
+			})},
+		}}}
+	} else if t.ACMEDirectory != "" {
+		// Naming an issuer replaces Caddy's defaults, Let's Encrypt and
+		// ZeroSSL, neither of which a server without a way out can reach.
+		app["automation"] = obj{"policies": []any{obj{
+			"issuers": []any{t.directory(obj{"module": "acme"})},
 		}}}
 	}
 	if len(t.Certificates) > 0 {
@@ -120,6 +130,22 @@ func (c *Caddy) UseCloudflare(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tls.CloudflareToken = token
+}
+
+// directory points an ACME issuer at ACMEDirectory, if there is one.
+func (t TLS) directory(issuer obj) obj {
+	if t.ACMEDirectory != "" {
+		issuer["ca"] = t.ACMEDirectory
+	}
+	return issuer
+}
+
+// UseACMEDirectory has certificates obtained from the ACME server whose
+// directory is at url. Call it before the first Sync.
+func (c *Caddy) UseACMEDirectory(url string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tls.ACMEDirectory = url
 }
 
 // SetCertificates replaces the certificates the operator supplied. The next

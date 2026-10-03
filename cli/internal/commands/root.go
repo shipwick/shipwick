@@ -115,9 +115,10 @@ context use" changes the current one.`,
 		SilenceErrors: true, // main renders errors, see Render
 		// A binary that upgraded itself on Windows leaves its predecessor
 		// behind, because the running executable cannot be deleted.
-		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			c.running = cmd
 			removeStaleExecutable()
+			return c.useOutbound()
 		},
 	}
 	root.SetIn(opts.In)
@@ -152,6 +153,8 @@ context use" changes the current one.`,
 	root.AddCommand(c.certCommands()...)
 	root.AddCommand(c.exportCommands()...)
 	root.AddCommand(c.backupCommands()...)
+	root.AddCommand(c.auditCommands()...)
+	root.AddCommand(c.accessCommands()...)
 	return c, root
 }
 
@@ -400,6 +403,14 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 			return "The server is writing an export already.\n\nSee it with: shipwick export --list"
 		case api.CodeStandbyNotConfigured:
 			return "This server has no bucket to fetch exports from.\n\nSet the SHIPWICK_BACKUP_S3_* variables and SHIPWICK_BACKUP_PASSPHRASE of the first server, and SHIPWICK_STANDBY_SCHEDULE, in /opt/shipwick/.env here; or import a file with: shipwick import <file> --stopped"
+		case api.CodeTokenExpired:
+			return renderTokenExpired(apiErr)
+		case api.CodeTokenLimited:
+			return renderTokenLimited(apiErr)
+		case api.CodePromotionInProgress:
+			return "This server is being promoted; nothing is imported into it meanwhile.\n\nFollow the promotion with: shipwick standby promote"
+		case api.CodeSessionExpired, api.CodeSessionEnded:
+			return renderSessionOver(apiErr)
 		}
 		return "Error: " + apiErr.Message
 	}

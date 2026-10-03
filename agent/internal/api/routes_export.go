@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shipwick/shipwick/agent/internal/deploy"
@@ -38,6 +39,7 @@ func (s *Server) exportRoutes(routes routeTable) {
 	routes.read("GET /api/v1/standby", s.handleStandby)
 	routes.admin("POST /api/v1/standby/pull", s.handleStandbyPull)
 	routes.admin("POST /api/v1/standby/promote", s.handleStandbyPromote)
+	routes.read("GET /api/v1/standby/promotion", s.handleStandbyPromotion)
 }
 
 // handleExport streams an export of the server, encrypted with the
@@ -62,6 +64,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "applications: "+err.Error(), nil)
 			return
 		}
+	}
+	if len(req.Applications) > 0 {
+		auditDetail(r, "applications "+strings.Join(req.Applications, " "))
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -183,6 +188,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return
 	}
+	auditDetail(r, fmt.Sprintf("stopped %t, overwrite %t", stopped, overwrite))
 	passphrase, err := base64.StdEncoding.DecodeString(r.Header.Get(api.PassphraseHeader))
 	if err != nil || len(passphrase) == 0 {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "the passphrase of the export is sent base64-encoded in the "+api.PassphraseHeader+" header", nil)
@@ -229,7 +235,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleImportStatus(w http.ResponseWriter, r *http.Request) {
 	im, ok := s.engine.ImportStatus()
 	if !ok {
-		writeError(w, http.StatusNotFound, api.CodeNotFound, "no import has run on this server since the agent started", nil)
+		writeError(w, http.StatusNotFound, api.CodeNotFound, "no import has run on this server", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, im)
@@ -256,14 +262,66 @@ func (s *Server) handleStandbyPull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, im)
 }
 
-// handleStandbyPromote starts what was imported stopped. It waits for each
-// application to be ready, so the answer may take as long as their startup
-// budgets together.
+// handleStandbyPromote starts what was imported stopped. The promotion runs
+// in the background whoever asked for it and however they wait.
+//
+// With wait=false the answer is 202 and the promotion as it begins: poll
+// GET /standby/promotion until completed_at is set. Without it the request is
+// held until the promotion has ended and answered 200 with its outcome, which
+// is what a client older than the promotion's record expects; that may take
+// as long as the applications' startup budgets together. With nothing to
+// start the answer is 200 either way: a promotion that completed at once.
 func (s *Server) handleStandbyPromote(w http.ResponseWriter, r *http.Request) {
-	promotion, err := s.engine.Promote(r.Context())
+	wait := true
+	if raw := r.URL.Query().Get("wait"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "wait must be true or false", nil)
+			return
+		}
+		wait = v
+	}
+	promotion, err := s.engine.StartPromotion(r.Context())
+	switch {
+	case err != nil:
+		s.writeTransferError(w, r, err)
+		return
+	case promotion.CompletedAt != nil:
+		writeJSON(w, http.StatusOK, promotion)
+		return
+	case !wait:
+		w.Header().Set("Location", "/api/v1/standby/promotion")
+		writeJSON(w, http.StatusAccepted, promotion)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.closing:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	promotion, err = s.engine.AwaitPromotion(ctx)
 	afterGracePeriod(w)
 	if err != nil {
+		if r.Context().Err() == nil {
+			// The agent is stopping, not the caller: the promotion goes on
+			// when it has started again.
+			err = deploy.ErrShuttingDown
+		}
 		s.writeTransferError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, promotion)
+}
+
+func (s *Server) handleStandbyPromotion(w http.ResponseWriter, r *http.Request) {
+	promotion, ok := s.engine.Promotion()
+	if !ok {
+		writeError(w, http.StatusNotFound, api.CodeNotFound, "this server was never promoted", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, promotion)
@@ -278,6 +336,8 @@ func (s *Server) writeTransferError(w http.ResponseWriter, r *http.Request, err 
 		writeError(w, http.StatusConflict, api.CodeImportInProgress, err.Error(), nil)
 	case errors.Is(err, deploy.ErrExportInProgress):
 		writeError(w, http.StatusConflict, api.CodeExportInProgress, err.Error(), nil)
+	case errors.Is(err, deploy.ErrPromotionInProgress):
+		writeError(w, http.StatusConflict, api.CodePromotionInProgress, err.Error(), nil)
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidExport, invalid.Reason, nil)
 	case errors.Is(err, deploy.ErrNoStandbySource):

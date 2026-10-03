@@ -66,6 +66,25 @@ services:
       SHIPWICK_ENCRYPTION_KEY: ${SHIPWICK_ENCRYPTION_KEY:-}
       SHIPWICK_ALERT_MEMORY_PERCENT: ${SHIPWICK_ALERT_MEMORY_PERCENT:-}
       SHIPWICK_ALERT_DISK_PERCENT: ${SHIPWICK_ALERT_DISK_PERCENT:-}
+      # Optional: behind a proxy. The agent's own requests — webhook, bucket —
+      # go through it; images are pulled by the Docker daemon, which has its
+      # own setting (docs/handbook.md, "Behind a corporate proxy").
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      # Optional: certificate authorities of your own, a PEM file as this
+      # container sees it (mounted in compose.override.yml); who is asked
+      # whether a hostname points here; an ACME server of your own
+      SHIPWICK_CA_FILE: ${SHIPWICK_CA_FILE:-}
+      SHIPWICK_DNS_RESOLVERS: ${SHIPWICK_DNS_RESOLVERS:-}
+      SHIPWICK_ACME_DIRECTORY: ${SHIPWICK_ACME_DIRECTORY:-}
+      # Optional: people sign in to the dashboard with an OpenID Connect provider.
+      # Needs SHIPWICK_DASHBOARD_DOMAIN; who gets which role: shipwick access grant
+      SHIPWICK_OIDC_ISSUER: ${SHIPWICK_OIDC_ISSUER:-}
+      SHIPWICK_OIDC_CLIENT_ID: ${SHIPWICK_OIDC_CLIENT_ID:-}
+      SHIPWICK_OIDC_CLIENT_SECRET: ${SHIPWICK_OIDC_CLIENT_SECRET:-}
+      SHIPWICK_OIDC_SCOPES: ${SHIPWICK_OIDC_SCOPES:-}
+      SHIPWICK_OIDC_GROUPS_CLAIM: ${SHIPWICK_OIDC_GROUPS_CLAIM:-}
       SHIPWICK_LOG_FORMAT: json
     # No published port on purpose: the API is plain HTTP, and the only ways in
     # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a
@@ -75,6 +94,8 @@ services:
       - caddy-admin:/run/caddy
       # `docker login` credentials, for private images — in compose.override.yml:
       # - /root/.docker/config.json:/root/.docker/config.json:ro
+      # Certificate authorities of your own (SHIPWICK_CA_FILE) — in compose.override.yml:
+      # - /etc/shipwick/ca.pem:/etc/shipwick/ca.pem:ro
       # Root-equivalent access to this server. See README → Security.
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [shipwick]
@@ -86,6 +107,12 @@ services:
     # (Dockerfile.caddy): the official image has no DNS providers.
     image: ${SHIPWICK_CADDY_IMAGE:-ghcr.io/shipwick/caddy:latest}
     command: caddy run --config /etc/caddy/bootstrap.json --resume
+    environment:
+      # The agent's proxy, for the certificate authority and Cloudflare's API.
+      # Requests to applications never go through it.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     configs:
       - source: caddy-bootstrap
         target: /etc/caddy/bootstrap.json
@@ -117,6 +144,10 @@ services:
     image: ${SHIPWICK_DASHBOARD_IMAGE:-ghcr.io/shipwick/dashboard:latest}
     environment:
       SHIPWICK_AGENT_URL: http://agent:9000
+      # Several servers in this one dashboard: name=URL pairs in .env, e.g.
+      # SHIPWICK_AGENTS=production=http://agent:9000,staging=https://agent.staging.example.com
+      # Set, it replaces SHIPWICK_AGENT_URL; each server has its own sign-in.
+      SHIPWICK_AGENTS: ${SHIPWICK_AGENTS:-}
     # Reached only through Caddy, at SHIPWICK_DASHBOARD_DOMAIN. It has no
     # credentials of its own: whoever signs in brings the agent token.
     networks: [shipwick]

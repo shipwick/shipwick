@@ -71,3 +71,15 @@ func TestConfigureLogging(t *testing.T) {
 		}
 	})
 }
+
+func TestConfigureInitAsksForAnInitProcessOnlyOnRequest(t *testing.T) {
+	host := &container.HostConfig{}
+	configureInit(ContainerSpec{}, host)
+	if host.Init != nil {
+		t.Errorf("Init = %v without `init`; unset leaves the daemon's own default alone", *host.Init)
+	}
+	configureInit(ContainerSpec{Init: true}, host)
+	if host.Init == nil || !*host.Init {
+		t.Error("`init: true` did not reach the container's configuration")
+	}
+}

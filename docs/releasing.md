@@ -7,6 +7,7 @@ which — only after the whole CI suite passed on that commit — publishes:
 |---|---|
 | `shipwick_<os>_<arch>` for Linux, macOS (amd64, arm64) and Windows (amd64) | the GitHub release |
 | `compose.production.yml`, **all three images pinned to this version** | the GitHub release |
+| `install.sh`, the installer as it is at the tag, for `shipwick server bundle` | the GitHub release |
 | `checksums.txt` (SHA-256 of the files above) | the GitHub release |
 | `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard`, `ghcr.io/shipwick/caddy` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
 

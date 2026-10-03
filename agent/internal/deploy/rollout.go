@@ -799,6 +799,7 @@ func (e *Engine) createReplicas(ctx context.Context, d store.Deployment, indexes
 		if l := d.Spec.Logging; l != nil {
 			cspec.LogDriver, cspec.LogOptions = l.Driver, l.Options
 		}
+		cspec.Init = d.Spec.Init
 		id, name, err := e.createContainer(ctx, cspec)
 		if err != nil {
 			return created, fmt.Errorf("replica %d: %w", i, err)

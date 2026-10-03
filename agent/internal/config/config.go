@@ -121,6 +121,12 @@ type Config struct {
 	Backups Backups
 	// Transfer is the scheduled export and the standby: see transfer.go.
 	Transfer Transfer
+	// Outbound is the proxy, the certificate authorities and the name servers
+	// of a network that is not the open internet: see outbound.go.
+	Outbound Outbound
+	// SignIn is the OpenID Connect provider people sign in with; nil: tokens
+	// only. See oidc.go.
+	SignIn *SignIn
 }
 
 func (c Config) DatabasePath() string {
@@ -230,6 +236,12 @@ func Load(getenv func(string) string) (Config, error) {
 		if cfg.CaddyAdmin == "" {
 			return Config{}, fmt.Errorf("%s needs a reverse proxy to obtain certificates with it: set %s as well", EnvCloudflareToken, EnvCaddyAdmin)
 		}
+	}
+	if err := cfg.loadOutbound(getenv); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.loadSignIn(getenv); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }

@@ -25,23 +25,32 @@ func principalFrom(ctx context.Context) api.TokenIdentity {
 // constant time as it always was. Stored tokens are found by their hash — the
 // column is unique, so this is one indexed lookup — and the row's hash is
 // compared in constant time as well, so the lookup cannot be turned into an
-// oracle by whatever the database does with near-equal keys.
-func (s *Server) identify(ctx context.Context, presented [sha256.Size]byte) (api.TokenIdentity, bool) {
+// oracle by whatever the database does with near-equal keys. A token that
+// has expired is still identified: the caller decides what to say to it.
+// What is not a token may be the session of a person who signed in (see
+// identifySession); ended is why a session that is known no longer works.
+func (s *Server) identify(ctx context.Context, presented [sha256.Size]byte) (who api.TokenIdentity, ended string, known bool) {
 	if subtle.ConstantTimeCompare(presented[:], s.tokenHash[:]) == 1 {
-		return api.TokenIdentity{Name: api.RootTokenName, Role: api.RoleAdmin}, true
+		return identityOf(api.RootTokenName, api.RoleAdmin, nil, nil), "", true
 	}
 	t, err := s.store.GetTokenByHash(ctx, presented[:])
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.log.Error("could not look up the API token", "error", err)
+			return api.TokenIdentity{}, "", false
 		}
-		return api.TokenIdentity{}, false
+		return s.identifySession(ctx, presented)
 	}
 	if subtle.ConstantTimeCompare(t.Hash, presented[:]) != 1 {
-		return api.TokenIdentity{}, false
+		return api.TokenIdentity{}, "", false
 	}
-	s.recordUse(ctx, t)
-	return api.TokenIdentity{Name: t.Name, Role: t.Role}, true
+	who = identityOf(t.Name, t.Role, t.Applications, t.ExpiresAt)
+	// Being refused is not a use: last_used_at answers whether anything
+	// still works with this token.
+	if t.ExpiresAt == nil || s.now().Before(*t.ExpiresAt) {
+		s.recordUse(ctx, t)
+	}
+	return who, "", true
 }
 
 // lastUsedResolution is how often a token's use is written down at most.
@@ -73,10 +82,10 @@ func (s *Server) recordUse(ctx context.Context, t store.Token) {
 
 // forbiddenMessage tells a caller which role they have and which one the
 // operation wants, in the words the CLI and the dashboard show.
-func forbiddenMessage(have, required api.Role) string {
+func forbiddenMessage(who api.TokenIdentity, required api.Role) string {
 	need := "this needs " + string(required)
 	if required == api.RoleDeploy {
 		need = "deploying needs deploy or admin"
 	}
-	return fmt.Sprintf("this token has the %s role; %s", have, need)
+	return fmt.Sprintf("this %s has the %s role; %s", credential(who), who.Role, need)
 }

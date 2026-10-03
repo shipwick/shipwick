@@ -1,18 +1,21 @@
 <script setup lang="ts">
-import type { AgentEvent, ApplicationDetail, Container, Deployment, SpecVolume } from '~/types/api'
+import type { AgentEvent, ApplicationDetail, Deployment } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
-import { LIVE_METRICS_SAMPLES } from '~/composables/useLiveMetrics'
-import { formatBytes, formatCores, formatMemoryUsage, formatPercent, splitImage } from '~/utils/format'
-import { alertsFor } from '~/utils/alerts'
-import { describeBackupPlan } from '~/utils/backups'
-import { describeIssued, hostnameCertificateDisplay } from '~/utils/certificates'
+import { deployHint as whyNoDeploy, readOnlyReason } from '~/utils/access'
 import { rollbackCandidates } from '~/utils/deployments'
-import { roleHint } from '~/utils/roles'
+import { headline as describeState } from '~/utils/diagnosis'
 import { tidyDuration } from '~/utils/jobs'
-import { addressOf, describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatPathRedirect, formatPublish, hasProxySettings, hostnamesOf, shippedLogDriver } from '~/utils/spec'
-import { DRAINING_DISPLAY, applicationStatusDisplay, containerStateDisplay, isDraining, replicaHealthDisplay } from '~/utils/status'
+import { roleHint } from '~/utils/roles'
+import { addressOf, applicationUrl } from '~/utils/spec'
+import { applicationStatusDisplay } from '~/utils/status'
+import { applicationPath, applicationTabs } from '~/utils/tabs'
 
+/**
+ * The frame of an application's page: who it is and how it is, the actions,
+ * and the tabs. Each tab is a page of its own below this one and reads what
+ * is polled here through useApplication().
+ */
 const route = useRoute()
 const router = useRouter()
 const agent = useAgent()
@@ -43,8 +46,6 @@ const gone = computed(() => app.error.value?.notFound === true)
 const hasActive = computed(() => Boolean(app.data.value?.active_deployment))
 // A folder served by the proxy: no containers, so the agent answers 409 STATIC_APPLICATION to logs, metrics, jobs and run. Do not ask.
 const isStatic = computed(() => app.data.value?.static === true)
-const metrics = useLiveMetrics(name, () => hasActive.value && !gone.value && !isStatic.value)
-const history = useMetricsHistory(name, () => hasActive.value && !gone.value && !isStatic.value)
 
 watch(name, () => {
   void app.reset()
@@ -71,9 +72,11 @@ watch(() => app.data.value, (a) => {
   if (id !== null && id !== progress.progress.value?.deploymentId && id !== dismissedId) progress.followId(id)
 })
 
+/** The narration is on the overview: a deployment started from another tab is watched there. */
 function onStarted(deployment: Deployment) {
   progress.follow(deployment)
   refreshAll()
+  if (route.path !== path.value) void router.push(path.value)
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -84,19 +87,20 @@ function dismissProgress() {
 
 // --- actions ------------------------------------------------------------------
 
-const dialog = ref<'deploy' | 'rollback' | 'stop' | 'delete' | 'restore' | null>(null)
+const dialog = ref<'deploy' | 'rollback' | 'stop' | 'delete' | null>(null)
 const actionPending = ref(false)
 const actionError = shallowRef<AgentError | null>(null)
-const restoreVolume = ref<SpecVolume | null>(null)
 
 const busy = computed(() => Boolean(app.data.value?.deploying) || progress.active.value)
 const stopped = computed(() => app.data.value?.desired_state === 'stopped')
 const rollbackTargets = computed(() => rollbackCandidates(deployments.data.value ?? [], name.value))
 
 // What the signed-in token may do; the agent decides for real and a refusal is rendered where it happens.
-const mayDeploy = computed(() => access.can('deploy'))
+// A deploy token may be limited to some applications: it is asked about this one, not only about its role.
+const mayDeploy = computed(() => access.canDeploy(name.value))
 const mayAdmin = computed(() => access.can('admin'))
-const deployHint = computed(() => (mayDeploy.value ? undefined : roleHint('deploy')))
+const deployHint = computed(() => whyNoDeploy(access.token.value, name.value))
+const readOnly = computed(() => readOnlyReason(access.token.value, name.value))
 
 async function setRunning(run: boolean) {
   actionPending.value = true
@@ -119,130 +123,43 @@ function closeDialog() {
   actionError.value = null
 }
 
-function openRestore(volume: SpecVolume) {
-  restoreVolume.value = volume
-  dialog.value = 'restore'
-}
-
-/** The restore dialog offers to start the application; it stays stopped otherwise. */
-function startAfterRestore() {
-  closeDialog()
-  void setRunning(true)
-}
-
 // --- presentation -------------------------------------------------------------
 
 const status = computed(() => (app.data.value ? applicationStatusDisplay(app.data.value.status) : null))
 const spec = computed(() => app.data.value?.spec ?? null)
-const envNames = computed(() => Object.keys(spec.value?.env ?? {}).sort())
+const state = computed(() => (app.data.value ? describeState(app.data.value) : ''))
 
-const headline = computed(() => {
-  const a = app.data.value
-  if (!a) return ''
-  const loop = a.containers.find(c => c.crash_loop)
-  if (loop) return `Replica ${loop.replica} is crash-looping`
-  if (a.status === 'FAILED') return 'No deployment has succeeded yet'
-  if (a.status === 'DEPLOYING') return 'First deployment in progress'
-  if (a.status === 'STOPPED') return 'Stopped on request'
-  if (a.static) return 'Served by the proxy'
-  return `${a.replicas.healthy}/${a.replicas.desired} healthy`
-})
+const tabs = computed(() => applicationTabs({
+  name: name.value,
+  static: isStatic.value,
+  volumes: (spec.value?.volumes?.length ?? 0) > 0,
+}))
 
-/** "42 files, 3.1 MB, served by the proxy": what the active static deployment serves. */
-const servedFiles = computed(() => describeStatic(app.data.value?.active_deployment?.static))
-/** Where a `build` application's image comes from; "" for an image pulled from a registry. */
-const buildOrigin = computed(() => describeBuild(spec.value?.build))
-
-const cpuValues = computed(() => metrics.samples.value.map(s => s.cpu_percent))
-const memoryValues = computed(() => metrics.samples.value.map(s => s.memory_bytes))
-const sampleTimes = computed(() => metrics.samples.value.map(s => s.collected_at))
-
-// Limits come with the sample (percent of one core, summed over the replicas
-// that were measured; 0 = unlimited), so they stay right while a rollout
-// changes the number of containers.
-const cpuCeiling = computed(() => metrics.latest.value?.cpu_limit_percent || null)
-const memoryCeiling = computed(() => metrics.latest.value?.memory_limit_bytes || null)
-
-function replicaMetrics(container: Container) {
-  return metrics.latest.value?.replicas.find(r => r.container === container.name) ?? null
-}
-
-function replicaCpuTitle(container: Container): string | undefined {
-  const limit = replicaMetrics(container)?.cpu_limit_percent
-  return limit ? `Limit ${formatPercent(limit)} (percent of one core)` : undefined
-}
-
-/** By replica, the older deployment's container first: a stable order while a rollout swaps them. */
-const containers = computed(() => [...(app.data.value?.containers ?? [])].sort((a, b) =>
-  a.replica - b.replica || a.deployment_id - b.deployment_id))
-
-/** During a rollout the replicas of two deployments run side by side; say which is which. */
-const mixedVersions = computed(() => new Set((app.data.value?.containers ?? []).map(c => c.deployment_id)).size > 1)
-const sequenceById = computed(() => new Map((deployments.data.value ?? []).map(d => [d.id, d.sequence])))
-
-/**
- * A deployment is complete once the new replicas serve; a container it
- * replaced may still be using up its stop_timeout. It is listed, but as what
- * it is: on its way out, not one more replica.
- */
-const draining = (c: Container) => (app.data.value ? isDraining(c, app.data.value) : false)
-const replicaCount = computed(() => (app.data.value?.containers ?? []).filter(c => !draining(c)).length)
-const drainingCount = computed(() => (app.data.value?.containers ?? []).length - replicaCount.value)
-
-// A domain is only served if the agent has a reverse proxy, and can reach it.
-const server = useServerInfo()
-const proxyProblem = computed(() => {
-  const proxy = server.data.value?.proxy
-  if (!proxy) return '' // server info not loaded yet
-  if (!proxy.enabled) return 'Not served: no reverse proxy is configured on the agent'
-  if (!proxy.reachable) return 'The reverse proxy is unreachable; routing may be stale'
-  return ''
-})
-
-// Every hostname the application answers on. Redirects are answered by the
-// proxy itself, so they keep working while the application is stopped.
-const hostnames = computed(() => (app.data.value ? hostnamesOf(app.data.value) : []))
 /** What the stop dialog names: the address visitors use, path included. */
 const address = computed(() => (app.data.value?.domain ? addressOf(app.data.value.domain, app.data.value.path) : ''))
-
-// The certificate the proxy presents for each hostname. Only what is not in
-// order gets a badge; issuer and expiry are on the hostname's tooltip.
-const certificateOf = computed(() => new Map((app.data.value?.certificates ?? []).map(c => [c.hostname, c])))
-function certificateBadge(host: string) {
-  const certificate = certificateOf.value.get(host)
-  return certificate ? hostnameCertificateDisplay(certificate) : null
-}
-function certificateTitle(host: string): string | undefined {
-  const certificate = certificateOf.value.get(host)
-  const issued = certificate ? describeIssued(certificate) : ''
-  return issued ? `Certificate: ${issued}` : undefined
-}
-
-/** The alerts the agent holds about this application; the server page has them all. */
-const alerts = computed(() => alertsFor(server.data.value?.alerts, name.value))
-
-const proxyBlock = computed(() => (hasProxySettings(spec.value) ? spec.value!.proxy! : null))
-/** What a whole-application account protects: the application's path, or everything. */
-const addressPath = computed(() => spec.value?.path || 'every path')
-const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? {}).sort(([a], [b]) => a.localeCompare(b)))
-const backupPlan = computed(() => (spec.value?.backups ? describeBackupPlan(spec.value.backups) : ''))
+const addressUrl = computed(() => (app.data.value ? applicationUrl(app.data.value) : null))
 const stopTimeout = computed(() => (spec.value?.deploy.stop_timeout ? tidyDuration(spec.value.deploy.stop_timeout) : ''))
 
-const healthCheck = computed(() => describeHealth(spec.value?.health))
-const published = computed(() => (spec.value?.publish ?? []).map(formatPublish))
-const process = computed(() => {
-  const s = spec.value
-  if (!s) return []
-  const lines: { label: string, value: string }[] = []
-  if (s.entrypoint?.length) lines.push({ label: 'Entrypoint', value: formatArgv(s.entrypoint) })
-  if (s.command?.length) lines.push({ label: 'Command', value: formatArgv(s.command) })
-  if (s.user) lines.push({ label: 'User', value: s.user })
-  return lines
+provideApplication({
+  name,
+  detail: computed(() => app.data.value!),
+  spec,
+  app,
+  deployments,
+  events,
+  gone,
+  hasActive,
+  isStatic,
+  busy,
+  stoppedNow: computed(() => stopped.value && app.data.value?.replicas.running === 0),
+  mayDeploy,
+  deployHint,
+  mayAdmin,
+  progress: progress.progress,
+  dismissProgress,
+  refreshAll,
+  setRunning,
 })
-const logging = computed(() => describeLogging(spec.value))
-const loggingOptions = computed(() => Object.entries(spec.value?.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
-const shippedTo = computed(() => shippedLogDriver(spec.value))
-const volumes = computed(() => spec.value?.volumes ?? [])
 </script>
 
 <template>
@@ -253,7 +170,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           variant="primary"
           size="sm"
           :disabled="busy || !hasActive || !mayDeploy"
-          :title="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : undefined)"
+          :title="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : 'Deploy another version of the image with the same configuration')"
           @click="dialog = 'deploy'"
         >
           Deploy
@@ -261,10 +178,10 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         <UiButton
           size="sm"
           :disabled="busy || rollbackTargets.length === 0 || !mayDeploy"
-          :title="deployHint ?? (rollbackTargets.length === 0 ? 'No earlier successful deployment' : undefined)"
+          :title="deployHint ?? (rollbackTargets.length === 0 ? 'No earlier successful deployment to go back to' : 'Go back to an earlier deployment')"
           @click="dialog = 'rollback'"
         >
-          Rollback
+          Roll back
         </UiButton>
         <UiButton
           v-if="stopped"
@@ -306,7 +223,43 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         <ErrorState v-else :error="app.error.value" subject="the application" :retrying="app.refreshing.value" @retry="refreshAll" />
       </div>
 
-      <div v-else-if="app.data.value && status" class="space-y-8">
+      <div v-else-if="app.data.value && status" class="space-y-6">
+        <!-- Who it is and how it is: the same on every tab -->
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <p class="mono truncate text-xl font-semibold">
+              {{ app.data.value.name }}
+            </p>
+            <StatusBadge :tone="status.tone" :label="status.label" :raw="app.data.value.status" size="md" />
+            <NuxtLink v-if="app.data.value.deploying && app.data.value.status !== 'DEPLOYING'" :to="path" class="label !text-warn underline decoration-warn-line underline-offset-2" title="Watch the deployment on the overview">
+              Deploying
+            </NuxtLink>
+          </div>
+          <p class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-fg-muted">
+            <span>{{ state }}</span>
+            <template v-if="app.data.value.active_deployment">
+              <span class="text-fg-faint" aria-hidden="true">·</span>
+              <span>
+                <span class="mono text-fg">{{ app.data.value.version || '—' }}</span>
+                deployed <TimeAgo :time="app.data.value.active_deployment.completed_at ?? app.data.value.active_deployment.started_at" />
+                as <NuxtLink :to="`/deployments/${app.data.value.active_deployment.id}`" class="mono link">#{{ app.data.value.active_deployment.sequence }}</NuxtLink>
+              </span>
+            </template>
+            <template v-if="address">
+              <span class="text-fg-faint" aria-hidden="true">·</span>
+              <a v-if="addressUrl" :href="addressUrl" target="_blank" rel="noopener noreferrer" class="mono link inline-flex min-w-0 items-center gap-1 break-all">{{ address }}<UiIcon name="external" :size="12" /></a>
+              <span v-else class="mono break-all">{{ address }}</span>
+            </template>
+          </p>
+          <!-- Said once, in words: a disabled button's tooltip is out of reach on a phone. -->
+          <p v-if="readOnly" class="mt-2 flex items-start gap-1.5 text-xs text-fg-subtle">
+            <UiIcon name="lock" :size="12" class="mt-[3px]" />
+            {{ readOnly }}
+          </p>
+        </div>
+
+        <UiTabs :tabs="tabs" :label="`Sections of ${name}`" />
+
         <StaleNotice v-if="!gone" :error="app.error.value" :updated-at="app.updatedAt.value" class="!mb-0" />
         <p v-if="gone" class="rounded-sm border border-danger-line bg-danger-bg px-3 py-2 text-xs text-danger" role="alert">
           This application no longer exists on the agent. <NuxtLink to="/applications" class="underline">
@@ -314,508 +267,8 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </NuxtLink>
         </p>
         <InlineError v-if="dialog === null" :error="actionError" />
-        <AlertList v-if="alerts.length > 0" :alerts="alerts" :link-application="false" />
 
-        <!-- Summary: identity on the left, live numbers on the right -->
-        <div class="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
-          <div class="min-w-0">
-            <p class="mono truncate text-xl font-semibold">
-              {{ app.data.value.name }}
-            </p>
-            <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-              <StatusBadge :tone="status.tone" :label="status.label" :raw="app.data.value.status" size="md" />
-              <span v-if="app.data.value.deploying && app.data.value.status !== 'DEPLOYING'" class="label !text-warn">Deploying</span>
-              <span class="text-fg-muted">{{ headline }}</span>
-            </div>
-            <dl class="mt-4 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5">
-              <dt class="label pt-0.5">
-                Version
-              </dt>
-              <dd class="mono">
-                {{ app.data.value.version || '—' }}
-                <span v-if="app.data.value.active_deployment" class="font-sans text-fg-muted">
-                  · deployed <TimeAgo :time="app.data.value.active_deployment.completed_at ?? app.data.value.active_deployment.started_at" />
-                  · <NuxtLink :to="`/deployments/${app.data.value.active_deployment.id}`" class="mono link">#{{ app.data.value.active_deployment.sequence }}</NuxtLink>
-                </span>
-              </dd>
-              <template v-if="isStatic">
-                <dt class="label pt-0.5">
-                  Files
-                </dt>
-                <dd>
-                  {{ servedFiles || 'Nothing is served yet' }}
-                </dd>
-              </template>
-              <template v-else>
-                <dt class="label pt-0.5">
-                  Image
-                </dt>
-                <dd class="mono break-all">
-                  {{ app.data.value.image || '—' }}
-                  <span v-if="buildOrigin" class="block font-sans text-fg-muted" title="The agent never builds: a new image comes from running shipwick deploy in the project">{{ buildOrigin }}</span>
-                </dd>
-              </template>
-              <dt class="label pt-0.5">
-                {{ hostnames.length > 1 ? 'Hostnames' : 'Domain' }}
-              </dt>
-              <dd>
-                <template v-if="hostnames.length > 0">
-                  <div v-for="entry in hostnames" :key="entry.host" class="flex flex-wrap items-center gap-x-2">
-                    <a
-                      v-if="entry.url"
-                      :href="entry.url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="mono link inline-flex min-w-0 items-center gap-1 break-all"
-                      :class="entry.kind === 'redirect' ? 'text-fg-muted' : ''"
-                      :title="certificateTitle(entry.host)"
-                    >{{ entry.address }}<UiIcon name="external" :size="12" /></a>
-                    <!-- A wildcard is a pattern, not an address: there is nothing to open. -->
-                    <span v-else class="mono break-all" :title="certificateTitle(entry.host) ?? 'Every name one label below is served alike'">{{ entry.address }}</span>
-                    <span v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :title="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</span>
-                    <span v-else-if="entry.kind === 'alias'" class="text-xs text-fg-subtle">alias</span>
-                    <span v-if="entry.kind === 'domain' && proxyProblem" class="text-xs text-warn">{{ proxyProblem }}</span>
-                    <template v-if="certificateBadge(entry.host)">
-                      <StatusBadge v-bind="certificateBadge(entry.host)!" :raw="certificateOf.get(entry.host)?.status" />
-                      <span class="basis-full pb-1 text-xs text-fg-muted">{{ certificateOf.get(entry.host)?.message }}</span>
-                    </template>
-                  </div>
-                </template>
-                <span v-else class="text-fg-muted">Not routed</span>
-              </dd>
-              <template v-if="published.length > 0">
-                <dt class="label pt-0.5">
-                  Published
-                </dt>
-                <dd class="mono" title="Reachable from outside the reverse proxy, on the server's own port">
-                  <div v-for="line in published" :key="line">{{ line }}</div>
-                </dd>
-              </template>
-            </dl>
-          </div>
-
-          <!-- Where the live numbers would be: a static application has none to show. -->
-          <div v-if="isStatic" class="min-w-0 self-start rounded-sm border border-line px-4 py-3 text-fg-muted">
-            This application is a folder served by the proxy; it has no containers. There are no replicas, logs or metrics, and nothing to run a command in.
-            To serve other files, run <span class="mono text-fg">shipwick deploy</span> from the project.
-          </div>
-          <div v-else class="min-w-0 self-start divide-y divide-line rounded-sm border border-line">
-            <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-4 px-4 py-2.5 sm:grid-cols-[4.5rem_11rem_minmax(0,1fr)]">
-              <span class="label">CPU</span>
-              <span class="mono">
-                {{ formatPercent(metrics.latest.value?.cpu_percent) }}
-                <span v-if="metrics.latest.value && cpuCeiling" class="text-fg-subtle">/ {{ formatPercent(cpuCeiling) }}</span>
-              </span>
-              <Sparkline
-                v-if="metrics.availability.value === 'available'"
-                class="max-sm:col-span-2 max-sm:mt-1.5"
-                label="CPU"
-                :values="cpuValues"
-                :times="sampleTimes"
-                :slots="LIVE_METRICS_SAMPLES"
-                :ceiling="cpuCeiling"
-                :format="formatPercent"
-              />
-              <span v-else class="text-xs text-fg-subtle max-sm:col-span-2">{{ metrics.availability.value === 'loading' ? '' : metrics.reason.value }}</span>
-            </div>
-            <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-4 px-4 py-2.5 sm:grid-cols-[4.5rem_11rem_minmax(0,1fr)]">
-              <span class="label">Memory</span>
-              <span class="mono">{{ formatMemoryUsage(metrics.latest.value?.memory_bytes, metrics.latest.value?.memory_limit_bytes) }}</span>
-              <Sparkline
-                v-if="metrics.availability.value === 'available'"
-                class="max-sm:col-span-2 max-sm:mt-1.5"
-                label="Memory"
-                :values="memoryValues"
-                :times="sampleTimes"
-                :slots="LIVE_METRICS_SAMPLES"
-                :ceiling="memoryCeiling"
-                :format="formatBytes"
-              />
-            </div>
-            <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-4 px-4 py-2.5">
-              <span class="label">Replicas</span>
-              <span class="mono">
-                {{ app.data.value.replicas.healthy }} / {{ app.data.value.replicas.desired }}
-                <span class="font-sans text-fg-muted">healthy</span>
-                <span class="font-sans text-fg-subtle"> · {{ app.data.value.replicas.running }} running</span>
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <DeploymentProgressPanel
-          v-if="progress.progress.value"
-          :progress="progress.progress.value"
-          :still-running="app.data.value.version"
-          :app-status="app.data.value.status"
-          @dismiss="dismissProgress"
-        />
-
-        <!-- The sampled history: per replica, average CPU and peak memory per step, refreshed every 30s -->
-        <UiPanel v-if="!isStatic" title="History" :meta="history.history.value ? `every ${history.history.value.step}` : null">
-          <template #actions>
-            <RangeSwitch v-model="history.range.value" />
-          </template>
-          <EmptyState v-if="!hasActive || history.unavailable.value" title="Nothing is deployed">
-            The history starts with the first successful deployment.
-          </EmptyState>
-          <EmptyState v-else-if="history.unsupported.value" title="This agent keeps no history">
-            Metrics history needs a newer agent. Upgrade it to see CPU and memory over time.
-          </EmptyState>
-          <div v-else-if="history.loading.value && !history.history.value" class="space-y-3 px-4 py-3" aria-busy="true">
-            <span class="skeleton h-[7.5rem] w-full" />
-            <span class="skeleton h-[7.5rem] w-full" />
-          </div>
-          <ErrorState
-            v-else-if="history.error.value && !history.history.value"
-            :error="history.error.value"
-            subject="the metrics history"
-            :retrying="history.refreshing.value"
-            @retry="history.refresh()"
-          />
-          <div v-else-if="history.history.value" class="divide-y divide-line">
-            <MetricsHistoryChart :history="history.history.value" metric="cpu_percent" :range="history.range.value" label="CPU" :format="formatPercent" />
-            <MetricsHistoryChart :history="history.history.value" metric="memory_bytes" :range="history.range.value" label="Memory" :format="formatBytes" />
-          </div>
-        </UiPanel>
-
-        <!-- What the proxy saw of it. A static application has traffic too: the proxy answers for it. -->
-        <TrafficPanel :application="name" :routed="Boolean(app.data.value.domain)" :enabled="hasActive && !gone" />
-
-        <UiPanel v-if="!isStatic" title="Replicas" :meta="drainingCount > 0 ? `${replicaCount} · ${drainingCount} stopping` : replicaCount">
-          <EmptyState v-if="app.data.value.containers.length === 0" title="No containers">
-            Nothing is running for this application.
-          </EmptyState>
-          <div v-else class="overflow-x-auto">
-            <table class="data-table stack">
-              <thead>
-                <tr>
-                  <th class="w-20">
-                    Replica
-                  </th>
-                  <th>Container</th>
-                  <th>State</th>
-                  <th>Health</th>
-                  <th>Restarts</th>
-                  <th class="right">
-                    CPU
-                  </th>
-                  <th class="right">
-                    Memory
-                  </th>
-                  <th class="right">
-                    Started
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in containers" :key="c.id" :class="draining(c) ? 'text-fg-muted' : ''">
-                  <td data-primary class="mono">
-                    <span :class="draining(c) ? 'line-through decoration-fg-faint' : ''">{{ c.replica }}</span><span class="ml-2 text-fg-muted sm:hidden">{{ c.name }}</span>
-                  </td>
-                  <td class="mono max-sm:!hidden" :title="`${c.id.slice(0, 12)} · ${c.ip || 'no address'}`">
-                    {{ c.name }}
-                    <span v-if="mixedVersions" class="ml-2 text-fg-subtle" :title="c.image">
-                      {{ splitImage(c.image).tag || 'latest' }}<template v-if="sequenceById.get(c.deployment_id)"> · #{{ sequenceById.get(c.deployment_id) }}</template>
-                    </span>
-                  </td>
-                  <td data-label="State">
-                    <StatusBadge
-                      v-if="draining(c)"
-                      v-bind="DRAINING_DISPLAY"
-                      raw="Replaced by the last deployment. It was sent SIGTERM and has its stop_timeout to exit; it is no longer a replica."
-                    />
-                    <StatusBadge v-else v-bind="containerStateDisplay(c)" :raw="c.state" />
-                  </td>
-                  <td data-label="Health">
-                    <span v-if="draining(c)" class="text-fg-faint">—</span>
-                    <StatusBadge v-else v-bind="replicaHealthDisplay(c.health)" :raw="c.health || 'no health check configured'" />
-                  </td>
-                  <td data-label="Restarts" class="mono" :class="c.crash_loop ? 'text-danger' : c.restarts > 0 ? 'text-warn' : 'text-fg-muted'">
-                    <span>{{ c.restarts }}<span v-if="c.crash_loop" class="font-sans"> (crash loop)</span></span>
-                  </td>
-                  <td data-label="CPU" class="mono right text-fg-muted" :title="replicaCpuTitle(c)">
-                    {{ formatPercent(replicaMetrics(c)?.cpu_percent) }}
-                  </td>
-                  <td data-label="Memory" class="mono right text-fg-muted">
-                    {{ formatMemoryUsage(replicaMetrics(c)?.memory_bytes, replicaMetrics(c)?.memory_limit_bytes) }}
-                  </td>
-                  <td data-label="Started" class="right text-fg-muted">
-                    <TimeAgo :time="c.started_at" />
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </UiPanel>
-
-        <!-- A static configuration is a folder and a hostname; the container settings do not exist for it. -->
-        <UiPanel v-if="spec && spec.static" title="Configuration">
-          <dl class="grid gap-px bg-line">
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Folder
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ spec.static.dir }}/ <span class="font-sans text-fg-muted">— served by the proxy, no container. Relative to deploy.yaml on the machine that deploys.</span>
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Fallback page
-              </dt>
-              <dd class="mono mt-0.5">
-                <template v-if="spec.static.fallback">
-                  {{ spec.static.fallback }} <span class="font-sans text-fg-muted">— answered with 200 for a path that names no file, so a single-page application can route it.</span>
-                </template>
-                <span v-else class="font-sans text-fg-muted">None: a path that names no file is a 404.</span>
-              </dd>
-            </div>
-          </dl>
-        </UiPanel>
-
-        <UiPanel v-else-if="spec" title="Configuration">
-          <dl class="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-3">
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Health check
-              </dt>
-              <dd class="mono mt-0.5">
-                <template v-if="healthCheck">
-                  {{ healthCheck.check }} <span class="text-fg-muted">{{ healthCheck.schedule }}</span>
-                </template>
-                <template v-else>
-                  None: replicas only need to stay up
-                </template>
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Limits per replica
-              </dt>
-              <dd class="mono mt-0.5">
-                CPU {{ formatCores(spec.resources.cpu) }} · memory {{ spec.resources.memory_bytes ? formatBytes(spec.resources.memory_bytes) : 'unlimited' }}
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Port · replicas
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ spec.port ?? '—' }} · {{ spec.replicas }}
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Restart policy
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ spec.restart.policy }}
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Strategy
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ spec.deploy.strategy }}
-                <span v-if="stopTimeout" class="text-fg-muted" title="deploy.stop_timeout: how long a replica gets after SIGTERM before it is killed, wherever one is stopped">· stop timeout {{ stopTimeout }}</span>
-              </dd>
-            </div>
-            <div v-if="backupPlan" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Backups
-              </dt>
-              <dd class="mt-0.5 break-words" title="The backups block of deploy.yaml; the Backups panel below lists what was taken">
-                {{ backupPlan }}
-              </dd>
-            </div>
-            <div v-if="process.length > 0" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Process
-              </dt>
-              <dd class="mt-0.5 space-y-0.5">
-                <div v-for="line in process" :key="line.label" class="flex gap-2">
-                  <span class="w-20 shrink-0 text-fg-muted">{{ line.label }}</span>
-                  <span class="mono min-w-0 break-all">{{ line.value }}</span>
-                </div>
-              </dd>
-            </div>
-            <div v-if="spec.pre_deploy" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Pre-deploy
-              </dt>
-              <dd class="mono mt-0.5 break-all" title="Runs in a one-off container before any replica is replaced; the deployment fails if it does">
-                {{ formatArgv(spec.pre_deploy.command) }} <span class="text-fg-muted">timeout {{ tidyDuration(spec.pre_deploy.timeout) }}</span>
-              </dd>
-            </div>
-            <div v-if="logging" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Logging
-              </dt>
-              <dd class="mono mt-0.5">
-                {{ logging }}
-                <details v-if="loggingOptions.length > 0" class="mt-1 font-sans text-xs">
-                  <summary class="cursor-pointer select-none text-fg-subtle hover:text-fg">
-                    Options
-                  </summary>
-                  <dl class="mono mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5">
-                    <template v-for="[key, value] in loggingOptions" :key="key">
-                      <dt class="text-fg-muted">{{ key }}</dt>
-                      <dd class="break-all">{{ value }}</dd>
-                    </template>
-                  </dl>
-                </details>
-              </dd>
-            </div>
-            <div class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Environment
-              </dt>
-              <dd class="mono mt-0.5 break-words" :title="envNames.length ? 'Values are never returned by the agent' : undefined">
-                {{ envNames.length ? envNames.join(', ') : 'No variables' }}
-              </dd>
-            </div>
-          </dl>
-        </UiPanel>
-
-        <!-- The proxy block of deploy.yaml, read-only. Passwords are masked by the agent and are not shown at all. -->
-        <UiPanel v-if="spec && (proxyBlock || spec.path)" title="Proxy">
-          <!-- An odd cell at the end takes the whole row, so the grid's hairline color never shows as an empty cell. -->
-          <dl class="grid gap-px bg-line sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2">
-            <div v-if="spec.path" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Path
-              </dt>
-              <dd class="mt-0.5">
-                <span class="mono">{{ spec.path }}</span>
-                <span class="text-fg-muted">
-                  — {{ proxyBlock?.strip_prefix ? 'removed before a request reaches the application, which sees / where the visitor asked for' : 'passed on as it is; the application sees' }}
-                  <span class="mono">{{ spec.path }}</span>. Other applications may serve the rest of the domain.
-                </span>
-              </dd>
-            </div>
-            <div v-if="proxyHeaders.length > 0" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Response headers
-              </dt>
-              <dd class="mono mt-0.5 space-y-0.5">
-                <div v-for="[header, value] in proxyHeaders" :key="header" class="break-all">
-                  <span class="text-fg-muted">{{ header }}:</span> {{ value }}
-                </div>
-              </dd>
-            </div>
-            <div v-if="proxyBlock?.basic_auth?.length" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Password protection
-              </dt>
-              <dd class="mt-0.5 space-y-0.5">
-                <div v-for="(account, index) in proxyBlock.basic_auth" :key="index" class="flex flex-wrap items-baseline gap-x-2">
-                  <span class="mono break-all">{{ account.path || addressPath }}</span>
-                  <span class="text-fg-muted">asks for the password of</span>
-                  <span class="mono break-all">{{ account.username }}</span>
-                </div>
-                <p class="text-xs text-fg-subtle">
-                  Passwords are stored encrypted and never returned.
-                </p>
-              </dd>
-            </div>
-            <div v-if="proxyBlock?.redirects?.length" class="bg-bg px-4 py-2.5">
-              <dt class="label">
-                Redirects
-              </dt>
-              <dd class="mono mt-0.5 space-y-0.5">
-                <div v-for="redirect in proxyBlock.redirects" :key="redirect.from" class="break-all">
-                  {{ formatPathRedirect(redirect) }}
-                </div>
-              </dd>
-            </div>
-          </dl>
-        </UiPanel>
-
-        <JobsSection
-          v-if="spec && hasActive && !gone && !isStatic"
-          :application="name"
-          :spec="spec"
-          :image="app.data.value.image"
-          :may-deploy="mayDeploy"
-          :busy="busy"
-        />
-
-        <UiPanel v-if="volumes.length > 0" title="Volumes" :meta="volumes.length">
-          <VolumesPanel
-            :application="name"
-            :volumes="volumes"
-            :admin="mayAdmin"
-            :stopped="stopped && app.data.value.replicas.running === 0"
-            :busy="busy"
-            @restore="openRestore"
-          />
-        </UiPanel>
-
-        <BackupsPanel
-          v-if="spec && volumes.length > 0 && hasActive && !gone"
-          :application="name"
-          :spec="spec"
-          :may-deploy="mayDeploy"
-          :admin="mayAdmin"
-          :stopped="stopped && app.data.value.replicas.running === 0"
-          :busy="busy"
-          @changed="refreshAll"
-        />
-
-        <UiPanel title="Deployments">
-          <template #actions>
-            <NuxtLink :to="{ path: '/deployments', query: { application: name } }" class="link text-xs text-fg-muted">
-              View all
-            </NuxtLink>
-          </template>
-          <TableSkeleton v-if="deployments.loading.value" :rows="4" :columns="5" />
-          <ErrorState
-            v-else-if="deployments.error.value && !deployments.data.value"
-            :error="deployments.error.value"
-            subject="deployments"
-            :retrying="deployments.refreshing.value"
-            @retry="deployments.refresh()"
-          />
-          <EmptyState v-else-if="(deployments.data.value?.length ?? 0) === 0" title="No deployments" />
-          <div v-else class="overflow-x-auto">
-            <DeploymentsTable :deployments="deployments.data.value ?? []" :show-application="false" />
-          </div>
-        </UiPanel>
-
-        <UiPanel title="Events">
-          <div v-if="events.loading.value" class="space-y-2 px-4 py-3" aria-busy="true">
-            <span class="skeleton w-2/3" /><span class="skeleton w-1/2" />
-          </div>
-          <ErrorState
-            v-else-if="events.error.value && !events.data.value"
-            :error="events.error.value"
-            subject="events"
-            :retrying="events.refreshing.value"
-            @retry="events.refresh()"
-          />
-          <EmptyState v-else-if="(events.data.value?.length ?? 0) === 0" title="No events">
-            Crashes, restarts, health changes, stops and starts are recorded here.
-          </EmptyState>
-          <div v-else class="max-h-80 overflow-y-auto">
-            <EventList :events="events.data.value ?? []" />
-          </div>
-        </UiPanel>
-
-        <UiPanel v-if="!isStatic" title="Logs" :bordered="false">
-          <template #actions>
-            <NuxtLink :to="{ path: '/logs', query: { application: name } }" class="link text-xs text-fg-muted">
-              Open in Logs
-            </NuxtLink>
-          </template>
-          <LogViewer v-if="app.data.value.containers.length > 0" :application="name" height-class="h-80" :shipped-to="shippedTo" />
-          <div v-else class="rounded-sm border border-line">
-            <EmptyState title="No logs">
-              There are no containers to read logs from.
-            </EmptyState>
-          </div>
-        </UiPanel>
+        <NuxtPage />
       </div>
     </PageBody>
 
@@ -840,11 +293,15 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         @confirm="setRunning(false)"
       >
         <template v-if="isStatic">
-          <span class="mono text-fg">{{ address }}</span> answers 503 instead of the files<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>.
+          <span class="mono text-fg">{{ address }}</span> answers 503 instead of the files<template v-if="app.data.value.redirects?.length">
+            (its redirects keep working)
+          </template>.
         </template>
         <template v-else>
           All replicas are stopped<template v-if="app.data.value.domain">
-            and <span class="mono text-fg">{{ address }}</span> stops answering<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>
+            and <span class="mono text-fg">{{ address }}</span> stops answering<template v-if="app.data.value.redirects?.length">
+              (its redirects keep working)
+            </template>
           </template>.
         </template>
         The application stays stopped, across agent restarts too, until you start it again. Nothing is deleted.
@@ -853,14 +310,6 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         </template>
       </ConfirmDialog>
       <DeleteDialog :open="dialog === 'delete'" :name="name" @close="closeDialog" @deleted="router.replace('/applications')" />
-      <RestoreDialog
-        :open="dialog === 'restore'"
-        :application="name"
-        :volume="restoreVolume"
-        @close="closeDialog"
-        @restored="refreshAll"
-        @start="startAfterRestore"
-      />
     </template>
   </div>
 </template>

@@ -5,8 +5,8 @@
 One Linux server, one small file per application, one command. Shipwick pulls
 the image, starts the replicas, waits until each one is healthy, moves traffic
 over and retires the old version. If the new version does not come up, the one
-that works keeps serving. HTTPS, scheduled jobs, backups, secrets, tokens with
-roles and a dashboard are included.
+that works keeps serving. HTTPS, scheduled jobs, backups, secrets, access for
+a team and a dashboard are included.
 
 <p align="center"><img src="docs/images/deploy.png" alt="shipwick deploy: pulled image, started container, replicas passed health checks, routed https://api.example.com, deployment successful" width="820"></p>
 
@@ -14,97 +14,106 @@ roles and a dashboard are included.
 
 ## Five minutes to a running application
 
-You need a Linux server with Docker, a domain whose DNS points at it, and a
-Dockerfile or an image of your application.
+You need:
 
-**1. On the server**, as root:
+- a Linux server you can reach as root over SSH (Docker is installed for you
+  if it is missing);
+- a domain, with two DNS records pointing at the server: one for the API, one
+  for the dashboard, and later one per application;
+- your project, on your laptop, with Docker running there.
+
+**1. Install the CLI** on your laptop:
 
 ```bash
-curl -fsSL https://get.shipwick.com | sh
+curl -fsSL https://get.shipwick.com | sh -s -- --cli
+```
+
+Or `brew install shipwick/tap/shipwick`. On Windows, download
+`shipwick_windows_amd64.exe` from the
+[latest release](https://github.com/shipwick/shipwick/releases/latest).
+
+**2. Install the server**, from your laptop:
+
+```bash
+shipwick server install root@203.0.113.10 \
+  --agent-domain agent.example.com \
+  --dashboard-domain dashboard.example.com
+```
+
+It connects over SSH, runs the installer, saves the API token on your laptop
+and prints the DNS records to create. Nothing to type on the server. (On the
+server itself, the same thing is `curl -fsSL https://get.shipwick.com | sh`.)
+
+```bash
+shipwick doctor    # the agent, the token, Docker, the proxy, ports and DNS, one line each
+```
+
+**3. Describe your application.** In your project's directory:
+
+```bash
+shipwick init
 ```
 
 ```text
-✓ Docker 29.8.0 with Compose 5.5.1
-✓ Installed /opt/shipwick/compose.yml
-✓ Wrote /opt/shipwick/.env
-✓ Started the Shipwick services
-✓ The agent is healthy
+✓ Recognised a Node.js application
+✓ Wrote Dockerfile, .dockerignore and deploy.yaml
 
-Shipwick is running.
-
-  From your laptop or CI:   shipwick login --url https://agent.example.com
-  Dashboard:                https://dashboard.example.com
+Review them, then run: shipwick deploy
 ```
 
-It asks for two hostnames (one for the API, one for the dashboard), sets up
-three containers, and prints your API token once.
-
-Or from your laptop, once the CLI from step 2 is installed:
-`shipwick server install root@203.0.113.10 --agent-domain agent.example.com --dashboard-domain dashboard.example.com`
-runs the same installer over SSH, saves the token for you and prints the DNS
-records to create.
-
-**2. On your laptop:**
-
-```bash
-curl -fsSL https://get.shipwick.com | sh -s -- --cli    # or: brew install shipwick/tap/shipwick
-shipwick login --url https://agent.example.com           # asks for the token, saves it
-```
-
-**3. In your project:**
-
-```bash
-shipwick init    # writes a Dockerfile and deploy.yaml for a Node, .NET, Go, Python or static project
-```
-
-With `build: .` instead of `image:`, `shipwick deploy` builds the image on your
-machine and sends it to the server; no registry needed.
+It recognises Node, Next.js, Nuxt, SvelteKit, Remix, Astro, .NET, Go, Python
+and folders of static files. `deploy.yaml` is the whole description; add the
+hostname it should answer to:
 
 ```yaml
 # deploy.yaml
 name: my-api
-image: ghcr.io/company/my-api:1.4.2
-port: 8080
-domain: api.example.com
-replicas: 2
+build: .                  # built on your machine and sent to the server; no registry
+port: 3000
+domain: api.example.com   # served over HTTPS, certificate included
 health:
-  path: /health
+  path: /health           # traffic moves over only once this answers 200
 ```
+
+**4. Deploy:**
 
 ```bash
 shipwick deploy
 ```
 
 ```text
-Deploying my-api...
-
 ✓ Validated deploy.yaml
-✓ Pulled image ghcr.io/company/my-api:1.4.2
+✓ Built shipwick.local/my-api:20261003-143029-3125 for linux/amd64
+✓ Sent image to the server (57.9 MB)
 ✓ Started 1 container
 ✓ Replica 1 passed health checks
-✓ Replica 1/2 is serving 1.4.2
-✓ Replica 2 passed health checks
-✓ Replica 2/2 is serving 1.4.2
-✓ Routed https://api.example.com to 2 replicas
+✓ Replica 1/1 is serving 20261003-143029-3125
+✓ Routed https://api.example.com to 1 replica
 ✓ Deployment successful
 
-my-api 1.4.2  deployed in 6.1s
-2/2 replicas healthy
+my-api 20261003-143029-3125  deployed in 3.7s
+1/1 replicas healthy
 https://api.example.com
 ```
 
-The certificate is obtained on the first request. That is the whole
-deployment.
+That is the whole deployment. The next one sends only the layers that
+changed, a few kilobytes for a code change.
 
-**4. Look at it:**
+Already have an image in a registry? Name it instead of building:
+`image: ghcr.io/company/my-api:1.4.2`. A private registry needs
+`shipwick registry login ghcr.io` once.
+
+**5. Look at it:**
 
 ```bash
-shipwick ps            # every application on the server
-shipwick status my-api # replicas, health, CPU and memory, history
+shipwick ps               # every application on the server
+shipwick status my-api    # replicas, health, CPU and memory, certificates, history
 shipwick logs -f my-api
+shipwick open my-api      # in the browser; --dashboard opens the dashboard
 ```
 
-Or open the dashboard: the same information, live, with the everyday actions.
+The dashboard shows the same, live, with the everyday actions: deploy a
+version, roll back, stop, read logs, check last night's backup.
 
 ## Two applications and a database
 
@@ -177,6 +186,17 @@ in CI:
 api is still running 2.3.0; the failed deployment did not affect it.
 ```
 
+## Keeping it up to date
+
+```bash
+shipwick upgrade                  # the CLI on this machine
+shipwick server install root@203.0.113.10   # the server: the same command upgrades it
+```
+
+The server keeps its token, its applications and their data; they go on
+serving while the three Shipwick containers are replaced. What changed between
+versions, and what to do about it, is in the [changelog](CHANGELOG.md).
+
 ## What you get
 
 - **Rolling deployments** with health checks, at most one extra container at a time, and automatic rollback.
@@ -187,9 +207,10 @@ api is still running 2.3.0; the failed deployment did not affect it.
 - **Volumes and backups**: on a schedule, encrypted, to an S3-compatible bucket, and verified by restoring them: `backups` in deploy.yaml, `shipwick backups verify`.
 - **Moving house**: `shipwick export` and `shipwick import` take every application, its secrets and its data to another server; a second server can be kept ready and promoted by hand.
 - **Secrets** kept out of files with `${NAME}`, encrypted at rest on the server under a key that can be rotated; **registry credentials** stored the same way.
-- **Tokens with roles**: a `deploy` token for CI, `read` for a teammate, `admin` for you.
+- **Access for a team**: tokens with roles — `deploy` for CI, limited to the applications it deploys and with an end date if you like; `read` for a teammate; `admin` for you — sign-in to the dashboard with the company's accounts through OpenID Connect, and an audit trail of who did what.
 - **Notifications** and **alerts** to Slack, Discord or any webhook; **metrics** and **traffic** with a week of history, and `GET /metrics` for Prometheus.
-- **A dashboard**, a CLI and a REST API: anything one does, the others can.
+- **A dashboard**, a CLI and a REST API: what is running, what is wrong and where to look, and the everyday actions; one dashboard can show several servers.
+- **At home in a company network**: behind an HTTP proxy, with a certificate authority of your own, and installable on a server that has no way out.
 
 ## Learn more
 

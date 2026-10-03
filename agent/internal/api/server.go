@@ -2,7 +2,6 @@
 package api
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -38,6 +37,13 @@ type Server struct {
 
 	// limiter slows down guessing: see ratelimit.go.
 	limiter *rateLimiter
+
+	// routes is every authenticated endpoint Handler registered: see
+	// access.go.
+	routes []route
+
+	// signIn is people signing in with the company's accounts: see signin.go.
+	signIn signIn
 }
 
 // New creates the API server. tokenHash is the SHA-256 of the root token;
@@ -63,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	// `shipwick server status`. It reveals nothing beyond the version.
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
+	s.routes = nil
 	routes := routeTable{mux: mux, s: s}
 	routes.read("GET /api/v1/server", s.handleServer)
 	routes.read("GET /api/v1/applications", s.handleListApplications)
@@ -93,6 +100,8 @@ func (s *Server) Handler() http.Handler {
 	s.certificateRoutes(routes)
 	s.prometheusRoutes(routes)
 	s.exportRoutes(routes)
+	s.auditRoutes(routes)
+	s.signInRoutes(mux, routes)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, api.CodeEndpointNotFound, "no such endpoint: "+r.Method+" "+r.URL.Path, nil)
@@ -112,20 +121,22 @@ func (t routeTable) deploy(pattern string, h http.HandlerFunc) { t.handle(patter
 func (t routeTable) admin(pattern string, h http.HandlerFunc)  { t.handle(pattern, api.RoleAdmin, h) }
 
 func (t routeTable) handle(pattern string, role api.Role, h http.HandlerFunc) {
-	t.mux.Handle(pattern, t.s.authenticate(role, h))
+	rt := newRoute(pattern, role)
+	t.s.routes = append(t.s.routes, rt)
+	t.mux.Handle(pattern, t.s.authenticate(rt, h))
 }
 
-// authenticate requires "Authorization: Bearer <token>" and a token whose
-// role covers the endpoint's. The token is hashed before it is compared or
-// looked up (see identify), so neither its content nor its length leaks
+// authenticate requires "Authorization: Bearer <token>" and a token that may
+// use the endpoint (see authorize). The token is hashed before it is compared
+// or looked up (see identify), so neither its content nor its length leaks
 // through timing. An address that failed too often lately is refused before
 // its token is looked at (see ratelimit.go). The handler learns who called
 // through the context.
-func (s *Server) authenticate(role api.Role, next http.Handler) http.Handler {
+func (s *Server) authenticate(rt route, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		addr := clientAddress(r.RemoteAddr)
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		who, known := s.identify(r.Context(), sha256.Sum256([]byte(token)))
+		who, ended, known := s.identify(r.Context(), sha256.Sum256([]byte(token)))
 		if !ok || !known {
 			// A limited address is answered 429 instead of 401 and its
 			// attempts no longer counted. A valid token is never refused:
@@ -141,13 +152,19 @@ func (s *Server) authenticate(role api.Role, next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, api.CodeUnauthorized, "missing or invalid API token", nil)
 			return
 		}
-		if !who.Role.Covers(role) {
-			writeError(w, http.StatusForbidden, api.CodeForbidden, forbiddenMessage(who.Role, role),
-				map[string]any{"role": who.Role, "required": role})
+		// A session that was ended is told so, for the same reason an
+		// expired token is.
+		if ended != "" {
+			s.refuseEnded(w, who, ended)
 			return
 		}
-		ctx := deploy.WithActor(context.WithValue(r.Context(), principalKey{}, who), who.Name)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		// An expired token is not a wrong one: whoever presents it holds
+		// it, is told so, and is not counted as guessing.
+		if who.ExpiresAt != nil && !s.now().Before(*who.ExpiresAt) {
+			s.refuseExpired(w, who)
+			return
+		}
+		s.serve(w, r, rt, who, next)
 	})
 }
 

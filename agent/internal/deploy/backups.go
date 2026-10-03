@@ -55,10 +55,6 @@ var (
 )
 
 const (
-	// backupBeforeTimeout bounds `backups.before`: a dump of a large database
-	// takes its time, a command that hangs must not hold the application's
-	// lock for ever.
-	backupBeforeTimeout = time.Hour
 	// backupFailuresKept bounds the failed backups remembered per application;
 	// they hold no files, only what went wrong.
 	backupFailuresKept = 20
@@ -136,16 +132,23 @@ func (e *Engine) StartBackups(ctx context.Context) error {
 			os.Remove(path)
 		}
 	}
-	// Recover removed the container of a verification that was interrupted;
-	// the volumes it restored into are still there.
+	// Recover retires the container of a verification that was interrupted,
+	// in the background; the volumes it restored into can go once it has,
+	// and not before: a volume a container still mounts is not removed.
 	if sweeper, ok := e.rt.(interface {
 		RemoveScratchVolumes(context.Context) (int, error)
-	}); ok {
-		if n, err := sweeper.RemoveScratchVolumes(ctx); err != nil {
-			e.log.Warn("could not remove leftover verification volumes", "error", err)
-		} else if n > 0 {
-			e.log.Warn("removed leftover verification volumes", "volumes", n)
-		}
+	}); ok && e.beginOp() {
+		go func() {
+			defer e.opDone()
+			if err := e.awaitAllDrains(e.baseCtx); err != nil {
+				return
+			}
+			if n, err := sweeper.RemoveScratchVolumes(e.baseCtx); err != nil {
+				e.log.Warn("could not remove leftover verification volumes", "error", err)
+			} else if n > 0 {
+				e.log.Warn("removed leftover verification volumes", "volumes", n)
+			}
+		}()
 	}
 
 	e.mu.Lock()
@@ -374,6 +377,16 @@ func (e *Engine) prepareBackups(ctx context.Context) error {
 		return err
 	}
 	b.prepared = true
+	// Here, and only here: every upload of this agent waits for this function
+	// to have succeeded once, so an upload the bucket holds unfinished now is
+	// one an earlier agent died over, and its parts are paid for until
+	// somebody aborts it. A bucket that will not say is no reason to refuse
+	// backups.
+	if n, err := e.opts.Backups.Storage.AbortLeftovers(ctx); err != nil {
+		e.log.Warn("could not look for unfinished uploads in the bucket; the parts of an interrupted upload, if there is one, stay there", "error", err)
+	} else if n > 0 {
+		e.log.Warn("aborted unfinished uploads that an earlier run of the agent left in the bucket", "uploads", n)
+	}
 	return nil
 }
 
@@ -426,7 +439,7 @@ func (e *Engine) takeBackup(ctx context.Context, d store.Deployment, run *store.
 
 	if b := d.Spec.Backups; b != nil {
 		if len(b.Before) > 0 {
-			if err := e.backupBefore(ctx, source, b.Before); err != nil {
+			if err := e.backupBefore(ctx, source, b); err != nil {
 				return err
 			}
 		}
@@ -457,12 +470,18 @@ func (e *Engine) takeBackup(ctx context.Context, d store.Deployment, run *store.
 
 // backupBefore runs `backups.before` inside the replica. Anything but exit 0
 // fails the backup: an archive without the dump it was meant to hold is not
-// the backup that was asked for.
-func (e *Engine) backupBefore(ctx context.Context, containerID string, cmd []string) error {
-	code, output, err := e.rt.Exec(ctx, containerID, cmd, backupBeforeTimeout)
+// the backup that was asked for. The command has backups.before_timeout: a
+// dump of a large database takes its time, a command that hangs must not hold
+// the application's lock for ever. At the limit the backup is given up; the
+// command itself is the container's, since Docker cannot end what it started
+// there (Runtime.Exec).
+func (e *Engine) backupBefore(ctx context.Context, containerID string, b *spec.Backups) error {
+	limit := b.BeforeLimit()
+	code, output, err := e.rt.Exec(ctx, containerID, b.Before, limit)
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
-		return fmt.Errorf("backups.before did not finish within %s; nothing was archived", shortDuration(backupBeforeTimeout))
+		return fmt.Errorf("backups.before did not finish within %s; the backup was given up and nothing was archived. Give the command longer with backups.before_timeout in deploy.yaml (up to %s)",
+			shortDuration(limit), shortDuration(spec.MaxBackupBeforeTimeout))
 	case err != nil:
 		return fmt.Errorf("backups.before could not run: %w; nothing was archived", err)
 	case code != 0:
@@ -838,7 +857,8 @@ func (e *Engine) verifyBackup(ctx context.Context, d store.Deployment, run store
 		Command:      d.Spec.Command,
 		User:         d.Spec.User,
 		// No published ports: those are the running replica's.
-		Job: &docker.JobSpec{Name: docker.VerifyJob, RunID: run.ID},
+		Job:  &docker.JobSpec{Name: docker.VerifyJob, RunID: run.ID},
+		Init: d.Spec.Init,
 	}
 	paths := map[string]string{}
 	for _, v := range d.Spec.Volumes {

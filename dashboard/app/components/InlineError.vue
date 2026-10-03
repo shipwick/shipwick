@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { AgentError } from '~/utils/agentError'
+import { limitedExplanation } from '~/utils/access'
 import { loginFailedHint } from '~/utils/registries'
 import { forbiddenExplanation, isRole } from '~/utils/roles'
 import { missingSecrets } from '~/utils/secrets'
@@ -9,7 +10,8 @@ const props = defineProps<{ error: AgentError | null }>()
 
 // A 403 is explained from its details ("This token has the read role; deploying
 // needs deploy or admin"), which reads better than the agent's lowercase line.
-const headline = computed(() => (props.error ? forbiddenExplanation(props.error) || props.error.displayMessage : ''))
+// A limited token's refusal names the applications it covers: the agent's sentence is the explanation.
+const headline = computed(() => (props.error ? forbiddenExplanation(props.error) || limitedExplanation(props.error) || props.error.displayMessage : ''))
 
 const hint = computed(() => {
   const error = props.error
@@ -23,6 +25,8 @@ const hint = computed(() => {
     const required = error.details.required
     return isRole(required) ? `Sign in with a token that has the ${required} role, or ask an admin for one.` : 'Sign in with a token whose role allows this.'
   }
+  if (error.code === 'TOKEN_LIMITED') return 'Sign in with a token that covers it, or ask an admin for one under Access.'
+  if (error.code === 'PROMOTION_IN_PROGRESS') return 'A promotion is running on this server. It is shown under Export and standby on the server\'s page; wait for it to finish.'
   if (error.code === 'APPLICATION_RUNNING') return 'Stop the application first.'
   if (error.code === 'JOB_ALREADY_RUNNING') return 'A run of this job has not finished yet; a job runs one at a time. Open it in the run history to follow it.'
   if (error.code === 'TOKEN_EXISTS') return 'Choose another name, or revoke the existing token first.'
@@ -71,7 +75,7 @@ const secrets = computed(() => (props.error?.code === 'INVALID_CONFIG' ? missing
         <template v-if="index > 0">
           {{ index === secrets.length - 1 ? ' and ' : ', ' }}
         </template>
-        <NuxtLink :to="{ path: '/secrets', query: { name } }" class="mono font-medium underline underline-offset-2">{{ name }}</NuxtLink>
+        <NuxtLink :to="{ path: '/settings/secrets', query: { name } }" class="mono font-medium underline underline-offset-2">{{ name }}</NuxtLink>
       </template>
       on the Secrets page, then try again. An admin token can add {{ secrets.length === 1 ? 'it' : 'them' }}.
     </p>

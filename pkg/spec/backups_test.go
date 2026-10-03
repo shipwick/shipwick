@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 const backupsBase = `
@@ -31,6 +32,30 @@ backups:
 	if b == nil || b.Schedule != "0 3 * * *" || b.Keep != 14 || len(b.Before) != 6 || !b.Stop {
 		t.Fatalf("unexpected backups: %+v", b)
 	}
+	if b.BeforeTimeout.Std() != DefaultBackupBeforeTimeout || b.BeforeLimit() != time.Hour {
+		t.Fatalf("before has %s without before_timeout, want an hour", b.BeforeTimeout)
+	}
+}
+
+func TestBackupsBeforeTimeout(t *testing.T) {
+	const before = "backups:\n  schedule: '0 3 * * *'\n  before: [pg_dump, app]\n"
+	app, err := Parse([]byte(backupsBase + before + "  before_timeout: 2h30m\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := app.Backups.BeforeLimit(); got != 150*time.Minute {
+		t.Fatalf("before_timeout: 2h30m gives the command %s", got)
+	}
+	for _, ok := range []string{"1s", "24h"} {
+		if _, err := Parse([]byte(backupsBase + before + "  before_timeout: " + ok + "\n")); err != nil {
+			t.Errorf("before_timeout: %s was refused: %v", ok, err)
+		}
+	}
+	// A deployment recorded before the key existed has no value, and the
+	// hour it always had.
+	if got := (&Backups{Before: []string{"dump"}}).BeforeLimit(); got != time.Hour {
+		t.Errorf("without a value the command has %s, want an hour", got)
+	}
 }
 
 func TestBackupsDefaults(t *testing.T) {
@@ -53,14 +78,18 @@ func TestBackupsValidation(t *testing.T) {
 		field string
 		msg   string
 	}{
-		"missing schedule": {"backups:\n  keep: 3\n", "backups.schedule", "is required"},
-		"bad schedule":     {"backups:\n  schedule: daily\n", "backups.schedule", `invalid value "daily"`},
-		"keep zero":        {"backups:\n  schedule: '0 3 * * *'\n  keep: 0\n", "backups.keep", "invalid value 0"},
-		"keep too many":    {"backups:\n  schedule: '0 3 * * *'\n  keep: 366\n", "backups.keep", "invalid value 366"},
-		"empty before":     {"backups:\n  schedule: '0 3 * * *'\n  before: []\n", "backups.before", "is required"},
-		"unknown key":      {"backups:\n  schedule: '0 3 * * *'\n  retain: 3\n", "backups", `unknown field "retain"`},
-		"keep not number":  {"backups:\n  schedule: '0 3 * * *'\n  keep: many\n", "backups", "a number"},
-		"not a block":      {"backups: nightly\n", "backups", "must be a block"},
+		"missing schedule":  {"backups:\n  keep: 3\n", "backups.schedule", "is required"},
+		"bad schedule":      {"backups:\n  schedule: daily\n", "backups.schedule", `invalid value "daily"`},
+		"keep zero":         {"backups:\n  schedule: '0 3 * * *'\n  keep: 0\n", "backups.keep", "invalid value 0"},
+		"keep too many":     {"backups:\n  schedule: '0 3 * * *'\n  keep: 366\n", "backups.keep", "invalid value 366"},
+		"timeout too long":  {"backups:\n  schedule: '0 3 * * *'\n  before: [dump]\n  before_timeout: 25h\n", "backups.before_timeout", "out of range"},
+		"timeout too short": {"backups:\n  schedule: '0 3 * * *'\n  before: [dump]\n  before_timeout: 500ms\n", "backups.before_timeout", "out of range"},
+		"timeout no unit":   {"backups:\n  schedule: '0 3 * * *'\n  before: [dump]\n  before_timeout: 90\n", "backups.before_timeout", `invalid value "90"`},
+		"timeout alone":     {"backups:\n  schedule: '0 3 * * *'\n  before_timeout: 2h\n", "backups.before_timeout", "needs backups.before"},
+		"empty before":      {"backups:\n  schedule: '0 3 * * *'\n  before: []\n", "backups.before", "is required"},
+		"unknown key":       {"backups:\n  schedule: '0 3 * * *'\n  retain: 3\n", "backups", `unknown field "retain"`},
+		"keep not number":   {"backups:\n  schedule: '0 3 * * *'\n  keep: many\n", "backups", "a number"},
+		"not a block":       {"backups: nightly\n", "backups", "must be a block"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

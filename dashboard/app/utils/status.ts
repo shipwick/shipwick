@@ -86,17 +86,21 @@ export function containerStateDisplay(container: Pick<Container, 'state' | 'exit
 }
 
 /**
- * A container a finished deployment replaced, on its way out: it has been sent
- * SIGTERM and gets its `deploy.stop_timeout` to exit. The agent still lists
- * it, with the previous deployment's id and usually still `running`, but it
- * is not a replica any more and is not counted as one. While a deployment is
- * in flight, containers of two deployments are both in service and neither
- * is draining.
+ * A container on its way out: it has been sent SIGTERM and gets its
+ * `deploy.stop_timeout` to exit. The agent still lists it, usually still
+ * `running`, but it is not a replica any more and is not counted as one.
+ *
+ * The agent says so itself (`stopping`). One from before 0.6 does not, and
+ * the same is read from what it does say: after a deployment completed, a
+ * container with another deployment's id is one it replaced. While a
+ * deployment is in flight, containers of two deployments are both in service
+ * and neither is draining.
  */
 export function isDraining(
-  container: Pick<Container, 'deployment_id'>,
+  container: Pick<Container, 'deployment_id' | 'stopping'>,
   app: { deploying: boolean, active_deployment: { id: number } | null },
 ): boolean {
+  if (container.stopping !== undefined) return container.stopping
   return !app.deploying && app.active_deployment !== null && container.deployment_id !== app.active_deployment.id
 }
 
@@ -109,9 +113,13 @@ export function eventLevelTone(level: EventLevel | string): Tone {
   return 'muted'
 }
 
-/** Everything that is neither fine nor intentionally off deserves a look. */
-export function needsAttention(app: Pick<Application, 'status'>): boolean {
-  return app.status !== 'HEALTHY' && app.status !== 'STOPPED'
+/**
+ * Everything that is neither fine nor intentionally off deserves a look, and
+ * so does an application that runs but has an alert, or a hostname whose
+ * certificate is not in order.
+ */
+export function needsAttention(app: Pick<Application, 'status' | 'certificate_problem' | 'alert_count'>): boolean {
+  return (app.status !== 'HEALTHY' && app.status !== 'STOPPED') || Boolean(app.certificate_problem) || (app.alert_count ?? 0) > 0
 }
 
 const SEVERITY: Record<ApplicationStatus, number> = {

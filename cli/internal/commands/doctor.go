@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -176,6 +177,9 @@ func (c *cli) doctor(ctx context.Context) error {
 
 	info, err := cl.Server(ctx)
 	switch {
+	case client.IsCode(err, api.CodeTokenExpired):
+		r.problem("%s", strings.Join(strings.Fields(Render(err)), " "))
+		return r.finish()
 	case client.IsCode(err, api.CodeUnauthorized):
 		r.problem("The agent rejected the API token. Save a valid one with: shipwick login")
 		return r.finish()
@@ -183,7 +187,7 @@ func (c *cli) doctor(ctx context.Context) error {
 		r.problem("The agent did not answer GET /server: %s", cause(err))
 		return r.finish()
 	case info.Token.Name != "":
-		r.ok("Token %s (%s)", info.Token.Name, info.Token.Role)
+		r.token(info.Token, c.now())
 	default:
 		r.ok("Token accepted")
 	}
@@ -192,6 +196,7 @@ func (c *cli) doctor(ctx context.Context) error {
 	} else {
 		r.hint("The agent did not report a Docker version; see: shipwick server status")
 	}
+	r.network(info.Network)
 	switch p := info.Proxy; {
 	case !p.Enabled:
 		r.hint("Proxy not configured: domains are not served. Set SHIPWICK_CADDY_ADMIN on the agent")
@@ -394,10 +399,18 @@ func overlap(a, b []string) bool {
 // machine's own resolver still remembers.
 var publicResolvers = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
 
+// publicResolversSilent is set once none of them could be reached.
+var publicResolversSilent atomic.Bool
+
 // publicLookupHost resolves host through the public resolvers, believing the
 // first that knows it and "no such host" from all of them; when none can be
 // reached, the system's resolver decides.
 func publicLookupHost(ctx context.Context, host string) ([]string, error) {
+	// Behind a firewall that lets no DNS out they answer nothing, each for as
+	// long as it is given: found out once, not for every hostname.
+	if publicResolversSilent.Load() {
+		return net.DefaultResolver.LookupHost(ctx, host)
+	}
 	var notFound, unreachable error
 	for _, server := range publicResolvers {
 		r := &net.Resolver{
@@ -407,7 +420,9 @@ func publicLookupHost(ctx context.Context, host string) ([]string, error) {
 				return d.DialContext(ctx, network, server)
 			},
 		}
-		addrs, err := r.LookupHost(ctx, host)
+		askCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		addrs, err := r.LookupHost(askCtx, host)
+		cancel()
 		if err == nil && len(addrs) > 0 {
 			return addrs, nil
 		}
@@ -425,6 +440,7 @@ func publicLookupHost(ctx context.Context, host string) ([]string, error) {
 		return nil, notFound
 	}
 	if unreachable != nil {
+		publicResolversSilent.Store(true)
 		return net.DefaultResolver.LookupHost(ctx, host)
 	}
 	return nil, &net.DNSError{Err: "no addresses", Name: host, IsNotFound: true}

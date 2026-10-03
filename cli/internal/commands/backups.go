@@ -63,7 +63,7 @@ Without an argument, the application described by deploy.yaml is shown.`,
 	}
 	fileFlag(cmd, &file)
 	cmd.AddCommand(c.backupsRunCommand(), c.backupsVerifyCommand(), c.backupsRestoreCommand(),
-		c.backupsDownloadCommand(), c.backupsRemoveCommand(), c.backupsDecryptCommand())
+		c.backupsDownloadCommand(), c.backupsRemoveCommand(), c.backupsDecryptCommand(), c.backupsAdoptCommand())
 	return cmd
 }
 
@@ -662,9 +662,26 @@ func describeBackupPlan(b spec.Backups) string {
 	plan := fmt.Sprintf("%s, %d kept", describeSchedule(b.Schedule), b.Keep)
 	if len(b.Before) > 0 {
 		plan += ", after " + strings.Join(b.Before, " ")
+		// The limit is worth a word when somebody chose it.
+		if limit := b.BeforeLimit(); limit != spec.DefaultBackupBeforeTimeout {
+			plan += " (" + shortDuration(limit) + " at most)"
+		}
 	}
 	if b.Stop {
 		plan += ", with the application stopped"
 	}
 	return plan
+}
+
+// shortDuration writes a duration the way deploy.yaml takes it: "2h", "90m",
+// not "2h0m0s".
+func shortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }

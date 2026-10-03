@@ -599,7 +599,7 @@ func TestAnExportToTheBackupDestinationNeedsAPassphrase(t *testing.T) {
 
 func TestAnImportedConfigurationIsValidatedAgain(t *testing.T) {
 	good := exportApp{Name: "db", Spec: volumeApp(), Volumes: []string{"data"}}
-	if err := checkImported("db", good); err != nil {
+	if _, err := checkImported("db", good); err != nil {
 		t.Fatalf("a valid entry: %v", err)
 	}
 	for name, change := range map[string]func(e *exportApp){
@@ -610,6 +610,18 @@ func TestAnImportedConfigurationIsValidatedAgain(t *testing.T) {
 		"a volume name":      func(e *exportApp) { e.Spec.Volumes[0].Name = "../x" },
 		"a missing archive":  func(e *exportApp) { e.Volumes = nil },
 		"two replicas":       func(e *exportApp) { e.Spec.Replicas = 2 },
+		// What the import took as the export had it, before it held the
+		// configuration to the rules of a deploy.yaml.
+		"a health path": func(e *exportApp) {
+			e.Spec.Health = &spec.Health{Path: "health check", Interval: spec.Duration(time.Second), Timeout: spec.Duration(time.Second), Retries: 1}
+		},
+		"a proxy header": func(e *exportApp) {
+			e.Spec.Domain, e.Spec.Proxy = "db.example.com", &spec.Proxy{Headers: map[string]string{"Connection": "close"}}
+		},
+		"a published port": func(e *exportApp) { e.Spec.Publish = []spec.Publish{{Port: 5432, Host: 80, Protocol: "tcp"}} },
+		"a logging option": func(e *exportApp) {
+			e.Spec.Logging = &spec.Logging{Driver: "syslog", Options: map[string]string{"syslog-address": "unix:///dev/log"}}
+		},
 	} {
 		entry := good
 		entry.Spec = volumeApp()
@@ -619,7 +631,7 @@ func TestAnImportedConfigurationIsValidatedAgain(t *testing.T) {
 		if name == "a name with a path" {
 			filed = entry.Name
 		}
-		if err := checkImported(filed, entry); err == nil {
+		if _, err := checkImported(filed, entry); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/shipwick/shipwick/pkg/outbound"
 )
 
 // S3Config names a bucket on an S3-compatible service. The two keys are
@@ -28,11 +30,11 @@ type S3Config struct {
 	// Prefix is put in front of every object's key, for a bucket shared with
 	// something else or between servers.
 	Prefix string
+	// PartSize and RetryPause are not settings: zero means the defaults of
+	// multipart.go, and tests make them small.
+	PartSize   int64
+	RetryPause time.Duration
 }
-
-// maxPutBytes is the most a single PUT takes on S3 and the services modelled
-// on it. Larger archives would need a multipart upload.
-const maxPutBytes = 5 << 30
 
 // emptyPayload is the SHA-256 of nothing, the payload hash of requests
 // without a body.
@@ -41,15 +43,18 @@ const emptyPayload = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 // ErrObjectNotFound means the bucket holds no object under that key.
 var ErrObjectNotFound = errors.New("no such object in the bucket")
 
-// S3 is a client for the four operations backups need — put, get, list,
-// delete — on an S3-compatible service, addressed path-style
-// (endpoint/bucket/key), which every such service accepts. Requests are
-// signed with AWS Signature Version 4.
+// S3 is a client for the operations backups need — put, get, list, delete,
+// and the multipart upload of what does not fit one put — on an S3-compatible
+// service, addressed path-style (endpoint/bucket/key), which every such
+// service accepts. Requests are signed with AWS Signature Version 4.
 type S3 struct {
 	cfg      S3Config
 	endpoint *url.URL
 	http     *http.Client
 	now      func() time.Time
+	// See Upload.
+	partSize   int64
+	retryPause time.Duration
 }
 
 // NewS3 validates the configuration. It makes no request.
@@ -72,16 +77,26 @@ func NewS3(cfg S3Config) (*S3, error) {
 	}
 	cfg.Prefix = strings.Trim(cfg.Prefix, "/")
 	u.Path = strings.TrimSuffix(u.Path, "/")
+	if cfg.PartSize <= 0 {
+		cfg.PartSize = defaultPartSize
+	}
+	if cfg.RetryPause <= 0 {
+		cfg.RetryPause = defaultRetryPause
+	}
 	return &S3{
-		cfg:      cfg,
-		endpoint: u,
+		partSize:   cfg.PartSize,
+		retryPause: cfg.RetryPause,
+		cfg:        cfg,
+		endpoint:   u,
 		// No overall timeout: an archive takes as long as it takes. A server
 		// that stops answering is caught by the header timeout.
 		http: &http.Client{Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ResponseHeaderTimeout: 2 * time.Minute,
-			TLSHandshakeTimeout:   15 * time.Second,
-			IdleConnTimeout:       time.Minute,
+			Proxy:                  outbound.Proxy,
+			OnProxyConnectResponse: outbound.ProxyRefused,
+			TLSClientConfig:        outbound.TLSConfig(),
+			ResponseHeaderTimeout:  2 * time.Minute,
+			TLSHandshakeTimeout:    15 * time.Second,
+			IdleConnTimeout:        time.Minute,
 		}},
 		now: time.Now,
 	}, nil
@@ -100,13 +115,11 @@ func (s *S3) key(key string) string {
 	return s.cfg.Prefix + "/" + key
 }
 
-// Put stores size bytes read from body under key. sha256Hex is the SHA-256
-// of those bytes: the signature covers it, so the service refuses a body
-// that arrives different from what was signed.
+// Put stores size bytes read from body under key, in one request. sha256Hex
+// is the SHA-256 of those bytes: the signature covers it, so the service
+// refuses a body that arrives different from what was signed. What may be
+// larger than a part goes through Upload.
 func (s *S3) Put(ctx context.Context, key string, body io.Reader, size int64, sha256Hex string) error {
-	if size > maxPutBytes {
-		return fmt.Errorf("upload %s: the archive is larger than %d GB, the most one S3 upload takes", key, maxPutBytes>>30)
-	}
 	req, err := s.request(ctx, http.MethodPut, s.key(key), nil, body, sha256Hex)
 	if err != nil {
 		return err
@@ -170,6 +183,9 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 type Object struct {
 	Key  string // without the configured prefix
 	Size int64
+	// Modified is when the object was written; zero when the service did not
+	// say.
+	Modified time.Time
 }
 
 // List returns the objects whose key starts with prefix, in key order,
@@ -199,8 +215,9 @@ func (s *S3) List(ctx context.Context, prefix string) ([]Object, error) {
 			IsTruncated           bool
 			NextContinuationToken string
 			Contents              []struct {
-				Key  string
-				Size int64
+				Key          string
+				Size         int64
+				LastModified string
 			}
 		}
 		err = xml.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&page)
@@ -213,7 +230,8 @@ func (s *S3) List(ctx context.Context, prefix string) ([]Object, error) {
 			if s.cfg.Prefix != "" {
 				key = strings.TrimPrefix(key, s.cfg.Prefix+"/")
 			}
-			out = append(out, Object{Key: key, Size: o.Size})
+			modified, _ := time.Parse(time.RFC3339Nano, o.LastModified)
+			out = append(out, Object{Key: key, Size: o.Size, Modified: modified})
 		}
 		if !page.IsTruncated || page.NextContinuationToken == "" {
 			return out, nil

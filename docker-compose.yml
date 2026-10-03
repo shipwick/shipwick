@@ -54,6 +54,27 @@ services:
       SHIPWICK_ENCRYPTION_KEY: ${SHIPWICK_ENCRYPTION_KEY:-}
       SHIPWICK_ALERT_MEMORY_PERCENT: ${SHIPWICK_ALERT_MEMORY_PERCENT:-}
       SHIPWICK_ALERT_DISK_PERCENT: ${SHIPWICK_ALERT_DISK_PERCENT:-}
+      # Optional: behind a proxy. The agent's own requests — webhook, bucket —
+      # go through it; images are pulled by the Docker daemon, which has its
+      # own setting (docs/handbook.md, "Behind a corporate proxy").
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      # Optional: certificate authorities of your own, a PEM file as this
+      # container sees it (mounted in compose.override.yml); who is asked
+      # whether a hostname points here; an ACME server of your own
+      SHIPWICK_CA_FILE: ${SHIPWICK_CA_FILE:-}
+      SHIPWICK_DNS_RESOLVERS: ${SHIPWICK_DNS_RESOLVERS:-}
+      SHIPWICK_ACME_DIRECTORY: ${SHIPWICK_ACME_DIRECTORY:-}
+      # Optional: people sign in to the dashboard with an OpenID Connect provider.
+      # The redirect URL is for a dashboard on this machine (npm run dev):
+      # http://localhost:3000/auth/callback; with SHIPWICK_DASHBOARD_DOMAIN leave it unset.
+      SHIPWICK_OIDC_ISSUER: ${SHIPWICK_OIDC_ISSUER:-}
+      SHIPWICK_OIDC_CLIENT_ID: ${SHIPWICK_OIDC_CLIENT_ID:-}
+      SHIPWICK_OIDC_CLIENT_SECRET: ${SHIPWICK_OIDC_CLIENT_SECRET:-}
+      SHIPWICK_OIDC_SCOPES: ${SHIPWICK_OIDC_SCOPES:-}
+      SHIPWICK_OIDC_GROUPS_CLAIM: ${SHIPWICK_OIDC_GROUPS_CLAIM:-}
+      SHIPWICK_OIDC_REDIRECT_URL: ${SHIPWICK_OIDC_REDIRECT_URL:-}
     ports:
       # Loopback only: the API is plain HTTP and must not face the network.
       - "127.0.0.1:9000:9000"
@@ -76,6 +97,12 @@ services:
     # agent loaded rather than the empty bootstrap one. (The agent would
     # notice and reload within seconds either way.)
     command: caddy run --config /etc/caddy/bootstrap.json --resume
+    environment:
+      # The agent's proxy, for the certificate authority and Cloudflare's API.
+      # Requests to applications never go through it.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     configs:
       - source: caddy-bootstrap
         target: /etc/caddy/bootstrap.json
@@ -102,6 +129,10 @@ services:
     environment:
       # As seen from the dashboard's server side; the browser never talks to the agent.
       SHIPWICK_AGENT_URL: http://agent:9000
+      # Several servers in this one dashboard: name=URL pairs, e.g.
+      # "production=http://agent:9000,staging=https://agent.staging.example.com".
+      # Set, it replaces SHIPWICK_AGENT_URL.
+      SHIPWICK_AGENTS: ${SHIPWICK_AGENTS:-}
     ports:
       - "127.0.0.1:3000:3000"
     networks:

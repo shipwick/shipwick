@@ -66,6 +66,23 @@ func TestRoundTripAtEverySizeAroundAChunk(t *testing.T) {
 	}
 }
 
+func TestPlainSizeIsKnownFromTheSizeOfTheFile(t *testing.T) {
+	for _, n := range []int{0, 1, ChunkSize - 1, ChunkSize, ChunkSize + 1, 2 * ChunkSize, 3*ChunkSize + 4321} {
+		sealed := seal(t, make([]byte, n), "a passphrase")
+		if got, ok := PlainSize(int64(len(sealed))); !ok || got != int64(n) {
+			t.Errorf("%d bytes sealed into %d: PlainSize says %d, %v", n, len(sealed), got, ok)
+		}
+	}
+	// Sizes no file has: shorter than a header and a tag, a chunk cut inside
+	// its tag, an empty last chunk after a full one.
+	for _, size := range []int64{0, int64(headerSize), int64(headerSize) + tagSize - 1,
+		int64(headerSize) + ChunkSize + tagSize + 5, int64(headerSize) + ChunkSize + 2*tagSize} {
+		if got, ok := PlainSize(size); ok {
+			t.Errorf("a file of %d bytes is said to hold %d", size, got)
+		}
+	}
+}
+
 func TestTheSamePlaintextSealsDifferentlyEveryTime(t *testing.T) {
 	plain := []byte("the same archive, twice")
 	if bytes.Equal(seal(t, plain, "p"), seal(t, plain, "p")) {

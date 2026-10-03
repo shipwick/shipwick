@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,4 +91,15 @@ func (c *Client) StateBackup(ctx context.Context, id int64) (api.BackupRun, erro
 // StartStateBackup backs up the agent's database and encryption key now.
 func (c *Client) StartStateBackup(ctx context.Context) (api.BackupRun, error) {
 	return call[api.BackupRun](ctx, c, http.MethodPost, "/server/backups", nil, nil)
+}
+
+// AdoptBackups has the agent record the backups its destinations hold and its
+// database does not know: those of one application, or with an empty name
+// everything. The agent lists a bucket for it, which takes what it takes.
+func (c *Client) AdoptBackups(ctx context.Context, application string) (api.BackupAdoption, error) {
+	body, err := json.Marshal(api.BackupAdoptRequest{Application: application})
+	if err != nil {
+		return api.BackupAdoption{}, err
+	}
+	return callVia[api.BackupAdoption](ctx, c, c.stream, http.MethodPost, "/server/backups/adopt", nil, body)
 }

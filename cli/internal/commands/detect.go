@@ -528,3 +528,19 @@ func readProjectFile(path string) ([]byte, error) {
 	}
 	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), nil
 }
+
+// startsNode reports whether the Dockerfile written for the project runs Node
+// as the container's first process — directly, or as the program behind
+// `next start`, `remix-serve` or `npm start`. Such a process gets no SIGTERM
+// it did not install a handler for, and the frameworks that do install one
+// lose nothing by an init process in front of them.
+func startsNode(p *project) bool {
+	if p == nil {
+		return false
+	}
+	switch p.Kind {
+	case kindNuxt, kindNext, kindSvelte, kindNode:
+		return true
+	}
+	return false
+}

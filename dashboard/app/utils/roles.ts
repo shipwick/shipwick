@@ -15,9 +15,9 @@ export function roleCovers(have: Role, required: Role): boolean {
 
 /** What each role adds, for the token form and the tooltips. */
 export const ROLE_DESCRIPTIONS: Record<Role, string> = {
-  read: 'See everything: applications, deployments, logs, events, metrics',
-  deploy: 'And change what runs: deploy, redeploy, roll back, stop, start',
-  admin: 'And everything else: delete applications, manage tokens, back up and restore volumes',
+  read: 'See everything, change nothing',
+  deploy: 'See everything, and deploy, roll back, stop and start',
+  admin: 'Everything: also delete applications, restore backups, and manage tokens, secrets and registries',
 }
 
 /**

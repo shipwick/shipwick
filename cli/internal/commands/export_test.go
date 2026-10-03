@@ -39,6 +39,9 @@ type exportAgent struct {
 	standby          api.Standby
 	promotion        api.Promotion
 	promoted         int
+	// followed makes the agent one that keeps a record of its promotion:
+	// see promote_test.go.
+	followed *followedPromotion
 }
 
 // exportArchive is a small export as the agent writes one, in clear.
@@ -90,9 +93,22 @@ func newExportAgent(t *testing.T) *exportAgent {
 	mux.HandleFunc("GET /api/v1/standby", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, e.standby) })
 	mux.HandleFunc("POST /api/v1/standby/promote", func(w http.ResponseWriter, r *http.Request) {
 		e.mu.Lock()
+		defer e.mu.Unlock()
 		e.promoted++
-		e.mu.Unlock()
+		if e.followed != nil {
+			e.followed.start(w, r)
+			return
+		}
 		respond(w, 200, e.promotion)
+	})
+	mux.HandleFunc("GET /api/v1/standby/promotion", func(w http.ResponseWriter, r *http.Request) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.followed == nil {
+			respondError(w, 404, api.Error{Code: api.CodeEndpointNotFound, Message: "no such endpoint: GET " + r.URL.Path})
+			return
+		}
+		e.followed.poll(w)
 	})
 	mux.Handle("/", proxy)
 	srv := httptest.NewServer(mux)
@@ -247,6 +263,7 @@ func TestExportErrorsSayWhatToDo(t *testing.T) {
 		api.CodeExportInProgress:     "shipwick export --list",
 		api.CodeStandbyNotConfigured: "SHIPWICK_STANDBY_SCHEDULE",
 		api.CodeInvalidExport:        "shipwick export",
+		api.CodePromotionInProgress:  "shipwick standby promote",
 	} {
 		e := newExportAgent(t)
 		e.deployStatus, e.deployError = 409, api.Error{Code: code, Message: "the agent's sentence"}

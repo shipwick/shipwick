@@ -30,9 +30,9 @@ type Route struct {
 	// Aliases are more hostnames served exactly like Domain: the same
 	// handler, the same replicas.
 	Aliases []string
-	// Redirects are hostnames answered with a permanent redirect to Domain,
-	// path and query kept. They need no backend, so they are served whether
-	// or not anything is.
+	// Redirects are hostnames answered with a permanent redirect to Domain —
+	// to Path on it, for a route that has one — path and query kept. They
+	// need no backend, so they are served whether or not anything is.
 	Redirects []string
 	// Backends are names on the services network, resolved for every request:
 	// the replicas of an application that are ready. A name must be listed
@@ -172,7 +172,7 @@ func render(adminListen string, routes []Route, tls TLS, markerID string) ([]byt
 			// before it can be redirected.
 			caddyRoutes = append(caddyRoutes, obj{
 				"match":    []any{obj{"host": r.Redirects}},
-				"handle":   []any{redirectTo(r.Domain)},
+				"handle":   []any{redirectTo(r.Domain, r.Path)},
 				"terminal": true,
 			})
 		}
@@ -300,14 +300,16 @@ func unavailable() obj {
 	}
 }
 
-// redirectTo sends the request to the same path and query on domain. 308
-// rather than 301: the method is kept, so a POST to the old hostname does not
-// turn into a GET.
-func redirectTo(domain string) obj {
+// redirectTo sends the request to the same path and query on domain, below
+// the application's own path if it has one: that part of the domain is all
+// the application serves, and the rest of it may be another application's.
+// 308 rather than 301: the method is kept, so a POST to the old hostname does
+// not turn into a GET.
+func redirectTo(domain, path string) obj {
 	return obj{
 		"handler":     "static_response",
 		"status_code": 308,
-		"headers":     obj{"Location": []string{"https://" + domain + "{http.request.uri}"}},
+		"headers":     obj{"Location": []string{"https://" + domain + literal(path) + "{http.request.uri}"}},
 	}
 }
 
@@ -494,6 +496,10 @@ func handlerFor(r Route) obj {
 			//    bridge hop away; a connection that takes half a second is not
 			//    going to happen.
 			"dial_timeout": "500ms",
+			// Caddy would send requests to replicas through the proxy its
+			// environment names (HTTP_PROXY), which is there for the
+			// certificate authority and knows no container.
+			"network_proxy": obj{"from": "none"},
 		},
 		"health_checks": obj{
 			// 3. Having failed once, a dead replica is skipped by the requests

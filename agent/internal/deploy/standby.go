@@ -129,6 +129,10 @@ func (r *rollout) executeDormant(ctx context.Context) error {
 		return err
 	}
 	d.Status = api.StatusActive
+	// A deployment that was resumed took over the application's routing
+	// before it knew that it would start nothing (see prepare); the database
+	// says from here on that nothing is served.
+	e.clearRouteOverride(d.Application)
 	e.event(ctx, d, api.LevelInfo, api.EventState, string(api.StatusActive))
 
 	sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
@@ -235,42 +239,8 @@ func (e *Engine) Standby(ctx context.Context) (api.Standby, error) {
 		pull.Schedule = s.String()
 		out.Pull = &pull
 	}
-	return out, nil
-}
-
-// Promote starts every application that was imported stopped, in the order
-// an import deploys them, and answers with what became of each and with the
-// DNS records to change. An application is waited for until it is ready, or
-// until its startup budget is spent: what others reach by name comes first,
-// and should be there when they start.
-//
-// An application that does not come up does not stop the promotion. The
-// supervisor has it from the moment it is started, and the answer says so.
-func (e *Engine) Promote(ctx context.Context) (api.Promotion, error) {
-	waiting, err := e.standbyApplications(ctx)
-	if err != nil {
-		return api.Promotion{}, err
-	}
-	out := api.Promotion{Applications: []api.PromotedApplication{}, Records: e.dnsRecords(waiting)}
-	e.log.Info("standby promoted", "by", actorFrom(ctx), "applications", len(waiting))
-	for _, d := range waiting {
-		p := api.PromotedApplication{Name: d.Application, Status: api.PromotedRunning}
-		if err := e.Start(ctx, d.Application); err != nil {
-			p.Status, p.Message = api.PromotedFailed, err.Error()
-			if errors.Is(err, ErrBusy) {
-				p.Message = "another operation is in progress for it; start it with: shipwick start " + d.Application
-			}
-			out.Applications = append(out.Applications, p)
-			continue
-		}
-		if err := e.awaitStarted(ctx, d); err != nil {
-			if ctx.Err() != nil {
-				return out, ctx.Err()
-			}
-			p.Status = api.PromotedStarted
-			p.Message = fmt.Sprintf("started, and not ready yet: %v. It is restarted until it is; watch it with: shipwick status %s", err, d.Application)
-		}
-		out.Applications = append(out.Applications, p)
+	if p, ok := e.Promotion(); ok {
+		out.Promotion = &p
 	}
 	return out, nil
 }
@@ -349,6 +319,7 @@ func (e *Engine) notePull(export int64, final api.Import) {
 	t := e.transfer
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	defer func() { e.keep(store.TransferPull, t.pull) }()
 	t.pull.LastAt, t.pull.LastExport, t.pull.LastError = final.CompletedAt, export, ""
 	switch {
 	case final.Error != "":
@@ -412,11 +383,17 @@ func (e *Engine) scheduleTransfers(ctx context.Context, now time.Time) {
 		}
 	}
 	if pullDue {
-		if _, err := e.pullStandby(ctx, true); err != nil {
+		_, err := e.pullStandby(ctx, true)
+		switch {
+		case errors.Is(err, ErrPromotionInProgress):
+			// Not a failure of the standby: it is being promoted, and what
+			// runs afterwards is not replaced by an import anyway.
+		case err != nil:
 			e.log.Warn("the scheduled import from the bucket did not run", "error", err)
 			t.mu.Lock()
 			at := now.UTC()
 			t.pull.LastAt, t.pull.LastError = &at, err.Error()
+			e.keep(store.TransferPull, t.pull)
 			t.mu.Unlock()
 		}
 	}
@@ -437,4 +414,16 @@ func due(s *cron.Schedule, last *time.Time, minute time.Time) bool {
 	}
 	*last = minute
 	return !s.Next(from).After(minute)
+}
+
+// failUnstarted settles a deployment that was recorded and cannot begin: it
+// never ran, so there is nothing of it to remove.
+func (e *Engine) failUnstarted(ctx context.Context, d *store.Deployment, cause error) {
+	ctx = context.WithoutCancel(ctx)
+	if err := e.transitionWithError(ctx, d, api.StatusFailed, "it could not be recorded as a deployment that starts nothing: "+cause.Error()); err != nil {
+		e.log.Error("could not mark deployment as failed", "deployment", d.ID, "error", err)
+	}
+	if err := e.store.CompleteDeployment(ctx, d.ID, time.Now()); err != nil {
+		e.log.Error("could not stamp deployment completion", "deployment", d.ID, "error", err)
+	}
 }

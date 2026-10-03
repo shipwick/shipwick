@@ -8,10 +8,11 @@
 // crash-looping, logs flow, metrics wander.
 //
 // Deployments roll, like the real agent's: one replica at a time, each new one
-// taking over from its predecessor. POST …/deploy takes the deploy.yaml as
-// JSON (the agent accepts JSON too; there is no YAML parser here), validates
-// the hostnames, ports and health block, and refuses a hostname or server port
-// another application holds with the agent's INVALID_CONFIG shape.
+// taking over from its predecessor. POST …/deploy and …/validate take the
+// deploy.yaml as the agent does, as YAML or JSON (mock/yaml.mjs reads the part
+// of YAML such a file is written in), validate the hostnames, ports and health
+// block, and refuse a hostname or server port another application holds with
+// the agent's INVALID_CONFIG shape.
 //
 // Also served, with the agent's shapes: tokens (GET/POST /tokens, DELETE
 // /tokens/:name; a token created here signs in with its role), roles (403
@@ -56,6 +57,17 @@
 // stays listed for a few seconds after the deployment completed, as it does
 // while the real one is given its stop_timeout.
 //
+// And what 0.6 added: `init` and `backups.before_timeout` in specs,
+// `stopping` on containers, `certificate_problem`, `alert_count` and
+// `alert_severity` on applications, `network` and `sign_in` on GET /server;
+// tokens limited to applications and tokens that expire (403 TOKEN_LIMITED,
+// 401 TOKEN_EXPIRED), the audit trail (GET /audit, written for every request
+// that changes something), POST /server/backups/adopt, the promotion that is
+// started and followed (POST /standby/promote?wait=false, GET
+// /standby/promotion), and signing in through a provider: GET /auth, POST
+// /auth/exchange, sessions (`sws_…`), the /access endpoints, and a stand-in
+// for the provider itself at /mock-idp/authorize.
+//
 // Magic image tags for POST /applications/:name/redeploy {"image": ...}:
 //   *:fail      replica 1 crashes: FAILED, nothing of the old version was touched
 //   *:rollback  replica 1 is replaced, replica 2 crashes: FAILED → ROLLBACK →
@@ -97,9 +109,27 @@
 //                    imports one over a few seconds; follow it with GET /import)
 //   MOCK_OLD_AGENT=1 answers like an agent before 0.5: the new endpoints are
 //                    404 ENDPOINT_NOT_FOUND and the new fields are absent
+//   MOCK_AGENT=0.5   answers like an agent before 0.6 (MOCK_OLD_AGENT=1 does too)
+//   MOCK_LIMIT=a,b   MOCK_TOKEN is limited to these applications (with
+//                    MOCK_ROLE=deploy): changing another is 403 TOKEN_LIMITED
+//   MOCK_EXPIRES=9d  MOCK_TOKEN expires that long after the mock started (s, m,
+//                    h or d); `expired` for one that has: 401 TOKEN_EXPIRED
+//   MOCK_NETWORK=1   the agent is behind a proxy the Docker daemon lacks, with
+//                    authorities of its own, the system's resolver and an ACME
+//                    directory of its own: `network` on GET /server
+//   MOCK_ADOPT=foreign   POST /server/backups/adopt answers 409 FOREIGN_BUCKET
+//   MOCK_PROMOTING=1 (with MOCK_STANDBY=1) a promotion is running when the mock
+//                    starts, 20 seconds an application
+//   MOCK_NO_SIGN_IN=1    no sign-in provider: GET /auth says configured false
+//   MOCK_DASHBOARD_URL   where the dashboard is, for the sign-in's redirect_uri
+//                    (default http://localhost:3000)
+//   MOCK_IDP_USER=ada@example.com   the stand-in provider signs this address in
+//                    without showing its page of accounts
+//   MOCK_HOSTNAME    the server's hostname (default shipwick-fsn1-01)
 
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
+import { parseYaml } from './yaml.mjs'
 
 const PORT = Number(process.env.MOCK_PORT || 9100)
 const HOST = process.env.MOCK_HOST || '127.0.0.1'
@@ -109,7 +139,7 @@ const WEBHOOK = process.env.MOCK_WEBHOOK === '1'
 const ROLES = ['read', 'deploy', 'admin']
 const ROLE = ROLES.includes(process.env.MOCK_ROLE) ? process.env.MOCK_ROLE : 'admin'
 // The configured token is the root token when it is admin; a lesser role gets a plausible name.
-const TOKEN_IDENTITY = { name: ROLE === 'admin' ? 'root' : ROLE === 'deploy' ? 'ci' : 'viewer', role: ROLE }
+const TOKEN_NAME_OF_ROLE = ROLE === 'admin' ? 'root' : ROLE === 'deploy' ? 'ci' : 'viewer'
 // Hostnames and server ports Shipwick itself holds: the dashboard's route, the proxy's and the agent's ports.
 const OWN_HOSTNAMES = ['shipwick.example.com']
 const RESERVED_PORTS = [80, 443, 8080, 8443, 9000]
@@ -117,6 +147,8 @@ const VERSION = '0.1.0-mock'
 const LOG_BUFFER = 5000
 const MASK = '********'
 const OLD_AGENT = process.env.MOCK_OLD_AGENT === '1'
+// An agent before 0.6: no audit trail, no limits or expiry on tokens, no promotion record, no sign-in.
+const BEFORE_06 = OLD_AGENT || process.env.MOCK_AGENT === '0.5'
 const TRAFFIC_AVAILABLE = PROXY_ENABLED && process.env.MOCK_NO_TRAFFIC !== '1'
 const ALERTS = ['none', 'warning', 'critical'].includes(process.env.MOCK_ALERTS) ? process.env.MOCK_ALERTS : 'warning'
 const KEY_FROM_ENVIRONMENT = process.env.MOCK_KEY_ENV === '1'
@@ -125,7 +157,17 @@ const BUCKET = process.env.MOCK_NO_BUCKET !== '1'
 const VERIFY_FAILS = process.env.MOCK_VERIFY_FAILS === '1'
 const DNS_CHALLENGE = PROXY_ENABLED && process.env.MOCK_DNS_CHALLENGE === '1'
 const IS_STANDBY = process.env.MOCK_STANDBY === '1'
+// A server nobody has deployed to yet: no applications, no deployments, nothing to alert about.
+const EMPTY = process.env.MOCK_EMPTY === '1'
 const DASHBOARD_URL =`https://${OWN_HOSTNAMES[0]}`
+const SERVER_HOSTNAME = process.env.MOCK_HOSTNAME || 'shipwick-fsn1-01'
+const TOKEN_LIMIT = (process.env.MOCK_LIMIT ?? '').split(',').map(n => n.trim()).filter(Boolean).sort()
+const NETWORK = process.env.MOCK_NETWORK === '1'
+const ADOPT_FOREIGN = process.env.MOCK_ADOPT === 'foreign'
+const PROMOTING = process.env.MOCK_PROMOTING === '1'
+const SIGN_IN = process.env.MOCK_NO_SIGN_IN !== '1'
+const SIGN_IN_REDIRECT = `${(process.env.MOCK_DASHBOARD_URL || 'http://localhost:3000').replace(/\/+$/, '')}/auth/callback`
+const IDP_USER = process.env.MOCK_IDP_USER || ''
 const SERVER_ADDRESS = '203.0.113.10'
 const DATA_DIR = '/var/lib/shipwick'
 
@@ -137,6 +179,16 @@ const DAY = 24 * HOUR
 const startedAt = Date.now()
 const iso = (ms) => new Date(ms).toISOString()
 const ago = (ms) => iso(startedAt - ms)
+
+/** When MOCK_TOKEN expires: MOCK_EXPIRES as a span from the start, `expired` for an hour ago, nothing for never. */
+function configuredExpiry() {
+  const raw = process.env.MOCK_EXPIRES ?? ''
+  if (raw === 'expired') return ago(60 * 60 * 1000)
+  const m = /^(\d+)(s|m|h|d)$/.exec(raw)
+  if (!m) return null
+  return iso(startedAt + Number(m[1]) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]])
+}
+const TOKEN_EXPIRES_AT = configuredExpiry()
 
 // ---------------------------------------------------------------------------
 // State
@@ -186,6 +238,19 @@ let nextEventId = 1
 let nextTokenId = 1
 let nextRunId = 1
 let nextBackupId = 1
+let nextAuditId = 1
+let nextRuleId = 1
+let nextSessionId = 1
+/** The audit trail, oldest first. */
+const audit = []
+/** Who may sign in: rules {id, kind, subject, role, applications, created_at, created_by}, oldest first. */
+const accessRules = []
+/** session value → a person's session; the value stays here only so it can be presented. */
+const sessions = new Map()
+/** code → what the stand-in provider remembers of an authorization request until the code is redeemed. */
+const idpCodes = new Map()
+/** Nonces of sign-ins that completed: each is accepted once. */
+const usedNonces = new Set()
 
 function spec(name, image, extra = {}) {
   return {
@@ -417,6 +482,7 @@ function seed() {
       },
       // In-flight requests get half a minute to finish when a replica is replaced or stopped.
       deploy: { strategy: 'rolling', stop_timeout: '30s' },
+      ...(BEFORE_06 ? {} : { init: true }),
       jobs: [
         { name: 'nightly-report', schedule: '0 3 * * *', command: ['node', 'report.js'], timeout: '1h0m0s' },
         { name: 'cleanup-sessions', schedule: '*/15 * * * *', command: ['node', 'cleanup.js', '--older-than', '30d'], timeout: '5m0s' },
@@ -519,7 +585,7 @@ function seed() {
       volumes: [{ name: 'data', path: '/var/lib/postgresql/data' }],
       publish: [{ port: 5432, host: 15432, address: '10.0.0.5', protocol: 'tcp' }],
       // Archived every night after a checkpoint; a week of them is kept.
-      backups: { schedule: '0 3 * * *', keep: 7, before: ['psql', '-U', 'postgres', '-c', 'CHECKPOINT'] },
+      backups: { schedule: '0 3 * * *', keep: 7, before: ['psql', '-U', 'postgres', '-c', 'CHECKPOINT'], ...(BEFORE_06 ? {} : { before_timeout: '2h0m0s' }) },
       deploy: { strategy: 'recreate' },
     })
     const dbActive = addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
@@ -646,6 +712,12 @@ function seed() {
   // Tokens besides root: one for CI, one read-only, never used yet.
   addToken('ci', 'deploy', startedAt - 20 * DAY, startedAt - 2 * HOUR)
   addToken('viewer', 'read', startedAt - 3 * DAY, null)
+  if (!BEFORE_06) {
+    // A token for two applications that ends soon, and one that has ended: it stays listed until it is revoked.
+    addToken('web-ci', 'deploy', startedAt - 81 * DAY, startedAt - 26 * HOUR, undefined, { applications: ['landing', 'web'], expiresAtMs: startedAt + 9 * DAY })
+    addToken('contractor', 'read', startedAt - 45 * DAY, startedAt - 16 * DAY, undefined, { expiresAtMs: startedAt - 15 * DAY })
+    seedAccess()
+  }
 
   // Secrets: names and dates only. The database password was rotated once.
   secrets.set('POSTGRES_PASSWORD', { created_at: ago(20 * DAY), updated_at: ago(6 * DAY) })
@@ -803,6 +875,17 @@ function seed() {
     standbyPull.last_export = 42
   }
 
+  if (!BEFORE_06) seedAudit()
+  if (IS_STANDBY && PROMOTING && !BEFORE_06) startPromotion(20 * SECOND)
+
+  if (EMPTY) {
+    apps.clear()
+    deployments.clear()
+    appEvents.clear()
+    audit.length = 0
+    for (const run of [...backups.values()]) if (run.application === EXPORTS) backups.delete(run.id)
+  }
+
   for (const app of apps.values()) {
     for (let i = 0; i < 120; i++) generateLogLine(app, startedAt - (120 - i) * 900)
   }
@@ -859,7 +942,22 @@ function appSummary(app) {
     created_at: app.created_at,
     updated_at: app.updated_at,
     static: isStaticSpec(active?.spec ?? flying?.spec),
+    ...(BEFORE_06 ? {} : { certificate_problem: certificateProblem(active), ...alertSummary(app.name) }),
   }
+}
+
+/** The hostname whose certificate is worst off: waiting for DNS before expiring before obtaining; null when all are in order. */
+function certificateProblem(active) {
+  const order = ['waiting_for_dns', 'expiring', 'obtaining']
+  const worst = hostCertificates(active)
+    .filter(c => order.includes(c.status))
+    .sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status))[0]
+  return worst ? { hostname: worst.hostname, status: worst.status, message: worst.message } : null
+}
+
+function alertSummary(name) {
+  const mine = activeAlerts().filter(a => a.application === name)
+  return { alert_count: mine.length, alert_severity: mine.some(a => a.severity === 'critical') ? 'critical' : mine.length > 0 ? 'warning' : '' }
 }
 
 /** The application is a folder the proxy serves: logs, metrics, jobs and commands do not apply. */
@@ -882,7 +980,8 @@ function appDetail(app) {
     ...appSummary(app),
     spec: active ? active.spec : null,
     active_deployment: active ? deploymentView(active) : null,
-    containers: app.containers,
+    // A container the agent is retiring says so itself from 0.6 on.
+    containers: BEFORE_06 ? app.containers : app.containers.map(c => ({ ...c, stopping: draining.has(c.id) })),
     ...(OLD_AGENT ? {} : { certificates: hostCertificates(active) }),
   }
 }
@@ -1113,7 +1212,11 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
       if (apps.get(app.name) !== app || gone.length === 0) return
       app.containers = app.containers.filter(c => !gone.includes(c))
       if (ignoresSigterm) {
-        for (const c of gone) addAppEvent(app.name, 'warn', 'app', `The replaced container ${c.name} did not exit within ${formatGoDuration(grace).replace(/(?<=\d[hm])0[ms]/g, '')} of SIGTERM and was killed. To let it finish its requests, handle SIGTERM in the application; to give it longer, set deploy.stop_timeout`)
+        const within = formatGoDuration(grace).replace(/(?<=\d[hm])0[ms]/g, '')
+        const advice = previous?.spec.init
+          ? 'It runs under an init process, so the signal reached it: to give it longer, set deploy.stop_timeout'
+          : 'If its process has no handler for SIGTERM, set init: true and the signal ends it at once; to let it finish its requests, handle SIGTERM in the application; to give it longer, set deploy.stop_timeout'
+        for (const c of gone) addAppEvent(app.name, 'warn', 'app', `The replaced container ${c.name} did not exit within ${within} of SIGTERM and was killed. ${advice}`)
       }
       if (!app.containers.some(x => x.deployment_id === previous?.id)) endFollowers(app.name)
     }, ignoresSigterm ? grace : Math.min(grace, DRAIN_MS)).unref()
@@ -1525,8 +1628,16 @@ function validateCommand(command) {
 
 const TOKEN_NAME = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/
 
-function addToken(name, role, createdAtMs, lastUsedAtMs, value = newTokenValue()) {
-  const t = { id: nextTokenId++, name, role, created_at: iso(createdAtMs), last_used_at: lastUsedAtMs === null ? null : iso(lastUsedAtMs), value }
+function addToken(name, role, createdAtMs, lastUsedAtMs, value = newTokenValue(), { applications = [], expiresAtMs = null } = {}) {
+  const t = {
+    id: nextTokenId++,
+    name,
+    role,
+    created_at: iso(createdAtMs),
+    last_used_at: lastUsedAtMs === null ? null : iso(lastUsedAtMs),
+    ...(BEFORE_06 ? {} : { applications: [...applications].sort(), expires_at: expiresAtMs === null ? null : iso(expiresAtMs) }),
+    value,
+  }
   tokens.set(name, t)
   return t
 }
@@ -1541,26 +1652,366 @@ function tokenView(t) {
   return rest
 }
 
-/** Who a bearer value is: the configured token, or one created here and not revoked since. */
+/** "2026-10-02 at 12:00 UTC", as the agent writes a moment into a sentence. */
+const moment = at => `${at.slice(0, 10)} at ${at.slice(11, 16)} UTC`
+
+/** An identity as the agent hands it out: an agent before 0.6 knows a name and a role. */
+const identityOf = (name, role, kind, applications, expiresAt) => (BEFORE_06 ? { name, role } : { name, role, kind, applications, expires_at: expiresAt })
+
+/** A credential the agent knows and no longer serves: told to its holder only, and never counted as a failed authentication. */
+class Ended extends Error {
+  constructor(code, message, details) {
+    super(message)
+    this.code = code
+    this.details = details
+  }
+}
+
+function refuseExpiredToken(name, expiresAt) {
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    throw new Ended('TOKEN_EXPIRED', `token ${name} expired on ${moment(expiresAt)}; an admin creates a new one with: shipwick token create`, { name, expired_at: expiresAt })
+  }
+}
+
+/**
+ * Who a bearer value is: the configured token, one created here and not
+ * revoked since, or the session of a person who signed in. Null for a value
+ * nobody issued; throws Ended for one that was valid and is over.
+ */
 function identify(authorization) {
   const value = typeof authorization === 'string' && authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
   if (value === '') return null
-  if (value === TOKEN) return TOKEN_IDENTITY
+  if (value === TOKEN) {
+    // Root never expires and is never limited; a lesser configured token may be both.
+    if (ROLE === 'admin') return identityOf('root', 'admin', 'token', [], null)
+    if (!BEFORE_06) refuseExpiredToken(TOKEN_NAME_OF_ROLE, TOKEN_EXPIRES_AT)
+    return identityOf(TOKEN_NAME_OF_ROLE, ROLE, 'token', ROLE === 'deploy' ? TOKEN_LIMIT : [], TOKEN_EXPIRES_AT)
+  }
   for (const t of tokens.values()) {
     if (t.value === value) {
+      // A refused use of an expired token does not move last_used_at.
+      if (!BEFORE_06) refuseExpiredToken(t.name, t.expires_at)
       // Kept to the minute, as the agent does: it says whether the token is still in use.
       t.last_used_at = iso(Math.floor(Date.now() / MINUTE) * MINUTE)
-      return { name: t.name, role: t.role }
+      return identityOf(t.name, t.role, 'token', t.applications ?? [], t.expires_at ?? null)
     }
   }
-  return null
+  return BEFORE_06 ? null : identifySession(value)
 }
 
 const roleCovers = (have, required) => ROLES.indexOf(have) >= ROLES.indexOf(required)
 
-function forbiddenMessage(have, required) {
+/** "token" or "session": what the caller presented, for the sentences that refuse it. */
+const credential = who => (who.kind === 'user' ? 'session' : 'token')
+
+function forbiddenMessage(who, required) {
   const need = required === 'deploy' ? 'deploying needs deploy or admin' : `this needs ${required}`
-  return `this token has the ${have} role; ${need}`
+  return `this ${credential(who)} has the ${who.role} role; ${need}`
+}
+
+/** "my-api", "my-api and web", "a, b and c". */
+const nameList = names => (names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
+
+/** A deploy token limited to some applications changes those and reads the rest. */
+function refuseLimited(who, required, segments) {
+  const limits = who.applications ?? []
+  if (who.role !== 'deploy' || limits.length === 0 || required !== 'deploy') return
+  const application = segments[0] === 'applications' ? segments[1] : undefined
+  if (application === undefined) {
+    throw new HttpError(403, 'TOKEN_LIMITED', `this ${credential(who)} is limited to ${nameList(limits)}, and this is not about one application`, { applications: limits })
+  }
+  if (!limits.includes(application)) {
+    throw new HttpError(403, 'TOKEN_LIMITED', `this ${credential(who)} is limited to ${nameList(limits)}; it can read ${application} and not change it`, { applications: limits, application })
+  }
+}
+
+const APPLICATION_NAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+/** The applications a token or a rule is limited to, as the agent stores them: sorted, each once. */
+function validateLimits(role, applications) {
+  if (applications === undefined || applications === null) return []
+  if (!Array.isArray(applications)) throw new HttpError(400, 'INVALID_REQUEST', 'applications: must be a list of application names')
+  if (applications.length === 0) return []
+  if (role !== 'deploy') return null
+  for (const name of applications) {
+    if (typeof name !== 'string' || !APPLICATION_NAME.test(name)) throw new HttpError(400, 'INVALID_REQUEST', `applications: invalid name ${JSON.stringify(name)}: lowercase letters, digits and dashes only`)
+  }
+  const list = [...new Set(applications)].sort()
+  if (list.length > 50) throw new HttpError(400, 'INVALID_REQUEST', 'a token can be limited to at most 50 applications')
+  return list
+}
+
+// ---------------------------------------------------------------------------
+// The audit trail: who did what, from where, and how it was answered
+// ---------------------------------------------------------------------------
+
+// Every route that changes something, with its action and what it names as its target.
+const AUDITED = {
+  'POST /applications/:p/deploy': ['deploy'],
+  'POST /applications/:p/redeploy': ['redeploy'],
+  'POST /applications/:p/rollback': ['rollback'],
+  'POST /applications/:p/stop': ['stop'],
+  'POST /applications/:p/start': ['start'],
+  'DELETE /applications/:p': ['application.delete'],
+  'POST /applications/:p/run': ['run'],
+  'POST /applications/:p/jobs/:x/run': ['job.run', 3],
+  'POST /applications/:p/images': ['image.upload'],
+  'PUT /applications/:p/static': ['static.upload'],
+  'POST /applications/:p/backups': ['backup.create'],
+  'POST /applications/:p/backups/:x/verify': ['backup.verify', 3],
+  'POST /applications/:p/backups/:x/restore': ['backup.restore', 3],
+  'GET /applications/:p/backups/:x/volumes/:y/archive': ['backup.download', 3],
+  'DELETE /applications/:p/backups/:x': ['backup.delete', 3],
+  'GET /applications/:p/volumes/:x/archive': ['volume.download', 3],
+  'PUT /applications/:p/volumes/:x/archive': ['volume.restore', 3],
+  'DELETE /volumes/:p': ['volume.delete', 1],
+  'POST /server/backups': ['server.backup'],
+  'POST /server/backups/adopt': ['backup.adopt'],
+  'PUT /secrets/:p': ['secret.set', 1],
+  'DELETE /secrets/:p': ['secret.delete', 1],
+  'PUT /registries/:p': ['registry.login', 1],
+  'DELETE /registries/:p': ['registry.logout', 1],
+  'PUT /certificates/:p': ['certificate.set', 1],
+  'DELETE /certificates/:p': ['certificate.delete', 1],
+  'POST /server/rotate-key': ['key.rotate'],
+  'POST /tokens': ['token.create'],
+  'DELETE /tokens/:p': ['token.revoke', 1],
+  'POST /export': ['export.download'],
+  'POST /exports': ['export.create'],
+  'POST /import': ['import'],
+  'POST /standby/pull': ['standby.pull'],
+  'POST /standby/promote': ['standby.promote'],
+  'DELETE /auth/session': ['signout'],
+  'POST /access/rules': ['access.grant'],
+  'DELETE /access/rules/:p': ['access.revoke'],
+  'DELETE /access/sessions/:p': ['access.signout', 1],
+}
+
+function addAudit(entry) {
+  audit.push({
+    id: nextAuditId++,
+    at: iso(Date.now()),
+    actor: { kind: 'token', name: 'root' },
+    address: '172.18.0.3',
+    forwarded_for: '',
+    action: '',
+    application: '',
+    target: '',
+    outcome: 'ok',
+    status: 200,
+    code: '',
+    detail: '',
+    ...entry,
+  })
+  if (audit.length > 5000) audit.splice(0, audit.length - 5000)
+}
+
+/** The address a request came from, and what the proxy in front said it came from: the last entry, if it is an address. */
+function addressesOf(req) {
+  const address = String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, '')
+  const last = String(req.headers['x-forwarded-for'] ?? '').split(',').pop().trim()
+  return { address, forwarded_for: /^[0-9a-fA-F:.]{3,45}$/.test(last) ? last : '' }
+}
+
+/** Writes the entry for an audited request once it has been answered: what a refusal or a failure was answered with, too. */
+function auditWhenAnswered(req, res, route, segments, who) {
+  const [action, targetAt] = AUDITED[route]
+  res.once('finish', () => {
+    const status = res.statusCode
+    const location = String(res.getHeader('location') ?? '')
+    const made = /\/(deployments|runs|backups|exports)\/(\d+)$/.exec(location)
+    addAudit({
+      actor: { kind: who.kind ?? 'token', name: who.name },
+      ...addressesOf(req),
+      action,
+      application: segments[0] === 'applications' ? segments[1] ?? '' : '',
+      target: res.auditTarget ?? (targetAt !== undefined ? segments[targetAt] ?? '' : ''),
+      outcome: status >= 200 && status < 300 ? 'ok' : status === 403 ? 'refused' : 'failed',
+      status,
+      code: res.auditCode ?? '',
+      detail: res.auditDetail ?? (made ? `${made[1].slice(0, -1)} ${made[2]}` : ''),
+    })
+  })
+}
+
+/** `since` of GET /audit: 7d, 24h, a date (the start of that day, UTC) or RFC 3339. */
+function parseSince(raw) {
+  const span = /^(\d+)(h|d)$/.exec(raw)
+  if (span) return Date.now() - Number(span[1]) * (span[2] === 'h' ? HOUR : DAY)
+  const at = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw)
+  if (Number.isNaN(at)) throw new HttpError(400, 'INVALID_REQUEST', `since: invalid value ${JSON.stringify(raw)}: use 7d, 24h, a date such as 2026-09-01 or an RFC 3339 time`)
+  return at
+}
+
+/** A trail of two weeks, so that there is more than one page of it. */
+function seedAudit() {
+  const at = minutesAgo => iso(startedAt - minutesAgo * MINUTE)
+  const ci = { kind: 'token', name: 'ci' }
+  const ada = { kind: 'user', name: 'ada@example.com' }
+  const office = '203.0.113.40'
+  let deployment = 3
+  // Older first: the nightly routine of a CI token, which fills the first pages.
+  for (let day = 13; day >= 2; day--) {
+    for (const [name, minute] of [['my-api', 610], ['web', 640], ['shop', 700], ['landing', 730], ['worker', 760]]) {
+      addAudit({ at: at(day * 1440 - minute), actor: ci, address: '172.18.0.1', forwarded_for: '198.51.100.24', action: name === 'landing' ? 'static.upload' : 'redeploy', application: name, status: name === 'landing' ? 200 : 202, detail: name === 'landing' ? '' : `deployment ${deployment++}` })
+    }
+  }
+  const recent = [
+    [1400, { action: 'token.create', target: 'web-ci', status: 201, forwarded_for: office, detail: `role deploy, limited to landing web, expires ${iso(startedAt + 9 * DAY).replace(/\.\d+Z$/, 'Z')}` }],
+    [1310, { actor: { kind: 'token', name: 'web-ci' }, action: 'redeploy', application: 'worker', outcome: 'refused', status: 403, code: 'TOKEN_LIMITED', forwarded_for: '198.51.100.24' }],
+    [1180, { action: 'secret.set', target: 'STRIPE_KEY', status: 204, forwarded_for: office }],
+    [960, { action: 'access.grant', target: 'group:developers', status: 201, forwarded_for: office, detail: 'role deploy, limited to my-api web' }],
+    [955, { action: 'access.grant', target: 'ada@example.com', status: 201, forwarded_for: office, detail: 'role admin' }],
+    [610, { actor: ada, action: 'signin', status: 200, forwarded_for: office, detail: `role admin, expires ${iso(startedAt).replace(/\.\d+Z$/, 'Z')}` }],
+    [596, { actor: { kind: 'user', name: 'mallory@elsewhere.org' }, action: 'signin', outcome: 'refused', status: 403, code: 'ACCESS_NOT_GRANTED', forwarded_for: '192.0.2.144' }],
+    [480, { actor: ada, action: 'backup.create', application: 'postgres', status: 202, forwarded_for: office, detail: 'backup 12' }],
+    [420, { actor: ada, action: 'stop', application: 'docs', status: 200, forwarded_for: office }],
+    [300, { actor: { kind: 'token', name: 'viewer' }, action: 'stop', application: 'web', outcome: 'refused', status: 403, code: 'FORBIDDEN', forwarded_for: '203.0.113.201' }],
+    [190, { actor: ci, action: 'redeploy', application: 'web', status: 202, forwarded_for: '198.51.100.24', detail: `deployment ${deployment++}` }],
+    [120, { actor: ci, action: 'job.run', application: 'my-api', target: 'cleanup-sessions', outcome: 'failed', status: 409, code: 'JOB_ALREADY_RUNNING', forwarded_for: '198.51.100.24' }],
+    [62, { actor: ci, action: 'run', application: 'my-api', status: 202, forwarded_for: '198.51.100.24', detail: 'run 14' }],
+    [14, { action: 'certificate.set', target: '*.example.com', status: 200, forwarded_for: office }],
+  ]
+  for (const [minutes, entry] of recent) addAudit({ at: at(minutes), ...entry })
+}
+
+// ---------------------------------------------------------------------------
+// Signing in through a provider: rules, sessions, and a stand-in for the provider
+// ---------------------------------------------------------------------------
+
+const SESSION_HOURS = 10
+/** The accounts the stand-in provider knows, with the groups it reports for them. */
+const IDP_ACCOUNTS = {
+  'ada@example.com': ['developers', 'admins'],
+  'grace@example.com': ['developers'],
+  'sam@example.com': [],
+  'mallory@elsewhere.org': [],
+}
+
+function seedAccess() {
+  const add = (kind, subject, role, applications, daysAgo, by) => accessRules.push({ id: nextRuleId++, kind, subject, role, applications, created_at: ago(daysAgo * DAY), created_by: by })
+  add('email', 'ada@example.com', 'admin', [], 16, 'root')
+  add('group', 'developers', 'deploy', ['my-api', 'web'], 16, 'root')
+  add('domain', 'example.com', 'read', [], 9, 'ada@example.com')
+  // Somebody is signed in already, so that the list of sessions has a row.
+  const grace = resolveAccess('grace@example.com', IDP_ACCOUNTS['grace@example.com'])
+  sessions.set(newSessionValue(), { id: nextSessionId++, email: 'grace@example.com', groups: IDP_ACCOUNTS['grace@example.com'], role: grace.role, applications: grace.applications, created_at: ago(3 * HOUR), expires_at: iso(startedAt + 7 * HOUR), last_used_at: ago(12 * MINUTE), ended: null })
+}
+
+const newSessionValue = () => `sws_${randomBytes(32).toString('base64url')}`
+
+/**
+ * What the rules give a person: the most specific kind decides. An address,
+ * then the groups (the highest role; limits add up, and a group without a
+ * limit lifts it), then the domain. Null when no rule covers them.
+ */
+function resolveAccess(email, groups) {
+  const own = accessRules.find(r => r.kind === 'email' && r.subject === email)
+  if (own) return { role: own.role, applications: own.applications }
+  const byGroup = accessRules.filter(r => r.kind === 'group' && groups.includes(r.subject))
+  if (byGroup.length > 0) {
+    const role = ROLES[Math.max(...byGroup.map(r => ROLES.indexOf(r.role)))]
+    const same = byGroup.filter(r => r.role === role)
+    const unlimited = role !== 'deploy' || same.some(r => r.applications.length === 0)
+    return { role, applications: unlimited ? [] : [...new Set(same.flatMap(r => r.applications))].sort() }
+  }
+  const domain = accessRules.find(r => r.kind === 'domain' && email.endsWith(`@${r.subject}`))
+  return domain ? { role: domain.role, applications: domain.applications } : null
+}
+
+const sameAccess = (a, b) => a.role === b.role && a.applications.join(' ') === b.applications.join(' ')
+
+/** A session's identity; the rules are asked again on every request, and a session they no longer give the same ends with it. */
+function identifySession(value) {
+  const s = sessions.get(value)
+  if (!s) return null
+  if (!s.ended) {
+    const now = resolveAccess(s.email, s.groups)
+    if (!now) s.ended = { reason: 'rule_removed', message: `no rule on this server gives ${s.email} a role any more. An admin grants one with: shipwick access grant ${s.email} --role read` }
+    else if (!sameAccess(now, s)) s.ended = { reason: 'access_changed', message: `what ${s.email} may do on this server was changed. Sign in again` }
+  }
+  if (s.ended) throw new Ended('SESSION_ENDED', s.ended.message, { name: s.email, reason: s.ended.reason })
+  if (Date.parse(s.expires_at) <= Date.now()) {
+    throw new Ended('SESSION_EXPIRED', `the session of ${s.email} expired on ${moment(s.expires_at)}. Sign in again`, { name: s.email, expired_at: s.expires_at })
+  }
+  s.last_used_at = iso(Math.floor(Date.now() / MINUTE) * MINUTE)
+  return { name: s.email, role: s.role, kind: 'user', applications: s.applications, expires_at: s.expires_at }
+}
+
+/** Sessions that would be served right now: not expired, not ended, and still what the rules give. */
+function liveSessions() {
+  return [...sessions.values()].filter((s) => {
+    if (s.ended || Date.parse(s.expires_at) <= Date.now()) return false
+    const now = resolveAccess(s.email, s.groups)
+    return now !== null && sameAccess(now, s)
+  })
+}
+
+const subjectOf = rule => (rule.kind === 'group' ? `group:${rule.subject}` : rule.kind === 'domain' ? `*@${rule.subject}` : rule.subject)
+const grantDetail = rule => `role ${rule.role}${rule.applications.length ? `, limited to ${rule.applications.join(' ')}` : ''}`
+
+function signInConfig() {
+  const base = `http://${HOST}:${PORT}`
+  if (!SIGN_IN) return { configured: false, issuer: '', authorization_endpoint: '', client_id: '', scopes: [], redirect_uri: '' }
+  return { configured: true, issuer: `${base}/mock-idp`, authorization_endpoint: `${base}/mock-idp/authorize`, client_id: 'shipwick', scopes: ['openid', 'email', 'profile'], redirect_uri: SIGN_IN_REDIRECT }
+}
+
+/** The stand-in provider: a page of accounts to sign in as, then the redirect back with a code. */
+function mockProvider(url, res) {
+  const q = url.searchParams
+  const redirect = q.get('redirect_uri') ?? ''
+  if (q.get('client_id') !== 'shipwick' || redirect !== SIGN_IN_REDIRECT || q.get('response_type') !== 'code' || !q.get('code_challenge') || !q.get('state')) {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    return res.end('mock provider: this authorization request is not one the dashboard would send')
+  }
+  const account = q.get('login_hint') || IDP_USER
+  if (!account) {
+    const rows = Object.entries(IDP_ACCOUNTS).map(([email, groups]) => {
+      const next = new URL(url)
+      next.searchParams.set('login_hint', email)
+      return `<li><a href="${next.pathname}${next.search.replace(/&/g, '&amp;')}">${email}</a> <small>${groups.length ? `groups: ${groups.join(', ')}` : 'no groups'}</small></li>`
+    }).join('')
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mock sign-in provider</title><body style="font: 15px/1.5 system-ui; max-width: 30rem; margin: 12vh auto; padding: 0 1rem"><h1 style="font-size: 1.1rem">Mock sign-in provider</h1><p>This page stands in for the company's sign-in. Choose who signs in:</p><ul style="padding-left: 1.2rem">${rows}</ul><p><a href="${redirect}?error=access_denied&amp;state=${encodeURIComponent(q.get('state'))}">Cancel</a></p>`)
+  }
+  const code = randomBytes(24).toString('base64url')
+  idpCodes.set(code, { challenge: q.get('code_challenge'), nonce: q.get('nonce') ?? '', email: account, groups: IDP_ACCOUNTS[account] ?? [] })
+  const back = new URL(redirect)
+  back.searchParams.set('code', code)
+  back.searchParams.set('state', q.get('state'))
+  res.writeHead(302, { location: back.toString() })
+  return res.end()
+}
+
+/** POST /auth/exchange: redeems the provider's code and, if a rule covers who signed in, begins a session. */
+function exchange(req, res, body) {
+  const required = { code: /^[\x21-\x7E]{1,4096}$/, code_verifier: /^[A-Za-z0-9._~-]{43,128}$/, nonce: /^[A-Za-z0-9_-]{22,256}$/ }
+  for (const [field, pattern] of Object.entries(required)) {
+    if (typeof body[field] !== 'string' || !pattern.test(body[field])) throw new HttpError(400, 'INVALID_REQUEST', `${field} is required: what the sign-in began with, as the dashboard kept it`)
+  }
+  if (!SIGN_IN) throw new HttpError(409, 'SIGN_IN_NOT_CONFIGURED', 'signing in is not configured on this agent: it accepts API tokens only. An operator turns it on by setting SHIPWICK_OIDC_ISSUER')
+  if (body.redirect_uri !== SIGN_IN_REDIRECT) throw new HttpError(400, 'INVALID_REQUEST', `redirect_uri must be ${SIGN_IN_REDIRECT}: the dashboard this agent is configured with`, { redirect_uri: SIGN_IN_REDIRECT })
+  const failed = (reason, message) => new HttpError(401, 'SIGN_IN_FAILED', message, { reason })
+  const known = idpCodes.get(body.code)
+  idpCodes.delete(body.code)
+  if (!known || createHash('sha256').update(body.code_verifier).digest('base64url') !== known.challenge) {
+    throw failed('code_rejected', 'the sign-in provider refused the code: it was used before, has expired, or belongs to another sign-in. Sign in again')
+  }
+  if (known.nonce !== body.nonce) throw failed('nonce_mismatch', 'the sign-in provider\'s ID token answers another sign-in than this one. Sign in again')
+  if (usedNonces.has(body.nonce)) throw failed('nonce_reused', 'this sign-in was completed before. Sign in again')
+  usedNonces.add(body.nonce)
+
+  const access = resolveAccess(known.email, known.groups)
+  const actor = { kind: 'user', name: known.email }
+  if (!access) {
+    addAudit({ actor, ...addressesOf(req), action: 'signin', outcome: 'refused', status: 403, code: 'ACCESS_NOT_GRANTED' })
+    throw new HttpError(403, 'ACCESS_NOT_GRANTED', `${known.email} signed in, and no rule on this server gives that address a role. An admin grants one with: shipwick access grant ${known.email} --role read`, { email: known.email })
+  }
+  const value = newSessionValue()
+  const expiresAt = iso(Date.now() + SESSION_HOURS * HOUR)
+  sessions.set(value, { id: nextSessionId++, email: known.email, groups: known.groups, role: access.role, applications: access.applications, created_at: iso(Date.now()), expires_at: expiresAt, last_used_at: null, ended: null })
+  addAudit({ actor, ...addressesOf(req), action: 'signin', status: 200, detail: `role ${access.role}${access.applications.length ? `, limited to ${access.applications.join(' ')}` : ''}, expires ${expiresAt.replace(/\.\d+Z$/, 'Z')}` })
+  return sendJSON(res, 200, { session: value, identity: { name: known.email, role: access.role, kind: 'user', applications: access.applications, expires_at: expiresAt } })
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,17 +2092,54 @@ const HOSTNAME = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z
 const configError = fields => new HttpError(400, 'INVALID_CONFIG', 'invalid deploy.yaml', { fields })
 
 /**
- * Turns a deploy.yaml sent as JSON into a stored spec: defaults filled in,
+ * The document a deploy or a validation carries as its body: YAML, or JSON,
+ * which YAML subsumes. A document that cannot be read is INVALID_CONFIG with
+ * the parser's sentence and no fields, as the agent answers it.
+ */
+async function readConfig(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > 64 * 1024) throw new HttpError(413, 'INVALID_REQUEST', 'request body exceeds 64 KB')
+    chunks.push(chunk)
+  }
+  const text = Buffer.concat(chunks).toString('utf8')
+  let value
+  try {
+    value = text.trimStart().startsWith('{') ? JSON.parse(text) : parseYaml(text)
+  }
+  catch (error) {
+    throw new HttpError(400, 'INVALID_CONFIG', String(error.message).startsWith('yaml:') ? error.message : `yaml: ${error.message}`)
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new HttpError(400, 'INVALID_CONFIG', 'yaml: the document must be a mapping of keys, starting with name')
+  return value
+}
+
+const SPEC_KEYS = ['name', 'image', 'build', 'static', 'port', 'domain', 'aliases', 'redirects', 'replicas', 'env', 'health', 'resources', 'volumes', 'publish', 'entrypoint', 'command', 'user', 'pre_deploy', 'jobs', 'logging', 'path', 'proxy', 'backups', 'restart', 'deploy', 'init']
+
+/** "512mb", "1gb" as bytes; null for anything else. */
+function parseSize(text) {
+  const m = /^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)$/i.exec(String(text).trim())
+  return m ? Math.round(Number(m[1]) * { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 }[m[2].toLowerCase()]) : null
+}
+
+/**
+ * Turns a deploy.yaml into a stored spec: defaults filled in,
  * hostnames lowercased, the health block checked for exactly one kind. Far
  * from the agent's whole validation, but the same fields and wording where it
  * checks at all.
  */
 function parseSpec(name, body, { validating = false } = {}) {
-  if (body.name !== undefined && body.name !== name) {
-    throw new HttpError(400, 'INVALID_REQUEST', `the configuration names ${JSON.stringify(body.name)} but the URL names ${JSON.stringify(name)}`)
-  }
   const fields = []
   const problem = (field, message, expected) => fields.push({ field, message, ...(expected ? { expected } : {}) })
+  for (const key of Object.keys(body)) if (!SPEC_KEYS.includes(key) && !(BEFORE_06 && key === 'init')) problem(key, `unknown field ${JSON.stringify(key)}`)
+  if (BEFORE_06 && body.init !== undefined) problem('init', 'unknown field "init"')
+  if (body.name === undefined || body.name === null || body.name === '') problem('name', 'is required', 'my-api')
+  else if (typeof body.name !== 'string' || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(body.name)) problem('name', `invalid value ${JSON.stringify(String(body.name))}`, 'lowercase letters, digits and dashes, e.g. my-api')
+  else if (body.name !== name) {
+    throw new HttpError(400, 'INVALID_REQUEST', `the config describes application ${JSON.stringify(body.name)} but the URL names ${JSON.stringify(name)}`)
+  }
   const STATIC_EXCLUSIVE = 'does not apply to a static application: the proxy serves the files, there is no container'
 
   // A folder served by the proxy: a cleaned relative path, a domain, and nothing
@@ -1676,6 +2164,18 @@ function parseSpec(name, body, { validating = false } = {}) {
       if (body[key] !== undefined && body[key] !== null) problem(key, STATIC_EXCLUSIVE)
     }
     if (body.replicas !== undefined && body.replicas !== 1) problem('replicas', STATIC_EXCLUSIVE)
+    if (body.init !== undefined && body.init !== null && !BEFORE_06) problem('init', STATIC_EXCLUSIVE)
+  }
+  else if (body.init !== undefined && body.init !== null && typeof body.init !== 'boolean' && !BEFORE_06) problem('init', `invalid value ${JSON.stringify(body.init)}`, 'true or false')
+
+  // Limits are written with a unit in deploy.yaml and stored in bytes.
+  let resources = {}
+  if (body.resources !== undefined && body.resources !== null) {
+    const r = body.resources
+    if (r.cpu !== undefined && (typeof r.cpu !== 'number' || r.cpu <= 0)) problem('resources.cpu', `invalid value ${JSON.stringify(r.cpu)}`, '0.5, 1, 2, ...')
+    const bytes = r.memory_bytes ?? (r.memory === undefined ? undefined : parseSize(r.memory))
+    if (r.memory !== undefined && bytes === null) problem('resources.memory', `invalid value ${JSON.stringify(r.memory)}`, '128mb, 512mb, 1gb, ...')
+    resources = { ...(r.cpu ? { cpu: r.cpu } : {}), ...(bytes ? { memory_bytes: bytes } : {}) }
   }
 
   // Built where shipwick deploy runs: the document arrives with the shipwick.local/ image the agent was sent.
@@ -1800,7 +2300,17 @@ function parseSpec(name, body, { validating = false } = {}) {
       else if (cronNext(String(b.schedule), Date.now()) === null) problem('backups.schedule', `invalid value ${JSON.stringify(b.schedule)}: not a five-field cron expression that ever fires`, example)
       if (b.keep !== undefined && (!Number.isInteger(b.keep) || b.keep < 1 || b.keep > 365)) problem('backups.keep', `invalid value ${b.keep}`, 'a number between 1 and 365')
       if (!body.volumes?.length) problem('backups', 'needs volumes: a backup is an archive of the application\'s volumes', 'volumes:\n    - name: data\n      path: /var/lib/postgresql/data')
-      backupPlan = { schedule: String(b.schedule ?? ''), keep: b.keep ?? 7, ...(b.before ? { before: [].concat(b.before) } : {}), ...(b.stop ? { stop: true } : {}) }
+      // How long the command before the archive gets; an hour when the block does not say.
+      let beforeTimeout
+      const timeoutExample = '30m, 2h, ... (1s to 24h)'
+      if (b.before_timeout !== undefined && b.before_timeout !== null && b.before_timeout !== '' && !BEFORE_06) {
+        const limit = typeof b.before_timeout === 'string' ? parseDuration(b.before_timeout) : null
+        if (!b.before) problem('backups.before_timeout', 'needs backups.before: it is that command\'s time limit', timeoutExample)
+        else if (limit === null || limit < SECOND || limit > 24 * HOUR) problem('backups.before_timeout', `invalid value ${JSON.stringify(b.before_timeout)}`, timeoutExample)
+        else beforeTimeout = formatGoDuration(limit)
+      }
+      else if (b.before && !BEFORE_06) beforeTimeout = '1h0m0s'
+      backupPlan = { schedule: String(b.schedule ?? ''), keep: b.keep ?? 7, ...(b.before ? { before: [].concat(b.before) } : {}), ...(beforeTimeout ? { before_timeout: beforeTimeout } : {}), ...(b.stop ? { stop: true } : {}) }
     }
   }
 
@@ -1867,13 +2377,14 @@ function parseSpec(name, body, { validating = false } = {}) {
     replicas: body.replicas ?? 1,
     ...(body.env ? { env: Object.fromEntries(Object.keys(body.env).map(k => [k, MASK])) } : {}),
     ...(health ? { health } : {}),
-    resources: body.resources ?? {},
+    resources,
     ...(body.volumes?.length ? { volumes: body.volumes } : {}),
     ...(publish?.length ? { publish } : {}),
     ...(body.entrypoint ? { entrypoint: [].concat(body.entrypoint) } : {}),
     ...(body.command ? { command: [].concat(body.command) } : {}),
     ...(body.user ? { user: body.user } : {}),
     ...(body.logging ? { logging: body.logging } : {}),
+    ...(body.init === true && !BEFORE_06 ? { init: true } : {}),
     ...routing,
     ...(backupPlan ? { backups: backupPlan } : {}),
     restart: body.restart ?? { policy: 'always' },
@@ -2303,12 +2814,65 @@ function standbyView() {
     applications: waiting.map(([app, active]) => ({ name: app.name, version: active.version, hostnames: hostnamesOf(active.spec), imported_at: active.completed_at ?? active.started_at })),
     records: recordsFor(waiting),
     pull: IS_STANDBY ? { ...standbyPull } : null,
+    ...(BEFORE_06 ? {} : { promotion }),
   }
 }
 
 function requireNoImport() {
   if (lastImport?.status === 'running') throw new HttpError(409, 'IMPORT_IN_PROGRESS', 'an import is running on this server; follow it with: shipwick import --status')
 }
+
+/** The promotion that runs or ran last; null on a server that was never promoted. */
+let promotion = null
+let promotionCount = 0
+
+function requireNoPromotion() {
+  if (promotion && promotion.completed_at === null) throw new HttpError(409, 'PROMOTION_IN_PROGRESS', 'a promotion is running on this server; follow it with: shipwick standby promote')
+}
+
+/**
+ * Starts what waits stopped, one application after the other, `pace` each:
+ * pending → starting → running. The record is what GET /standby/promotion
+ * answers while it runs and afterwards. An application named `shop` is
+ * started and not ready within its budget, so that outcome can be seen too.
+ */
+function startPromotion(pace = 3 * SECOND, byWho = '') {
+  const waiting = standbyApplications()
+  const record = {
+    applications: waiting.map(([app]) => ({ name: app.name, status: 'pending', message: '' })),
+    records: recordsFor(waiting),
+    id: ++promotionCount,
+    status: 'running',
+    started_at: iso(Date.now()),
+    completed_at: null,
+  }
+  promotion = record
+  waiting.forEach(([app, active], i) => {
+    setTimeout(() => {
+      record.applications[i].status = 'starting'
+    }, 400 + i * pace).unref()
+    setTimeout(() => {
+      const entry = record.applications[i]
+      if (apps.get(app.name) !== app) return Object.assign(entry, { status: 'failed', message: 'the application was deleted while the promotion ran' })
+      app.desired_state = 'running'
+      app.containers = makeContainers(app, { ...active, completed_at: iso(Date.now()) })
+      app.updated_at = iso(Date.now())
+      addAppEvent(app.name, 'info', 'app', `Application started${byWho}`)
+      if (app.name === 'shop') Object.assign(entry, { status: 'started', message: 'its replica did not pass the health check within 2m; it keeps being checked: shipwick status shop' })
+      else entry.status = 'running'
+    }, 400 + (i + 1) * pace).unref()
+  })
+  setTimeout(() => {
+    Object.assign(record, { status: record.applications.some(a => a.status === 'failed') ? 'failed' : 'succeeded', completed_at: iso(Date.now()) })
+  }, 600 + waiting.length * pace).unref()
+  return record
+}
+
+/** What a promotion with nothing to start is answered: complete, and not recorded. */
+const emptyPromotion = () => ({ applications: [], records: [], id: 0, status: 'succeeded', started_at: iso(Date.now()), completed_at: iso(Date.now()) })
+
+// What the backup destination "holds" beyond the agent's lists, until it has been adopted.
+let adoptable = true
 
 /**
  * An import that works through the applications one by one, a second and a
@@ -2410,11 +2974,15 @@ function startBackground() {
 
 function sendJSON(res, status, data, headers = {}) {
   const body = JSON.stringify({ data })
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers })
+  // Set, not only written: the audit trail reads Location back to name what a request made.
+  for (const [name, value] of Object.entries(headers)) res.setHeader(name, value)
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
   res.end(body)
 }
 
 function sendError(res, status, code, message, details = {}) {
+  // The audit trail's entry for the request names the code it was refused or failed with.
+  res.auditCode = code
   const body = JSON.stringify({ error: { code, message, details } })
   res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
   res.end(body)
@@ -2591,6 +3159,21 @@ const IMAGE_PATTERN = /^[a-z0-9]+([._\-/:][a-z0-9]+)*(:[\w][\w.-]{0,127})?(@sha2
 
 const COLLECTIONS = ['applications', 'deployments', 'tokens', 'secrets', 'volumes', 'registries', 'certificates', 'exports']
 
+// What 0.6 added. `none`: answered without a token, to whoever asks.
+const ROUTES_06 = {
+  'GET /audit': 'admin',
+  'POST /server/backups/adopt': 'admin',
+  'GET /standby/promotion': 'read',
+  'GET /auth': 'none',
+  'POST /auth/exchange': 'none',
+  'DELETE /auth/session': 'read',
+  'GET /access/rules': 'admin',
+  'POST /access/rules': 'admin',
+  'DELETE /access/rules/:p': 'admin',
+  'GET /access/sessions': 'admin',
+  'DELETE /access/sessions/:p': 'admin',
+}
+
 // What 0.5 added. An agent before it answers every one of these with ENDPOINT_NOT_FOUND.
 const ROUTES_05 = {
   'POST /applications/:p/validate': 'deploy',
@@ -2663,6 +3246,7 @@ const ROUTES = {
   'GET /volumes': 'read',
   'DELETE /volumes/:p': 'admin',
   ...(OLD_AGENT ? {} : ROUTES_05),
+  ...(BEFORE_06 ? {} : ROUTES_06),
 }
 
 /** The route a request is looked up under: names and ids replaced by :p, :x and :y. */
@@ -2673,7 +3257,8 @@ function routeOf(method, segments) {
     if (s.length > 3 && ['volumes', 'runs', 'jobs', 'backups'].includes(s[2])) s[3] = ':x'
     if (s.length > 5 && s[2] === 'backups' && s[4] === 'volumes') s[5] = ':y'
   }
-  if (s[0] === 'server' && s[1] === 'backups' && s.length > 2) s[2] = ':x'
+  if (s[0] === 'server' && s[1] === 'backups' && s.length > 2 && s[2] !== 'adopt') s[2] = ':x'
+  if (s[0] === 'access' && s.length > 2) s[2] = ':p'
   return `${method} /${s.join('/')}`
 }
 
@@ -2688,6 +3273,8 @@ async function handle(req, res) {
   if (method === 'GET' && path === '/api/v1/health') {
     return sendJSON(res, 200, { status: 'ok', version: VERSION })
   }
+  // Not the agent: the page a sign-in provider would show.
+  if (method === 'GET' && path === '/mock-idp/authorize' && !BEFORE_06) return mockProvider(url, res)
 
   const segments = path.startsWith('/api/v1/') ? path.split('/').filter(Boolean).slice(2).map(decodeURIComponent) : []
   const route = routeOf(method, segments)
@@ -2705,15 +3292,39 @@ async function handle(req, res) {
     res.setHeader('retry-after', String(retryAfter))
     return sendError(res, 429, 'RATE_LIMITED', 'too many failed authentications from this address; try again in a minute')
   }
-  const who = identify(req.headers.authorization)
+  // The two endpoints a sign-in needs before anybody is signed in.
+  if (required === 'none') {
+    if (route === 'GET /auth') return sendJSON(res, 200, signInConfig())
+    try {
+      return exchange(req, res, await readJSON(req, ['code', 'code_verifier', 'nonce', 'redirect_uri'], 16 * 1024, '{"code", "code_verifier", "nonce", "redirect_uri"}'))
+    }
+    catch (error) {
+      // A sign-in that failed counts like a wrong token; one that no rule covers does not.
+      if (error instanceof HttpError && error.status === 401) recordAuthFailure(address)
+      throw error
+    }
+  }
+  let who
+  try {
+    who = identify(req.headers.authorization)
+  }
+  catch (error) {
+    if (!(error instanceof Ended)) throw error
+    // Told to the holder only, and not a failed authentication: the credential was a real one.
+    res.setHeader('www-authenticate', 'Bearer realm="shipwick", error="invalid_token"')
+    return sendError(res, 401, error.code, error.message, error.details)
+  }
   if (!who) {
     recordAuthFailure(address)
     res.setHeader('www-authenticate', 'Bearer realm="shipwick"')
     return sendError(res, 401, 'UNAUTHORIZED', 'missing or invalid API token')
   }
+  // Written when the request has been answered, whatever the answer: refusals are part of the trail.
+  if (!BEFORE_06 && AUDITED[route]) auditWhenAnswered(req, res, route, segments, who)
   if (!roleCovers(who.role, required)) {
-    return sendError(res, 403, 'FORBIDDEN', forbiddenMessage(who.role, required), { role: who.role, required })
+    return sendError(res, 403, 'FORBIDDEN', forbiddenMessage(who, required), { role: who.role, required })
   }
+  if (!BEFORE_06) refuseLimited(who, required, segments)
   // Stop/start events name the actor unless it is root, as the agent does.
   const byWho = who.name === 'root' ? '' : ` by ${who.name}`
 
@@ -2722,7 +3333,7 @@ async function handle(req, res) {
       const routes = [...apps.values()].filter(a => appSummary(a).domain && a.desired_state === 'running' && a.active_deployment_id).length
       return sendJSON(res, 200, {
         agent_version: VERSION,
-        hostname: 'shipwick-fsn1-01',
+        hostname: SERVER_HOSTNAME,
         os: 'Ubuntu 24.04.1 LTS',
         kernel: '6.8.0-51-generic',
         architecture: 'x86_64',
@@ -2735,6 +3346,14 @@ async function handle(req, res) {
         token: who,
         notifications: { webhook: WEBHOOK },
         ...(OLD_AGENT ? {} : { dashboard_url: DASHBOARD_URL, alerts: activeAlerts(), disk: diskUsage(), backups: backupStatus() }),
+        ...(BEFORE_06
+          ? {}
+          : {
+              network: NETWORK
+                ? { proxy: 'proxy.corp.example:3128', docker_proxy: false, ca_file: true, dns_resolvers: ['system'], acme_directory: 'https://ca.corp.example/acme/acme/directory' }
+                : { proxy: '', docker_proxy: false, ca_file: false, dns_resolvers: [], acme_directory: '' },
+              sign_in: { configured: SIGN_IN, issuer: signInConfig().issuer },
+            }),
       })
     }
 
@@ -2756,8 +3375,7 @@ async function handle(req, res) {
     case 'POST /applications/:p/validate': {
       // What deploy would answer for the same document, without recording anything. An unknown application is not an error: it is what a first deployment looks like.
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
-      const body = await readJSON(req, null)
-      const sp = parseSpec(param, body, { validating: true })
+      const sp = parseSpec(param, await readConfig(req), { validating: true })
       checkConflicts(apps.get(param) ?? null, sp)
       return sendJSON(res, 200, { valid: true })
     }
@@ -2876,6 +3494,119 @@ async function handle(req, res) {
       return sendJSON(res, 202, backupView(run), { location: `/api/v1/server/backups/${run.id}` })
     }
 
+    case 'POST /server/backups/adopt': {
+      const body = await readJSON(req, ['application'])
+      if (body.application !== undefined && (typeof body.application !== 'string' || !APPLICATION_NAME.test(body.application))) {
+        throw new HttpError(400, 'INVALID_REQUEST', 'application: lowercase letters, digits and dashes only')
+      }
+      if (ADOPT_FOREIGN) {
+        throw new HttpError(409, 'FOREIGN_BUCKET', 'the bucket holds the backups of another Shipwick installation under this prefix: to carry on as that installation, restore its state on this server (handbook: Restoring the agent\'s state); to keep the two apart, set SHIPWICK_BACKUP_S3_PREFIX to a prefix of this server\'s own')
+      }
+      // What a restored database has forgotten: two of postgres's backups, one of the state, and a state backup that was never finished.
+      const found = adoptable && apps.has('postgres')
+        ? [
+            ['application', 'postgres', { startedAtMs: Date.now() - 26 * HOUR, volumes: [{ volume: 'data', size_bytes: 2254857830 }] }],
+            ['application', 'postgres', { startedAtMs: Date.now() - 2 * HOUR, volumes: [{ volume: 'data', size_bytes: 2273208910 }] }],
+            ['state', '', { startedAtMs: Date.now() - 20 * HOUR, volumes: [{ volume: 'shipwick.db', size_bytes: 1560576 }, { volume: 'encryption.key', size_bytes: 1536 }] }],
+          ].filter(([, application]) => body.application === undefined || application === body.application)
+        : []
+      const adopted = found.map(([kind, application, run]) => ({
+        kind,
+        application,
+        backup: backupView(addBackup(kind === 'state' ? STATE : application, { trigger: 'adopted', durationMs: 0, status: 'succeeded', ...run })),
+      }))
+      const skipped = found.length > 0 && body.application === undefined
+        ? [{ kind: 'state', application: '', id: nextBackupId++, reason: 'encryption.key.enc is missing: the backup was not finished' }]
+        : []
+      if (found.length > 0 && body.application === undefined) adoptable = false
+      return sendJSON(res, 200, { adopted, skipped })
+    }
+
+    case 'GET /audit': {
+      const application = url.searchParams.get('application') ?? ''
+      if (application !== '' && !APPLICATION_NAME.test(application)) throw new HttpError(400, 'INVALID_REQUEST', 'application: lowercase letters, digits and dashes only')
+      const actor = url.searchParams.get('actor') ?? ''
+      const since = url.searchParams.get('since') ? parseSince(url.searchParams.get('since')) : null
+      const limit = intParam(url, 'limit', 50, 1, 500)
+      const before = intParam(url, 'before', 0, 0, Number.MAX_SAFE_INTEGER)
+      const list = audit
+        .filter(e => (application === '' || e.application === application) && (actor === '' || e.actor.name === actor) && (since === null || Date.parse(e.at) >= since) && (before === 0 || e.id < before))
+        .sort((a, b) => b.id - a.id)
+        .slice(0, limit)
+      return sendJSON(res, 200, list)
+    }
+
+    case 'GET /standby/promotion':
+      if (!promotion) throw new HttpError(404, 'NOT_FOUND', 'this server was never promoted')
+      return sendJSON(res, 200, promotion)
+
+    case 'DELETE /auth/session': {
+      const value = String(req.headers.authorization ?? '').slice(7)
+      if (who.kind !== 'user' || !sessions.has(value)) throw new HttpError(400, 'INVALID_REQUEST', 'this request was made with an API token, which has no session to end; a token is revoked with: shipwick token revoke')
+      // Signed out by its holder: the session is gone, and its value is a wrong token from now on.
+      sessions.delete(value)
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /access/rules':
+      return sendJSON(res, 200, accessRules)
+
+    case 'POST /access/rules': {
+      const body = await readJSON(req, ['kind', 'subject', 'role', 'applications'])
+      if (!body.kind || !body.subject) throw new HttpError(400, 'INVALID_REQUEST', 'kind and subject are required, e.g. {"kind": "email", "subject": "ada@example.com", "role": "deploy"}')
+      if (body.role === undefined || body.role === '') throw new HttpError(400, 'INVALID_REQUEST', 'role is required: read, deploy or admin')
+      if (!ROLES.includes(body.role)) throw new HttpError(400, 'INVALID_REQUEST', `invalid role ${JSON.stringify(body.role)}: use read, deploy or admin`)
+      let subject = String(body.subject)
+      if (body.kind === 'email') {
+        subject = subject.toLowerCase()
+        if (!/^[a-z0-9._%+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', 'not an e-mail address; use one like ada@example.com')
+      }
+      else if (body.kind === 'domain') {
+        subject = subject.toLowerCase()
+        if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', `invalid domain ${JSON.stringify(subject)}: use the part after the @, e.g. example.com`)
+      }
+      else if (body.kind === 'group') {
+        // eslint-disable-next-line no-control-regex
+        if (subject.length > 256 || subject !== subject.trim() || /[\x00-\x1F\x7F]/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', 'invalid group: use the name as the provider sends it, at most 256 characters')
+      }
+      else throw new HttpError(400, 'INVALID_REQUEST', `invalid kind ${JSON.stringify(body.kind)}: use email, group or domain`)
+      const applications = validateLimits(body.role, body.applications)
+      if (applications === null) throw new HttpError(400, 'INVALID_REQUEST', 'only the deploy role can be limited to applications: read changes nothing, and admin is for the whole server')
+      const existing = accessRules.find(r => r.kind === body.kind && r.subject === subject)
+      if (!existing && accessRules.length >= 200) throw new HttpError(400, 'INVALID_REQUEST', 'at most 200 access rules can be stored; a group or a domain covers many people with one')
+      // Granting again replaces the rule: 200 instead of 201.
+      const rule = existing ?? { id: nextRuleId++, kind: body.kind, subject }
+      Object.assign(rule, { role: body.role, applications, created_at: iso(Date.now()), created_by: who.name })
+      if (!existing) accessRules.push(rule)
+      res.auditTarget = subjectOf(rule)
+      res.auditDetail = grantDetail(rule)
+      return sendJSON(res, existing ? 200 : 201, rule)
+    }
+
+    case 'DELETE /access/rules/:p': {
+      const id = Number(segments[2])
+      if (!Number.isInteger(id) || id < 1) throw new HttpError(400, 'INVALID_REQUEST', 'rule id must be a positive number')
+      const index = accessRules.findIndex(r => r.id === id)
+      res.auditTarget = index === -1 ? String(id) : subjectOf(accessRules[index])
+      if (index === -1) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      accessRules.splice(index, 1)
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /access/sessions':
+      return sendJSON(res, 200, liveSessions().map(({ id, email, role, applications, created_at, expires_at, last_used_at }) => ({ id, email, role, applications, created_at, expires_at, last_used_at })))
+
+    case 'DELETE /access/sessions/:p': {
+      const email = String(segments[2] ?? '').toLowerCase()
+      if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new HttpError(400, 'INVALID_REQUEST', 'not an e-mail address; use one like ada@example.com')
+      const mine = liveSessions().filter(s => s.email === email)
+      for (const s of mine) s.ended = { reason: 'signed_out', message: 'an admin ended this session. Sign in again' }
+      res.auditDetail = plural(mine.length, 'session')
+      return sendJSON(res, 200, { sessions: mine.length })
+    }
+
     case 'POST /server/rotate-key': {
       if (KEY_FROM_ENVIRONMENT && rotationPending) {
         throw new HttpError(409, 'KEY_ROTATION_PENDING', 'the key was already rotated since the agent started, and its environment still holds the old one: put the new key in the agent\'s environment and restart it first', { key_file: `${DATA_DIR}/encryption.key.new` })
@@ -2924,6 +3655,7 @@ async function handle(req, res) {
       if (type.trim() !== 'application/octet-stream') throw new HttpError(400, 'INVALID_REQUEST', 'the body must be an export sent as Content-Type: application/octet-stream')
       const stopped = boolParam(url, 'stopped')
       const overwrite = boolParam(url, 'overwrite')
+      requireNoPromotion()
       if (!req.headers['x-shipwick-passphrase']) throw new HttpError(400, 'INVALID_REQUEST', 'the passphrase of the export is sent base64-encoded in the X-Shipwick-Passphrase header')
       requireNoImport()
       const chunks = []
@@ -2952,6 +3684,7 @@ async function handle(req, res) {
     case 'POST /standby/pull': {
       if (!IS_STANDBY) throw new HttpError(409, 'STANDBY_NOT_CONFIGURED', 'this agent has no bucket to fetch exports from: set SHIPWICK_BACKUP_S3_* and SHIPWICK_BACKUP_PASSPHRASE to those of the server it stands by for, and SHIPWICK_STANDBY_SCHEDULE')
       requireNoImport()
+      requireNoPromotion()
       standbyPull.last_export += 1
       standbyPull.last_at = iso(Date.now())
       const run = startImport({ source: `export #${standbyPull.last_export} from the bucket`, stopped: true, overwrite: true })
@@ -2960,6 +3693,25 @@ async function handle(req, res) {
 
     case 'POST /standby/promote': {
       requireNoImport()
+      if (!BEFORE_06) {
+        const raw = url.searchParams.get('wait')
+        if (raw !== null && raw !== 'true' && raw !== 'false') throw new HttpError(400, 'INVALID_REQUEST', 'wait must be true or false')
+        requireNoPromotion()
+        // Nothing waits: answered complete, and the record of the last real promotion stays.
+        if (standbyApplications().length === 0) return sendJSON(res, 200, emptyPromotion())
+        const record = startPromotion(3 * SECOND, byWho)
+        if (raw === 'false') return sendJSON(res, 202, record, { location: '/api/v1/standby/promotion' })
+        // Held until it has ended, as a client from before 0.6 expects.
+        await new Promise((resolve) => {
+          const timer = setInterval(() => {
+            if (record.completed_at !== null) {
+              clearInterval(timer)
+              resolve()
+            }
+          }, 250)
+        })
+        return sendJSON(res, 200, record)
+      }
       const waiting = standbyApplications()
       // Started in the order they were imported; the answer comes when the last one is ready.
       await new Promise(resolve => setTimeout(resolve, 1200 + waiting.length * 900))
@@ -3041,12 +3793,10 @@ async function handle(req, res) {
     }
 
     case 'POST /applications/:p/deploy': {
-      // The dashboard never deploys a raw spec; the CLI would. JSON only: see the header.
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
       const digest = url.searchParams.get('static')
       if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new HttpError(400, 'INVALID_REQUEST', 'static: must be the digest PUT …/static answered, sha256:<64 hex characters>')
-      const body = await readJSON(req, null)
-      const sp = parseSpec(param, body)
+      const sp = parseSpec(param, await readConfig(req))
       let files = null
       if (isStaticSpec(sp)) {
         if (digest === null) throw new HttpError(400, 'INVALID_REQUEST', `static: the folder ${sp.static.dir}/ has not been uploaded for this deployment; upload it with PUT /applications/${param}/static first and pass its digest as ?static=`)
@@ -3295,7 +4045,7 @@ async function handle(req, res) {
       return sendJSON(res, 200, [...tokens.values()].sort((a, b) => a.id - b.id).map(tokenView))
 
     case 'POST /tokens': {
-      const body = await readJSON(req, ['name', 'role'])
+      const body = await readJSON(req, BEFORE_06 ? ['name', 'role'] : ['name', 'role', 'applications', 'expires_at'])
       if (body.name === undefined || body.name === '') throw new HttpError(400, 'INVALID_REQUEST', 'name is required, e.g. {"name": "ci", "role": "deploy"}')
       if (body.role === undefined || body.role === '') throw new HttpError(400, 'INVALID_REQUEST', 'role is required: read, deploy or admin')
       if (typeof body.name !== 'string' || !TOKEN_NAME.test(body.name)) {
@@ -3304,7 +4054,18 @@ async function handle(req, res) {
       if (body.name === 'root') throw new HttpError(400, 'INVALID_REQUEST', '"root" is the name of the token the agent is configured with; choose another')
       if (!ROLES.includes(body.role)) throw new HttpError(400, 'INVALID_REQUEST', `invalid role ${JSON.stringify(body.role)}: use read, deploy or admin`)
       if (tokens.has(body.name)) throw new HttpError(409, 'TOKEN_EXISTS', `a token named ${JSON.stringify(body.name)} exists`)
-      const t = addToken(body.name, body.role, Date.now(), null)
+      const applications = validateLimits(body.role, body.applications)
+      if (applications === null) throw new HttpError(400, 'INVALID_REQUEST', 'only a deploy token can be limited to applications: a read token changes nothing, and admin is for the whole server')
+      let expiresAtMs = null
+      if (body.expires_at !== undefined && body.expires_at !== null) {
+        expiresAtMs = typeof body.expires_at === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(body.expires_at) ? Date.parse(body.expires_at) : Number.NaN
+        if (Number.isNaN(expiresAtMs)) throw new HttpError(400, 'INVALID_REQUEST', 'invalid JSON body: expires_at must be an RFC 3339 time, e.g. 2027-01-31T23:59:59Z')
+        if (expiresAtMs <= Date.now()) throw new HttpError(400, 'INVALID_REQUEST', 'expires_at is in the past: a token that has expired already would be of no use')
+      }
+      const t = addToken(body.name, body.role, Date.now(), null, undefined, { applications, expiresAtMs })
+      res.auditTarget = t.name
+      res.auditDetail = `role ${t.role}${applications.length ? `, limited to ${applications.join(' ')}` : ''}${expiresAtMs === null ? '' : `, expires ${iso(expiresAtMs).replace(/\.\d+Z$/, 'Z')}`}`
+
       const { last_used_at: _unused, ...created } = tokenView(t)
       return sendJSON(res, 201, { ...created, token: t.value })
     }
@@ -3395,7 +4156,7 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Shipwick mock agent on http://${HOST}:${PORT}/api/v1`)
-  console.log(`token: ${TOKEN} (${TOKEN_IDENTITY.name}, ${TOKEN_IDENTITY.role})`)
+  console.log(`token: ${TOKEN} (${TOKEN_NAME_OF_ROLE}, ${ROLE}${TOKEN_LIMIT.length && ROLE === 'deploy' ? `, limited to ${TOKEN_LIMIT.join(' ')}` : ''})`)
 })
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

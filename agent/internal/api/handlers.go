@@ -36,6 +36,7 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server.Token = principalFrom(r.Context())
+	server.SignIn = s.signInStatus()
 	writeJSON(w, http.StatusOK, server)
 }
 

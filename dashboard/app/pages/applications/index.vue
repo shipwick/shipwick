@@ -7,6 +7,7 @@ useHead({ title: 'Applications' })
 
 const agent = useAgent()
 const router = useRouter()
+const access = useAccess()
 const apps = usePolling<Application[]>(signal => agent.get<Application[]>('/applications', { signal }))
 
 const query = ref('')
@@ -41,8 +42,12 @@ function replicaTone(app: Application): string {
         <label class="relative flex items-center">
           <span class="sr-only">Filter applications</span>
           <UiIcon name="search" :size="14" class="pointer-events-none absolute left-2 text-fg-subtle" />
-          <input v-model="query" type="search" placeholder="Filter" class="input !h-7 w-44 !pl-7 !text-xs" spellcheck="false" autocomplete="off">
+          <input v-model="query" type="search" placeholder="Filter" class="input !h-7 w-44 !pl-7 !text-xs max-sm:w-32" spellcheck="false" autocomplete="off">
         </label>
+        <!-- Only for a token that can deploy: a read token is not shown a button it cannot use. -->
+        <UiButton v-if="access.knownTo('deploy')" variant="primary" size="sm" to="/deploy">
+          New application
+        </UiButton>
       </template>
     </PageHeader>
 
@@ -61,6 +66,9 @@ function replicaTone(app: Application): string {
         <EmptyState v-else-if="(apps.data.value?.length ?? 0) === 0" title="No applications yet">
           Applications appear here after their first deployment. In your project directory, run
           <span class="mono text-fg">shipwick init</span> and then <span class="mono text-fg">shipwick deploy</span>.
+          <template v-if="access.knownTo('deploy')">
+            For an image that is in a registry already, <NuxtLink to="/deploy" class="link">paste its deploy.yaml here</NuxtLink>.
+          </template>
         </EmptyState>
         <EmptyState v-else-if="rows.length === 0" :title="`No application matches “${query.trim()}”`" />
         <div v-else class="overflow-x-auto">
@@ -71,7 +79,7 @@ function replicaTone(app: Application): string {
                 <th>Status</th>
                 <th>Version</th>
                 <th>Replicas</th>
-                <th>Domain</th>
+                <th>Address</th>
                 <th class="right">
                   Updated
                 </th>
@@ -83,8 +91,9 @@ function replicaTone(app: Application): string {
                   <NuxtLink :to="`/applications/${app.name}`" class="mono font-medium hover:underline">{{ app.name }}</NuxtLink>
                 </td>
                 <td data-label="Status">
-                  <span class="inline-flex items-center gap-2">
+                  <span class="inline-flex flex-wrap items-center gap-x-2 gap-y-1 max-sm:justify-end">
                     <StatusBadge v-bind="applicationStatusDisplay(app.status)" :raw="app.status" />
+                    <ApplicationMarks :application="app" />
                     <template v-if="app.deploying">
                       <NuxtLink
                         v-if="app.in_flight_deployment_id"
@@ -107,7 +116,7 @@ function replicaTone(app: Application): string {
                   </span>
                   <span v-else>—</span>
                 </td>
-                <td data-label="Domain">
+                <td data-label="Address">
                   <!-- With a path, several applications share one domain: the address is domain and path. -->
                   <a
                     v-if="applicationUrl(app)"

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func (f *fixture) createToken(name string, role api.Role) api.CreatedToken {
 func TestRootTokenIsAdminAndKnowsItself(t *testing.T) {
 	f := newFixture(t)
 	_, body := f.do("GET", "/api/v1/server", "")
-	if server := decode[api.Server](t, body); server.Token != (api.TokenIdentity{Name: api.RootTokenName, Role: api.RoleAdmin}) {
+	if server := decode[api.Server](t, body); !reflect.DeepEqual(server.Token, api.TokenIdentity{Kind: api.ActorToken, Name: api.RootTokenName, Role: api.RoleAdmin, Applications: []string{}}) {
 		t.Errorf("token = %+v, want root/admin", server.Token)
 	}
 }
@@ -43,7 +44,7 @@ func TestTokenLifecycle(t *testing.T) {
 
 	// It is a token: it authenticates, and it knows who it is.
 	status, body := f.doWithAuth("GET", "/api/v1/server", "", auth)
-	if server := decode[api.Server](t, body); status != http.StatusOK || server.Token != (api.TokenIdentity{Name: "ci", Role: api.RoleDeploy}) {
+	if server := decode[api.Server](t, body); status != http.StatusOK || !reflect.DeepEqual(server.Token, api.TokenIdentity{Kind: api.ActorToken, Name: "ci", Role: api.RoleDeploy, Applications: []string{}}) {
 		t.Errorf("status = %d, token = %+v", status, server.Token)
 	}
 

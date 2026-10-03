@@ -118,6 +118,7 @@ func (e *Engine) launchJob(ctx context.Context, d store.Deployment, run store.Jo
 		Command:    run.Command,
 		User:       d.Spec.User,
 		Job:        &docker.JobSpec{Name: run.Job, RunID: run.ID},
+		Init:       d.Spec.Init,
 	}
 	id, name, err := e.createContainer(ctx, cspec)
 	if err != nil {

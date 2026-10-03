@@ -111,7 +111,11 @@ func (c *cli) status(ctx context.Context, name string, verbose bool) error {
 	if len(app.Containers) > 0 {
 		c.ui.Println()
 		rows := make([][]ui.Cell, 0, len(app.Containers))
-		for _, ct := range app.Containers {
+		for _, ct := range replicasFirst(app.Containers) {
+			if ct.Stopping {
+				rows = append(rows, stoppingRow(ct))
+				continue
+			}
 			rows = append(rows, []ui.Cell{
 				ui.C(fmt.Sprint(ct.Replica)),
 				ui.C(ct.Name),
@@ -198,7 +202,11 @@ func (c *cli) psCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ps",
 		Short: "List the applications on the server",
-		Args:  cobra.NoArgs,
+		Long: `List the applications on the server.
+
+An application with a certificate that is not in order, or with active
+alerts, says so at the end of its line; ` + "`shipwick status <app>`" + ` has the details.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := c.connect()
 			if err != nil {
@@ -231,9 +239,10 @@ func (c *cli) psCommand() *cobra.Command {
 					ui.C(replicas),
 					ui.C(app.Domain + app.Path),
 					ui.C(ui.RelativeTime(app.UpdatedAt, now)),
+					attention(app),
 				})
 			}
-			c.ui.Table([]string{"NAME", "STATUS", "VERSION", "REPLICAS", "DOMAIN", "UPDATED"}, rows)
+			c.ui.Table([]string{"NAME", "STATUS", "VERSION", "REPLICAS", "DOMAIN", "UPDATED", ""}, rows)
 			return nil
 		},
 	}

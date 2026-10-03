@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -14,6 +15,11 @@ import (
 const (
 	DefaultBackupKeep = 7
 	MaxBackupKeep     = 365
+	// DefaultBackupBeforeTimeout is how long backups.before may run when
+	// before_timeout does not say; MaxBackupBeforeTimeout is the most it can
+	// say. The application is locked for as long as the command runs.
+	DefaultBackupBeforeTimeout = time.Hour
+	MaxBackupBeforeTimeout     = 24 * time.Hour
 )
 
 // Backups says when an application's volumes are backed up unasked.
@@ -28,6 +34,18 @@ type Backups struct {
 	// Stop stops the application while the archive is taken, for data that
 	// cannot be copied consistently from under a running process.
 	Stop bool `json:"stop,omitempty"`
+	// BeforeTimeout is how long Before may run before it is stopped and the
+	// backup fails. Zero, in a deployment recorded before the key existed,
+	// means DefaultBackupBeforeTimeout.
+	BeforeTimeout Duration `json:"before_timeout,omitempty"`
+}
+
+// BeforeLimit is how long Before may run.
+func (b *Backups) BeforeLimit() time.Duration {
+	if b.BeforeTimeout > 0 {
+		return b.BeforeTimeout.Std()
+	}
+	return DefaultBackupBeforeTimeout
 }
 
 // backupsRaw mirrors the `backups` block.
@@ -36,6 +54,8 @@ type backupsRaw struct {
 	Keep     *int     `yaml:"keep"`
 	Before   []string `yaml:"before"`
 	Stop     bool     `yaml:"stop"`
+
+	BeforeTimeout string `yaml:"before_timeout"`
 }
 
 // validateBackups checks the `backups` block.
@@ -63,7 +83,7 @@ func (r raw) validateBackups(verr *ValidationError, app App) *Backups {
 		// left out.
 		problems, _ := syntaxError(err)
 		for _, f := range problems.Fields {
-			verr.add("backups", f.Message, "schedule, keep, before, stop")
+			verr.add("backups", f.Message, "schedule, keep, before, before_timeout, stop")
 		}
 		return nil
 	}
@@ -84,6 +104,17 @@ func (r raw) validateBackups(verr *ValidationError, app App) *Backups {
 	if b.Before != nil {
 		if err := ValidateCommand(b.Before); err != nil {
 			verr.add("backups.before", err.Error(), `["pg_dump", "-U", "postgres", "-f", "/var/lib/postgresql/data/backup.sql", "app"]`)
+		}
+		out.BeforeTimeout = Duration(DefaultBackupBeforeTimeout)
+	}
+	if v := b.BeforeTimeout; v != "" {
+		const example = "10m, 1h, 6h, ... (1s to 24h)"
+		if b.Before == nil {
+			verr.add("backups.before_timeout", "needs backups.before: it is that command's time limit", example)
+		} else if d, err := parseDuration(v, time.Second, MaxBackupBeforeTimeout); err != nil {
+			verr.add("backups.before_timeout", err.Error(), example)
+		} else {
+			out.BeforeTimeout = Duration(d)
 		}
 	}
 	switch {

@@ -20,12 +20,13 @@ type stopControl struct {
 	one      map[string]chan struct{} // by container ID: closed to let that stop through
 	waiting  chan string              // IDs of containers whose stop is being held
 	ignore   map[string]bool
+	outlast  map[string]bool
 	timeouts map[string]time.Duration // by container name
 }
 
 func (f *Fake) stops() *stopControl {
 	if f.stop == nil {
-		f.stop = &stopControl{ignore: map[string]bool{}, timeouts: map[string]time.Duration{}}
+		f.stop = &stopControl{ignore: map[string]bool{}, outlast: map[string]bool{}, timeouts: map[string]time.Duration{}}
 	}
 	return f.stop
 }
@@ -63,12 +64,22 @@ func (f *Fake) ReleaseStops() {
 }
 
 // IgnoreSIGTERM makes containers of the image end the way a process does that
-// has no handler for the signal: killed at the end of the grace period, with
-// exit code 137.
+// has no handler for the signal and runs as PID 1: killed at the end of the
+// grace period, with exit code 137. Behind an init process the signal ends it
+// at once, with exit code 143.
 func (f *Fake) IgnoreSIGTERM(image string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stops().ignore[image] = true
+}
+
+// OutlastGrace makes containers of the image end the way a process does that
+// handles the signal and is not done when the grace period is over: killed,
+// with or without an init process.
+func (f *Fake) OutlastGrace(image string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stops().outlast[image] = true
 }
 
 // StopTimeout reports the grace period the container, by name, was last
@@ -114,7 +125,12 @@ func (f *Fake) holdStop(ctx context.Context, id string) error {
 func (f *Fake) stopExit(c *docker.Container, timeout time.Duration) int {
 	s := f.stops()
 	s.timeouts[c.Name] = timeout
-	if s.ignore[c.Image] {
+	switch {
+	case s.outlast[c.Image]:
+		return 137
+	case s.ignore[c.Image] && f.specs[c.ID].Init:
+		return 143
+	case s.ignore[c.Image]:
 		return 137
 	}
 	return 0

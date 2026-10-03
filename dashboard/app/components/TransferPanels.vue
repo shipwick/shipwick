@@ -3,9 +3,9 @@ import type { BackupRun, Import, Promotion, Standby } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { AgentError as AgentFailure, toAgentError } from '~/utils/agentError'
 import { durationBetween, formatBytes, formatDuration } from '~/utils/format'
-import { backupBusy, backupSize, backupStatusDisplay, backupUsable, describeDestinations } from '~/utils/backups'
+import { backupBusy, backupSize, backupStatusDisplay, backupUsable, describeDestinations, triggerLabel } from '~/utils/backups'
 import { roleHint } from '~/utils/roles'
-import { PROMOTE_WORD, describePull, importOutcome, importProgress, importStored, importedDisplay, isStandby, promotedDisplay, recordValue } from '~/utils/transfer'
+import { PROMOTE_WORD, describePull, importOutcome, importProgress, importStored, importedDisplay, isStandby, pollRetryable, promotionRunning } from '~/utils/transfer'
 
 /**
  * Moving a server, and a second one kept ready: the import that is running or
@@ -112,17 +112,66 @@ async function pullNow() {
   }
 }
 
+// --- the promotion ------------------------------------------------------------------
+
+// A promotion is a record that is started and then followed: it goes on if
+// this page is closed, and one that runs when the page opens is shown. An
+// agent before 0.6 has no such record (ENDPOINT_NOT_FOUND) and answers the
+// request that starts a promotion only when everything has been started.
+const followable = ref(true)
+const away = ref(false)
+/** The record as last answered, to keep on screen while the agent is away. */
+const lastRecord = shallowRef<Promotion | null>(null)
+const promotionPoll = usePolling<Promotion | null>(async (signal) => {
+  try {
+    const record = await agent.get<Promotion>('/standby/promotion', { signal })
+    away.value = false
+    lastRecord.value = record
+    return record
+  }
+  catch (cause) {
+    if (cause instanceof AgentFailure) {
+      if (cause.code === 'ENDPOINT_NOT_FOUND') {
+        followable.value = false
+        return null
+      }
+      // The server was never promoted.
+      if (cause.code === 'NOT_FOUND') return null
+      // The agent is away for a moment: keep what is on screen and ask again.
+      if (promotionRunning(lastRecord.value) && pollRetryable(cause)) {
+        away.value = true
+        return lastRecord.value
+      }
+    }
+    throw cause
+  }
+}, { interval: () => (promotionRunning(lastRecord.value) ? 1500 : 30_000), enabled: () => followable.value })
+
+/** What an agent before 0.6 answered at the end of the held request. */
+const heldAnswer = shallowRef<Promotion | null>(null)
+const promotion = computed(() => (followable.value ? promotionPoll.data.value : heldAnswer.value))
+const promotionActive = computed(() => promotionRunning(promotion.value))
+const dismissedPromotion = ref<string | null>(null)
+const promotionKey = (p: Promotion) => `${p.id ?? 0}/${p.started_at ?? ''}`
+const promotionShown = computed(() => promotion.value !== null && (promotion.value.applications.length > 0 || promotionActive.value) && promotionKey(promotion.value) !== dismissedPromotion.value)
+
+watch(promotionActive, (active, was) => {
+  // It just ended: what it started is among the applications now, and no longer waits here.
+  if (was && !active) {
+    void standby.refresh()
+    emit('changed')
+  }
+})
+
 const promoteOpen = ref(false)
 const promoting = ref(false)
 const promoteError = shallowRef<AgentError | null>(null)
-const promotion = shallowRef<Promotion | null>(null)
 const confirmation = ref('')
 const confirmed = computed(() => confirmation.value.trim().toLowerCase() === PROMOTE_WORD)
 
 function openPromote() {
   confirmation.value = ''
   promoteError.value = null
-  promotion.value = null
   promoteOpen.value = true
 }
 
@@ -131,19 +180,32 @@ async function promote() {
   promoting.value = true
   promoteError.value = null
   try {
-    promotion.value = await agent.post<Promotion>('/standby/promote')
+    if (followable.value) {
+      // Answered at once with the record as it begins; the panel on the page follows it from there.
+      lastRecord.value = await agent.post<Promotion>('/standby/promote', { query: { wait: 'false' } })
+      promotionPoll.data.value = lastRecord.value
+      dismissedPromotion.value = null
+      void promotionPoll.refresh()
+    }
+    else {
+      heldAnswer.value = await agent.post<Promotion>('/standby/promote')
+      dismissedPromotion.value = null
+      emit('changed')
+    }
+    promoteOpen.value = false
     void standby.refresh()
-    emit('changed')
   }
   catch (cause) {
     promoteError.value = toAgentError(cause)
+    // Somebody else started one: it is followed like our own.
+    if (promoteError.value.code === 'PROMOTION_IN_PROGRESS') void promotionPoll.refresh()
   }
   finally {
     promoting.value = false
   }
 }
 
-const actionTitle = computed(() => (!props.admin ? roleHint('admin') : importing.value ? 'An import is running' : undefined))
+const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotionActive.value ? 'A promotion is running' : importing.value ? 'An import is running' : undefined))
 </script>
 
 <template>
@@ -159,6 +221,14 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : importing
     <span class="font-medium">{{ importProgress(importRun) }}</span>
     <span>from {{ importRun.source }}<template v-if="importRun.stopped">, deployed stopped</template>, started <TimeAgo :time="importRun.started_at" /></span>
   </div>
+
+  <!-- The promotion that runs, or ran last: first, because while it runs nothing else here can be started. -->
+  <PromotionPanel
+    v-if="promotion && promotionShown"
+    :promotion="promotion"
+    :away="away"
+    @dismiss="dismissedPromotion = promotionKey(promotion)"
+  />
 
   <UiPanel v-if="importRun && showOutcome" title="Last import" :meta="importOutcome(importRun)">
     <template #actions>
@@ -224,11 +294,11 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : importing
   <!-- What this server holds for the day it has to take over. -->
   <UiPanel v-if="standbyShown && standby.data.value" title="Standby" :meta="standby.data.value.applications.length">
     <template #actions>
-      <UiButton v-if="standby.data.value.pull" size="sm" :disabled="!props.admin || importing" :pending="pulling" :title="actionTitle ?? 'Fetches the newest export from the bucket and imports it stopped'" @click="pullNow">
+      <UiButton v-if="standby.data.value.pull" size="sm" :disabled="!props.admin || importing || promotionActive" :pending="pulling" :title="actionTitle ?? 'Fetches the newest export from the bucket and imports it stopped'" @click="pullNow">
         <UiIcon name="download" :size="12" />
         Import newest now
       </UiButton>
-      <UiButton size="sm" variant="primary" :disabled="!props.admin || importing || standby.data.value.applications.length === 0" :title="actionTitle ?? (standby.data.value.applications.length === 0 ? 'Nothing waits to be started' : undefined)" @click="openPromote">
+      <UiButton size="sm" variant="primary" :disabled="!props.admin || importing || promotionActive || standby.data.value.applications.length === 0" :title="actionTitle ?? (standby.data.value.applications.length === 0 ? 'Nothing waits to be started' : undefined)" @click="openPromote">
         <UiIcon name="play" :size="12" />
         Promote…
       </UiButton>
@@ -332,7 +402,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : importing
                 <TimeAgo :time="r.started_at" />
               </td>
               <td data-label="Started by" class="text-fg-muted">
-                {{ r.trigger === 'schedule' ? 'schedule' : 'by hand' }}
+                {{ triggerLabel(r.trigger) }}
               </td>
               <td data-label="Size" class="mono right whitespace-nowrap text-fg-muted">
                 {{ backupUsable(r) ? formatBytes(backupSize(r)) : '—' }}
@@ -358,53 +428,14 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : importing
   </UiPanel>
 
   <UiDialog :open="promoteOpen" title="Promote this standby" size="md" :busy="promoting" @close="promoteOpen = false">
-    <!-- The answer: what was started, and the records that send visitors here. -->
-    <div v-if="promotion" class="space-y-4">
-      <ul class="space-y-1.5">
-        <li v-for="a in promotion.applications" :key="a.name" class="flex flex-wrap items-baseline gap-x-3">
-          <span class="mono font-medium">{{ a.name }}</span>
-          <StatusBadge v-bind="promotedDisplay(a)" :raw="a.status" />
-          <span v-if="a.message" class="basis-full break-words text-xs" :class="a.status === 'failed' ? 'text-danger' : 'text-fg-muted'">{{ a.message }}</span>
-        </li>
-      </ul>
-      <div v-if="promotion.records.length > 0">
-        <p class="label mb-1.5">
-          DNS records to point here
-        </p>
-        <div class="overflow-x-auto rounded-sm border border-line">
-          <table class="data-table !text-xs">
-            <thead>
-              <tr>
-                <th>Hostname</th>
-                <th>Type</th>
-                <th>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="record in promotion.records" :key="`${record.hostname}/${record.type}`">
-                <td class="mono break-all">
-                  {{ record.hostname }}
-                </td>
-                <td class="mono">
-                  {{ record.type }}
-                </td>
-                <td class="mono break-all" :class="record.value ? '' : 'font-sans text-fg-muted'">
-                  {{ recordValue(record) }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-1.5 text-xs text-fg-muted">
-          Until a record points here its hostname still reaches the old server. Certificates are obtained once it does.
-        </p>
-      </div>
-    </div>
-    <form v-else-if="standby.data.value" id="promote-form" class="space-y-4" @submit.prevent="promote">
+    <form v-if="standby.data.value" id="promote-form" class="space-y-4" @submit.prevent="promote">
       <p class="text-fg-muted">
         This starts the {{ standby.data.value.applications.length === 1 ? 'application' : `${standby.data.value.applications.length} applications` }} this server holds stopped
-        (<span class="mono text-fg">{{ standby.data.value.applications.map(a => a.name).join(', ') }}</span>), in the order they were imported, and waits for each to be ready.
+        (<span class="mono text-fg">{{ standby.data.value.applications.map(a => a.name).join(', ') }}</span>), in the order they were imported, each once the one before it is ready.
         From then on this server is the one that serves: exports that arrive later no longer replace what runs here. Do it when the first server is gone or about to be.
+      </p>
+      <p v-if="followable" class="text-fg-muted">
+        The promotion runs on the server and is shown on this page as it goes; it continues if you close the page, and across a restart of the agent.
       </p>
       <div>
         <label for="promote-confirm" class="block text-fg-muted">
@@ -421,25 +452,18 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : importing
           autofocus
         >
       </div>
-      <p v-if="promoting" class="text-xs text-fg-muted" role="status">
-        Starting the applications. This answers when the last one is ready, which can take as long as their startup budgets together.
+      <p v-if="promoting && !followable" class="text-xs text-fg-muted" role="status">
+        Starting the applications. This agent answers when the last one is ready, which can take as long as their startup budgets together.
       </p>
       <InlineError :error="promoteError" />
     </form>
     <template #footer>
-      <template v-if="promotion">
-        <UiButton @click="promoteOpen = false">
-          Close
-        </UiButton>
-      </template>
-      <template v-else>
-        <UiButton :disabled="promoting" @click="promoteOpen = false">
-          Cancel
-        </UiButton>
-        <UiButton type="submit" form="promote-form" variant="primary" :pending="promoting" :disabled="!confirmed">
-          Promote
-        </UiButton>
-      </template>
+      <UiButton :disabled="promoting" @click="promoteOpen = false">
+        Cancel
+      </UiButton>
+      <UiButton type="submit" form="promote-form" variant="primary" :pending="promoting" :disabled="!confirmed">
+        Promote
+      </UiButton>
     </template>
   </UiDialog>
 </template>

@@ -47,19 +47,36 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return
 	}
+	applications, err := api.ValidateTokenApplications(req.Role, req.Applications)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	now := s.now()
+	if req.ExpiresAt != nil {
+		if !req.ExpiresAt.After(now) {
+			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "expires_at is in the past: a token that has expired already would be of no use", nil)
+			return
+		}
+		at := req.ExpiresAt.UTC()
+		req.ExpiresAt = &at
+	}
+	auditTarget(r, req.Name)
+	auditDetail(r, describeToken(req.Role, applications, req.ExpiresAt))
 
 	value, hash, err := newToken()
 	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
-	t, err := s.store.CreateToken(r.Context(), req.Name, req.Role, hash, s.now())
+	t, err := s.store.CreateToken(r.Context(), store.Token{Name: req.Name, Role: req.Role, Hash: hash, CreatedAt: now, Applications: applications, ExpiresAt: req.ExpiresAt})
 	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
-	s.log.Info("token created", "token", t.Name, "role", t.Role, "by", principalFrom(r.Context()).Name)
-	writeJSON(w, http.StatusCreated, api.CreatedToken{ID: t.ID, Name: t.Name, Role: t.Role, CreatedAt: t.CreatedAt, Token: value})
+	s.log.Info("token created", "token", t.Name, "role", t.Role, "applications", t.Applications, "expires", t.ExpiresAt, "by", principalFrom(r.Context()).Name)
+	writeJSON(w, http.StatusCreated, api.CreatedToken{ID: t.ID, Name: t.Name, Role: t.Role, CreatedAt: t.CreatedAt, Token: value,
+		Applications: t.Applications, ExpiresAt: t.ExpiresAt})
 }
 
 func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
@@ -95,5 +112,6 @@ func newToken() (value string, hash []byte, err error) {
 }
 
 func tokenView(t store.Token) api.Token {
-	return api.Token{ID: t.ID, Name: t.Name, Role: t.Role, CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt}
+	return api.Token{ID: t.ID, Name: t.Name, Role: t.Role, CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt,
+		Applications: t.Applications, ExpiresAt: t.ExpiresAt}
 }

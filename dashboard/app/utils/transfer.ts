@@ -1,4 +1,4 @@
-import type { DNSRecord, Import, ImportedApplication, PromotedApplication, Standby, StandbyPull } from '~/types/api'
+import type { DNSRecord, Import, ImportedApplication, PromotedApplication, Promotion, Standby, StandbyPull } from '~/types/api'
 import { describeSchedule } from '~/utils/backups'
 import { formatRelativeTime, pluralize } from '~/utils/format'
 import type { StatusDisplay } from '~/utils/status'
@@ -61,6 +61,8 @@ export function importedDisplay(app: Pick<ImportedApplication, 'status'>): Statu
 }
 
 const PROMOTED: Record<string, StatusDisplay> = {
+  pending: { tone: 'muted', label: 'Waiting' },
+  starting: { tone: 'warn', label: 'Starting' },
   running: { tone: 'ok', label: 'Running' },
   // Started, and not ready within its startup budget: it may still come up.
   started: { tone: 'warn', label: 'Started, not ready yet' },
@@ -69,6 +71,44 @@ const PROMOTED: Record<string, StatusDisplay> = {
 
 export function promotedDisplay(app: Pick<PromotedApplication, 'status'>): StatusDisplay {
   return PROMOTED[app.status] ?? { tone: 'muted', label: app.status }
+}
+
+/**
+ * A promotion that has begun and not ended: the agent sets `completed_at`
+ * when it is completely done with it. An answer without the field at all is
+ * the held request of an agent before 0.6, which only answers at the end.
+ */
+export function promotionRunning(promotion: Pick<Promotion, 'completed_at'> | null | undefined): boolean {
+  return promotion !== null && promotion !== undefined && promotion.completed_at === null
+}
+
+/** "Promoting: starting my-api (2 of 3)"; before the first application and after the last, what is going on instead. */
+export function promotionProgress(promotion: Pick<Promotion, 'applications'>): string {
+  const total = promotion.applications.length
+  const index = promotion.applications.findIndex(a => a.status === 'starting')
+  if (index !== -1) return `Promoting: starting ${promotion.applications[index]!.name} (${index + 1} of ${total})`
+  const waiting = promotion.applications.filter(a => a.status === 'pending').length
+  return waiting === total ? 'Promoting: about to start the applications' : waiting === 0 ? 'Promoting: finishing' : `Promoting (${total - waiting} of ${total} started)`
+}
+
+/** "3 running", "2 running, 1 not ready yet, 1 could not be started": how a promotion that is over went. */
+export function promotionOutcome(promotion: Pick<Promotion, 'applications'>): string {
+  const count = (status: string) => promotion.applications.filter(a => a.status === status).length
+  const parts = [
+    [count('running'), 'running'],
+    [count('started'), 'not ready yet'],
+    [count('failed'), 'could not be started'],
+  ].filter(([n]) => (n as number) > 0).map(([n, words]) => `${n} ${words}`)
+  return parts.length > 0 ? parts.join(', ') : 'nothing to start'
+}
+
+/**
+ * A poll that failed because the agent was away for a moment — restarting, or
+ * the proxy in front of it answering for it — is asked again and not shown as
+ * a failure: the promotion goes on, and an agent that starts next resumes it.
+ */
+export function pollRetryable(error: { status: number, code: string }): boolean {
+  return error.status === 502 || error.status === 503 || error.status === 504 || error.code === 'NETWORK' || error.code === 'AGENT_UNREACHABLE' || error.code === 'AGENT_TIMEOUT'
 }
 
 /** "hourly at :15, last 12m ago (export #42)"; says so when nothing has been fetched yet. */

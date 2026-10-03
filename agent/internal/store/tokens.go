@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -22,21 +23,37 @@ type Token struct {
 	Hash       []byte
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
+	// Applications are the ones the token is limited to; empty: not limited.
+	Applications []string
+	// ExpiresAt is nil for a token that does not expire.
+	ExpiresAt *time.Time
 }
 
-func (s *Store) CreateToken(ctx context.Context, name string, role api.Role, hash []byte, now time.Time) (Token, error) {
-	t := Token{Name: name, Role: role, Hash: hash, CreatedAt: now.UTC()}
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+// CreateToken stores t, which carries everything but its id.
+func (s *Store) CreateToken(ctx context.Context, t Token) (Token, error) {
+	t.CreatedAt = t.CreatedAt.UTC()
+	if t.Applications == nil {
+		t.Applications = []string{}
+	}
+	applications, err := json.Marshal(t.Applications)
+	if err != nil {
+		return Token{}, fmt.Errorf("create token: %w", err)
+	}
+	var expires sql.NullString
+	if t.ExpiresAt != nil {
+		expires = sql.NullString{String: formatTime(*t.ExpiresAt), Valid: true}
+	}
+	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tokens WHERE name = ?`, name).Scan(&n); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tokens WHERE name = ?`, t.Name).Scan(&n); err != nil {
 			return err
 		}
 		if n > 0 {
 			return ErrTokenExists
 		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO tokens (name, role, hash, created_at) VALUES (?, ?, ?, ?)`,
-			name, string(role), hash, formatTime(now))
+			`INSERT INTO tokens (name, role, hash, created_at, applications, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			t.Name, string(t.Role), t.Hash, formatTime(t.CreatedAt), string(applications), expires)
 		if err != nil {
 			return err
 		}
@@ -51,7 +68,7 @@ func (s *Store) CreateToken(ctx context.Context, name string, role api.Role, has
 	return t, nil
 }
 
-const tokenSelect = `SELECT id, name, role, hash, created_at, last_used_at FROM tokens`
+const tokenSelect = `SELECT id, name, role, hash, created_at, last_used_at, applications, expires_at FROM tokens`
 
 func scanToken(row rowScanner) (Token, error) {
 	var (
@@ -59,8 +76,10 @@ func scanToken(row rowScanner) (Token, error) {
 		role     string
 		created  string
 		lastUsed sql.NullString
+		apps     string
+		expires  sql.NullString
 	)
-	err := row.Scan(&t.ID, &t.Name, &role, &t.Hash, &created, &lastUsed)
+	err := row.Scan(&t.ID, &t.Name, &role, &t.Hash, &created, &lastUsed, &apps, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Token{}, ErrNotFound
 	} else if err != nil {
@@ -71,6 +90,12 @@ func scanToken(row rowScanner) (Token, error) {
 		return Token{}, err
 	}
 	if t.LastUsedAt, err = parseNullTime(lastUsed); err != nil {
+		return Token{}, err
+	}
+	if err := json.Unmarshal([]byte(apps), &t.Applications); err != nil {
+		return Token{}, fmt.Errorf("token %s: applications: %w", t.Name, err)
+	}
+	if t.ExpiresAt, err = parseNullTime(expires); err != nil {
 		return Token{}, err
 	}
 	return t, nil

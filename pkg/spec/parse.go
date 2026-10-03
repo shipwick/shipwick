@@ -90,6 +90,7 @@ type raw struct {
 		Strategy    string `yaml:"strategy"`
 		StopTimeout string `yaml:"stop_timeout"`
 	} `yaml:"deploy"`
+	Init *bool `yaml:"init"`
 }
 
 // Parse decodes and validates a deploy.yaml document. JSON is accepted too,
@@ -318,6 +319,7 @@ func (r raw) validate() (App, error) {
 		}
 	}
 	app.Publish = r.validatePublish(verr, app)
+	app.Init = r.validateInit(verr)
 
 	if len(verr.Fields) > 0 {
 		return App{}, verr

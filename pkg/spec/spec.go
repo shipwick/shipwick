@@ -81,6 +81,10 @@ type App struct {
 	Backups *Backups `json:"backups,omitempty"`
 	Restart Restart  `json:"restart"`
 	Deploy  Deploy   `json:"deploy"`
+	// Init puts Docker's init process in front of the image's own, in every
+	// container of the application: it passes signals on and reaps children,
+	// which a process running as PID 1 does not do for itself.
+	Init bool `json:"init,omitempty"`
 }
 
 // Volume is a named Docker volume mounted into every replica. It belongs to

@@ -33,6 +33,10 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 				return fmt.Errorf("replica %d: %w", replicas[i].Index, err)
 			}
 		}
+		for _, r := range replicas {
+			c := docker.Container{ID: r.ContainerID, Name: r.ContainerName, App: app.Name, DeploymentID: r.DeploymentID, Replica: r.Index}
+			e.noteKilled(ctx, app.ID, app.Name, c, grace, "stopped")
+		}
 		e.appEvent(ctx, app, byActor(ctx, "Application stopped"))
 		return nil
 	})
@@ -185,6 +189,10 @@ func (e *Engine) Recover(ctx context.Context) error {
 		}
 		r := e.newRollout(d)
 		r.resumed = true
+		// What an import deployed stopped stays stopped when it is resumed.
+		if r.dormant, err = e.store.DeploymentDormant(ctx, d.ID); err != nil {
+			return err
+		}
 		if err := r.prepare(ctx); err != nil {
 			e.clearRouteOverride(d.Application)
 			e.unlock(d.Application)
@@ -218,7 +226,7 @@ func (e *Engine) Recover(ctx context.Context) error {
 		e.log.Info("resuming deployment", "app", r.d.Application, "deployment", r.d.ID, "status", r.d.Status)
 		e.launch(r)
 	}
-	return nil
+	return e.recoverTransfers(ctx)
 }
 
 func (e *Engine) appEvent(ctx context.Context, app store.Application, message string) {

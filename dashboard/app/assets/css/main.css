@@ -451,6 +451,63 @@
     }
   }
 
+  /* A grid of facts with hairlines between the cells. The lines are drawn by
+     the cells themselves, so a row that is not full ends in plain background
+     rather than in a block of line color. The box around it clips the outer
+     ones. */
+  .facts {
+    display: grid;
+    gap: 1px;
+  }
+
+  .facts > * {
+    min-width: 0;
+    padding: 0.625rem 1rem;
+    box-shadow: 0 0 0 1px var(--line);
+  }
+
+  /* The way out of a notice: a link that reads as a small button in the
+     notice's own color, whichever tone that is. */
+  .notice-action {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 0.25rem;
+    height: 1.5rem;
+    padding: 0 0.375rem 0 0.5rem;
+    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+    border-radius: 4px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .notice-action:hover {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+
+  /* A row of tabs scrolls sideways on a narrow screen without showing a bar. */
+  .tabs ul {
+    scrollbar-width: none;
+  }
+
+  .tabs ul::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* A command to copy into a terminal, where the CLI is the way. */
+  .command {
+    display: block;
+    overflow-x: auto;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--bg-inset);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+    white-space: pre;
+    color: var(--fg);
+  }
   /* Form controls */
   .input {
     width: 100%;

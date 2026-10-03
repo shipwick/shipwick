@@ -2,7 +2,9 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/deploy"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/backupfile"
+	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 const (
@@ -43,6 +46,38 @@ func (s *Server) backupRoutes(routes routeTable) {
 	routes.admin("GET /api/v1/server/backups", s.handleListStateBackups)
 	routes.admin("GET /api/v1/server/backups/{id}", s.handleGetStateBackup)
 	routes.admin("POST /api/v1/server/backups", s.handleStartStateBackup)
+	// Adopting reads every application's backups and the state's.
+	routes.admin("POST /api/v1/server/backups/adopt", s.handleAdoptBackups)
+}
+
+// handleAdoptBackups records the backups the destinations hold and the
+// database does not know. The body is optional: without one, or without an
+// application in it, everything is looked at.
+func (s *Server) handleAdoptBackups(w http.ResponseWriter, r *http.Request) {
+	var req api.BackupAdoptRequest
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<10))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "the request body is too large", nil)
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, `the body must be JSON such as {"application": "my-db"}, or empty`, nil)
+			return
+		}
+	}
+	if req.Application != "" {
+		if err := spec.ValidateName(req.Application); err != nil {
+			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+	adoption, err := s.engine.AdoptBackups(r.Context(), req.Application)
+	if err != nil {
+		s.writeBackupError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, adoption)
 }
 
 func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request, name string) {
@@ -261,6 +296,8 @@ func (s *Server) writeBackupError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusConflict, api.CodeBackupNotUsable, err.Error(), nil)
 	case errors.Is(err, deploy.ErrBackupsDisabled):
 		writeError(w, http.StatusConflict, api.CodeBackupNotUsable, err.Error(), nil)
+	case errors.Is(err, backup.ErrForeignBucket):
+		writeError(w, http.StatusConflict, api.CodeForeignBucket, err.Error(), nil)
 	default:
 		s.writeEngineError(w, r, err)
 	}
