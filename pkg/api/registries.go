@@ -55,7 +55,8 @@ func ValidateRegistryCredential(username, password string) error {
 	case password == "":
 		return fmt.Errorf("the password is empty")
 	case len(password) > MaxRegistryPasswordBytes:
-		return fmt.Errorf("the password is too large (%d KB, max %d KB)", len(password)/1024, MaxRegistryPasswordBytes/1024)
+		// The limit, not the size: nothing computed from the password is said.
+		return fmt.Errorf("the password is too large (max %d KB)", MaxRegistryPasswordBytes/1024)
 	case strings.ContainsRune(password, 0):
 		return fmt.Errorf("the password must not contain NUL bytes")
 	}

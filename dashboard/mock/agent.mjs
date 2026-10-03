@@ -2126,7 +2126,7 @@ function validateRegistryCredential(username, password) {
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1F\x7F:]/.test(username)) throw refuse('the username must not contain a colon or control characters')
   if (typeof password !== 'string' || password === '') throw refuse('the password is empty')
-  if (Buffer.byteLength(password) > 16 * 1024) throw refuse(`the password is too large (${Math.floor(Buffer.byteLength(password) / 1024)} KB, max 16 KB)`)
+  if (Buffer.byteLength(password) > 16 * 1024) throw refuse('the password is too large (max 16 KB)')
   if (password.includes('\0')) throw refuse('the password must not contain NUL bytes')
 }
 
