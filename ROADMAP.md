@@ -118,6 +118,16 @@ hostname belongs to one application.
 **Certificate status.** `shipwick status` and the dashboard say when a
 hostname is served but its certificate is still being obtained, and why.
 
+**A certificate of your own.** A hostname whose certificate comes from
+somewhere else — a corporate authority, a wildcard bought years ago — served
+with the certificate and key you give the agent, kept encrypted like secrets
+are, and reported before it expires. Automatic certificates stay the default.
+
+**Time to finish for long connections.** A replica that is being replaced
+leaves the proxy first and is then given a moment to finish what it has in
+hand; that moment is the same for every application. `deploy.stop_timeout`
+in `deploy.yaml`, for the application that holds WebSockets or long uploads.
+
 ## 0.6 — Running it for a year
 
 The things an installation needs once it has been up for months: backups
@@ -127,6 +137,22 @@ that can be rotated, and nothing that depends on the agent never restarting.
 **Scheduled backups.** `backups` in `deploy.yaml`: a schedule, how many to
 keep, and where to put them — a directory on the server first, an S3-compatible
 bucket after. `shipwick backup` stays for the one you take by hand.
+
+**Backups a database can be restored from.** An archive of a volume taken
+while Postgres writes to it may not be one Postgres can start from. A
+command run in the replica before the archive is taken (`backups.before`:
+`pg_dump`, a checkpoint, a lock), or stopping the application for the
+duration, chosen per application.
+
+**Backups that are known to restore.** `shipwick backup verify`: restore the
+latest backup into a scratch volume, start the image against it, run the
+health check, throw it away. A backup nobody has restored is a hope.
+
+**The agent's own state, backed up without being asked.** `shipwick.db` and
+`encryption.key` go with the scheduled backups, encrypted under a passphrase
+that is not on the server, and the agent warns in `shipwick doctor` and the
+dashboard while no copy of the key exists anywhere else. Losing the key today
+loses every secret, and only the documentation says so.
 
 **Alerts from metrics.** A replica near its memory limit, a disk filling up,
 a health check failing for longer than a threshold: posted to the webhook like
@@ -151,6 +177,22 @@ and `encryption.key`, which today the documentation asks you to copy by hand.
 marked `FAILED` and cleaned up; the containers it had started are removed.
 Resuming where it stopped would cost a restart nothing.
 
+**What happens when things break, written down and tested.** A full disk, a
+Docker daemon that stops answering, a network that drops in the middle of a
+pull, an agent killed half-way through a rollout: each with a test that
+produces it, the behaviour that test pins down, and a page that says what the
+operator sees and does. Some of this is tested today; none of it is in one
+place.
+
+**More than one distribution in CI.** The integration tests run on one Ubuntu
+image with one Docker version. A matrix over the distributions the installer
+claims to support and the Docker versions still in use, on amd64 and arm64.
+
+**Metrics for whoever already has a Prometheus.** `GET /metrics` on the
+agent, in the Prometheus text format: replicas, health, restarts, CPU and
+memory per application, deployment outcomes. A week of history in SQLite
+stays for those who have nothing else; this is for those who do.
+
 ## 0.7 — Teams
 
 More than one person, more than one server, and a record of who did what.
@@ -166,6 +208,24 @@ agent's log. Every action a token takes, with who and when, in one place.
 containers share the `shipwick` network with the agent, which needs it for
 health checks, so today they can reach the API and try tokens against it. The
 agent should answer only the proxy, the dashboard and the server itself.
+
+**Tokens that expire.** `shipwick token create ci --role deploy --expires 90d`;
+an expired token is refused with a message that says so, and `token ls` shows
+what is about to lapse.
+
+**Containers locked down further, on request.** Replicas already run without
+new privileges, without host mounts and without ports they did not ask for.
+`security` in `deploy.yaml` for the rest: a read-only root filesystem,
+dropped capabilities, a refusal to run as root.
+
+**Less than the whole Docker socket.** The agent holds the Docker socket,
+which is root on the server. Running it against a socket proxy that allows
+only the calls it makes, and against rootless Docker, each documented and
+tested, for installations where that matters more than convenience.
+
+**Behind a corporate proxy.** An agent that pulls images and reaches
+webhooks through `HTTPS_PROXY`, trusts an internal certificate authority, and
+can be installed from files copied to a server that has no way out.
 
 **A new application from the dashboard.** Paste a `deploy.yaml`, deploy. Today
 the dashboard redeploys and rolls back what the CLI created.
@@ -197,6 +257,22 @@ followed by two commands (`packaging/winget/update-manifests.sh`, then
 GitHub token with write access to a fork of winget-pkgs stored in this
 repository, which the Homebrew tap deliberately avoids; worth it once the
 cadence makes the two commands a chore.
+
+## Documentation, as it becomes true
+
+Not tied to a version; written when someone needs them.
+
+**From Docker Compose.** A guide for the commonest starting point: a
+`docker-compose.yml` on a server, and what each of its parts becomes in
+`deploy.yaml` and `shipwick.yaml`.
+
+**GitLab CI.** The GitHub Action has a page; the same three lines for a
+`.gitlab-ci.yml`.
+
+**Where your data is.** One page for whoever has to answer a security
+questionnaire: what the agent stores and where, what is encrypted and with
+which key, what leaves the server (nothing, unless a webhook is set), and
+what a backup contains.
 
 ## 1.0
 
