@@ -216,6 +216,51 @@ func TestApplicationFailingItsHealthCheckIsDown(t *testing.T) {
 	}
 }
 
+func TestStartingAStoppedApplicationIsNotAnOutage(t *testing.T) {
+	s := newSupervised(t)
+	s.deploy(withHealth(app("my-api", "my-api:1.0", 1)))
+	rec := notified(s.harness)
+	ctx := context.Background()
+
+	if err := s.engine.Stop(ctx, "my-api"); err != nil {
+		t.Fatal(err)
+	}
+	s.advance(time.Second)
+	if err := s.engine.Start(ctx, "my-api"); err != nil {
+		t.Fatal(err)
+	}
+	// Running, and not answering its health check yet: an application takes a
+	// moment to listen.
+	ip := s.container(t, 1).IP
+	s.probes.setFailing(ip, errors.New("connection refused"))
+	for range 3 {
+		s.advance(time.Second)
+	}
+	s.probes.setFailing(ip, nil)
+	for range 30 {
+		s.advance(time.Second)
+	}
+	if kinds := rec.Kinds(); len(kinds) != 0 {
+		t.Errorf("notifications = %v; an application that was started and came up was never down", kinds)
+	}
+
+	// One that is started and does not come up is.
+	if err := s.engine.Stop(ctx, "my-api"); err != nil {
+		t.Fatal(err)
+	}
+	s.advance(time.Second)
+	if err := s.engine.Start(ctx, "my-api"); err != nil {
+		t.Fatal(err)
+	}
+	s.probes.setFailing(s.container(t, 1).IP, errors.New("HTTP 500"))
+	for range 300 {
+		s.advance(time.Second)
+	}
+	if kinds := rec.Kinds(); len(kinds) == 0 || kinds[0] != notify.ApplicationDown {
+		t.Errorf("notifications = %v; a started application that never passes its health check is down", kinds)
+	}
+}
+
 func TestDeletedApplicationIsForgottenByTheSupervisor(t *testing.T) {
 	s := newSupervised(t)
 	s.deploy(app("my-api", "my-api:1.0", 1))

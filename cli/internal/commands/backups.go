@@ -340,6 +340,11 @@ func (c *cli) backupsDownloadCommand() *cobra.Command {
 			if run.Status != api.BackupSucceeded {
 				return fmt.Errorf("backup #%d of %s is %s; there is nothing to download", id, name, run.Status)
 			}
+			if dir != "" {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					return err
+				}
+			}
 			for _, v := range run.Volumes {
 				path := filepath.Join(dir, fmt.Sprintf("%s-%s-backup-%d.tar", name, v.Volume, id))
 				out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)

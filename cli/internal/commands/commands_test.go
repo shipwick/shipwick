@@ -658,7 +658,7 @@ func TestServerStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server status: %v", err)
 	}
-	assertInOrder(t, out, []string{"reachable", "1.2.3", "vps-1", "Debian 13", "29.8.0", "8 GB", "5 running", "Proxy", "ok", "serving 2 domains"})
+	assertInOrder(t, out, []string{"reachable", "1.2.3", "vps-1", "Debian 13", "29.8.0", "8 GB", "5 running", "Proxy", "ok", "serving 2 routes"})
 
 	f.server.Proxy = api.ProxyStatus{Enabled: true, Reachable: false, Error: "cannot reach Caddy's admin endpoint: connection refused"}
 	out, _, _ = f.run(t.TempDir(), "server", "status")

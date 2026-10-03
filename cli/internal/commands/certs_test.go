@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -334,5 +336,26 @@ func TestDoctorPointsOutSuppliedCertificatesNearTheirEnd(t *testing.T) {
 	})
 	if strings.Contains(out.String(), "fine.example.com") || r.problems != 1 || r.hints != 1 {
 		t.Errorf("problems = %d, hints = %d; a certificate months from its end is not worth a line:\n%s", r.problems, r.hints, out.String())
+	}
+}
+
+func TestDoctorTellsASuppliedCertificateThisMachineDoesNotTrustFromOneStillToCome(t *testing.T) {
+	var out strings.Builder
+	c, _ := newRoot(Options{Out: &out, Err: io.Discard, Getenv: func(string) string { return "" }})
+	untrusted := roundTrip(func(*http.Request) (*http.Response, error) {
+		return nil, &tls.CertificateVerificationError{Err: errors.New("x509: certificate signed by unknown authority")}
+	})
+	local := localOptions{http: &http.Client{Transport: untrusted}}
+
+	r := &report{c: c, supplied: []api.Certificate{{Hostname: "example.com", Subjects: []string{"example.com", "*.example.com"}}}}
+	c.checkHTTPS(context.Background(), r, local, api.Application{Name: "internal", Domain: "wiki.example.com"})
+	c.checkHTTPS(context.Background(), r, local, api.Application{Name: "other", Domain: "api.example.org"})
+
+	assertInOrder(t, out.String(), []string{
+		"! https://wiki.example.com/ is served with the certificate you supplied, which this machine does not trust: x509: certificate signed by unknown authority",
+		"✗ https://api.example.org/ has no valid certificate yet",
+	})
+	if r.problems != 1 || r.hints != 1 {
+		t.Errorf("problems = %d, hints = %d:\n%s", r.problems, r.hints, out.String())
 	}
 }

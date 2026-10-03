@@ -46,7 +46,7 @@ func TestDoctorReportsActiveAlerts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a warning is worth a look, not a failure: %v\n%s", err, out)
 	}
-	assertInOrder(t, out, []string{"✓ Proxy serving 2 domains", "! " + diskWarning, "No problems; 3 things worth a look."})
+	assertInOrder(t, out, []string{"✓ Proxy serving 2 routes", "! " + diskWarning, "No problems; 3 things worth a look."})
 
 	f.server.Alerts = append(f.server.Alerts, api.Alert{Kind: api.AlertUnhealthy, Severity: api.SeverityCritical, Application: "my-api", Message: unhealthyAlert})
 	out, _, err = f.run(t.TempDir(), "doctor")

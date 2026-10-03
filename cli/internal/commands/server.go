@@ -94,9 +94,9 @@ func (c *cli) describeProxy(p api.ProxyStatus) string {
 	case !p.Reachable:
 		return c.ui.Styled(ui.Red, "unreachable") + "  " + p.Error
 	case p.Routes == 1:
-		return c.ui.Styled(ui.Green, "ok") + "  serving 1 domain"
+		return c.ui.Styled(ui.Green, "ok") + "  serving 1 route"
 	}
-	return c.ui.Styled(ui.Green, "ok") + fmt.Sprintf("  serving %d domains", p.Routes)
+	return c.ui.Styled(ui.Green, "ok") + fmt.Sprintf("  serving %d routes", p.Routes)
 }
 
 func (c *cli) describeNotifications(n api.NotificationStatus) string {

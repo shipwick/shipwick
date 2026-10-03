@@ -325,7 +325,7 @@ with what to do about it, and exits non-zero when something is broken:
 ✓ Agent https://agent.example.com runs v0.4.0, the latest release
 ✓ Token laptop (admin)
 ✓ Docker 29.8.0 on the server
-✓ Proxy serving 2 domains
+✓ Proxy serving 2 routes
 ✓ agent.example.com → 203.0.113.10
 ✓ Port 80 open on 203.0.113.10
 ✗ Port 443 is not reachable on 203.0.113.10: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443

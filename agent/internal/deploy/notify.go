@@ -91,7 +91,11 @@ func (e *Engine) notifyAborted(r *rollout) {
 }
 
 // noteAvailability reports an application whose replicas have all stopped
-// serving, and its recovery. Down is: not one ready replica. Recovered is
+// serving, and its recovery. Down is: not one ready replica, and none that is
+// on its way — a replica started by hand, by `start` or a promotion, is
+// within its startup budget and has not failed anything yet; it becomes
+// unhealthy, and the application down, if it does not make it. A replica the
+// supervisor restarted is not given that credit. Recovered is
 // stricter — every desired replica ready, none with a restart still held
 // against it — so that a crash-looping replica, which runs for a moment
 // between crashes, does not produce a recovery and a new outage at every
@@ -101,7 +105,7 @@ func (s *supervisor) noteAvailability(ctx context.Context, app store.Application
 	if s.e.opts.Notifier == nil {
 		return
 	}
-	ready, running, settled := 0, 0, true
+	ready, running, comingUp, settled := 0, 0, 0, true
 	s.mu.Lock()
 	for _, r := range replicas {
 		c, exists := containers[r.ContainerID]
@@ -112,6 +116,9 @@ func (s *supervisor) noteAvailability(ctx context.Context, app store.Application
 		if st, ok := s.states[r.ContainerID]; ok {
 			health = st.health
 			settled = settled && st.restarts == 0
+			if c.Running && st.health == api.HealthStarting && st.restarts == 0 {
+				comingUp++
+			}
 		}
 		if c.Running {
 			running++
@@ -121,7 +128,7 @@ func (s *supervisor) noteAvailability(ctx context.Context, app store.Application
 		}
 	}
 	wasDown := s.down[app.Name]
-	isDown := ready == 0
+	isDown := ready == 0 && comingUp == 0
 	recovered := wasDown && ready >= d.Spec.Replicas && settled
 	switch {
 	case isDown && !wasDown:

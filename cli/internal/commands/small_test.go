@@ -440,7 +440,7 @@ func TestDoctorReportsAHealthySetup(t *testing.T) {
 		"runs 1.2.3, the latest release",
 		"✓ Token laptop (admin)",
 		"✓ Docker 29.8.0 on the server",
-		"✓ Proxy serving 2 domains",
+		"✓ Proxy serving 2 routes",
 		"! The agent is reached through 127.0.0.1",
 		"✓ api.example.com → 203.0.113.10",
 		"✓ www.example.com → 203.0.113.10",

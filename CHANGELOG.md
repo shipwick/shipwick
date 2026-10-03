@@ -8,6 +8,27 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- `shipwick doctor` and `shipwick server status` count what the proxy serves
+  as routes, not domains: two applications may share a hostname by path.
+- A registry password that is too large is told the limit, not its size.
+
+### Fixed
+
+- Starting a stopped application — with `shipwick start`, or by promoting a
+  standby — no longer sends `application.down` and `application.recovered`
+  for the second its first health check takes. An application that was
+  started and does not come up is still reported down.
+- `shipwick backups download -o <dir>` creates the folder instead of failing
+  when it does not exist.
+- `shipwick doctor` no longer says that Caddy is still obtaining a certificate
+  for a hostname served with one you supplied: it says that this machine does
+  not trust it. A hostname two applications share by path is looked up once.
+- The agent names the basic-auth accounts it has hashed by a keyed digest
+  held in memory, and checks the names that become paths under its upload
+  directory where the paths are made.
+
 ## [0.5.0] - 2026-10-03
 
 ### Added

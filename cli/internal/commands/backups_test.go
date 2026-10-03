@@ -567,7 +567,7 @@ func TestDoctorHasALineForTheAgentsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("doctor: %v\n%s", err, out)
 	}
-	assertInOrder(t, out, []string{"✓ Proxy serving 2 domains", "! The encryption key exists only on this server.", "No problems; 3 things worth a look."})
+	assertInOrder(t, out, []string{"✓ Proxy serving 2 routes", "! The encryption key exists only on this server.", "No problems; 3 things worth a look."})
 }
 
 func TestValidateShowsWhatTheBackupsBlockWillDo(t *testing.T) {

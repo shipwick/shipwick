@@ -49,6 +49,25 @@ type report struct {
 	// through a DNS record, so a hostname behind Cloudflare's proxy is in
 	// order and "DNS only" is no longer advice to give.
 	dnsChallenge bool
+	// supplied are the certificates the operator gave the server, and looked
+	// the hostnames already looked up: applications that share one by path
+	// get one line for it.
+	supplied []api.Certificate
+	looked   map[string]bool
+}
+
+// suppliedFor reports whether a certificate of the operator's own is what
+// hostname is served with.
+func (r *report) suppliedFor(hostname string) bool {
+	_, parent, _ := strings.Cut(hostname, ".")
+	for _, cert := range r.supplied {
+		for _, subject := range cert.Subjects {
+			if strings.EqualFold(subject, hostname) || strings.EqualFold(subject, "*."+parent) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dnsOnly ends the advice to create a record: unproxied, unless certificates
@@ -179,12 +198,13 @@ func (c *cli) doctor(ctx context.Context) error {
 	case !p.Reachable:
 		r.problem("Proxy unreachable: %s. Check the caddy container on the server: docker logs shipwick-caddy-1", p.Error)
 	default:
-		r.ok("Proxy serving %s", plural(p.Routes, "domain"))
+		r.ok("Proxy serving %s", plural(p.Routes, "route"))
 	}
 	r.alerts(info.Alerts)
 	r.dnsChallenge = info.Proxy.DNSChallenge
 	// An agent from before supplied certificates has none to report.
 	if supplied, err := cl.Certificates(ctx); err == nil {
+		r.supplied = supplied
 		r.suppliedCertificates(supplied, c.now())
 	}
 	r.checkStateBackup(info.Backups, c.now())
@@ -217,6 +237,13 @@ func (c *cli) doctor(ctx context.Context) error {
 				r.ok("%s is a wildcard: it has no single record or address to check", h)
 				continue
 			}
+			if r.looked[h] {
+				continue
+			}
+			if r.looked == nil {
+				r.looked = map[string]bool{}
+			}
+			r.looked[h] = true
 			c.checkDNS(ctx, r, local, h, serverAddrs)
 		}
 		if !spec.IsWildcard(app.Domain) {
@@ -298,6 +325,10 @@ func (c *cli) checkHTTPS(ctx context.Context, r *report, local localOptions, app
 	resp, err := noFollow.Do(req)
 	if err != nil {
 		var certErr *tls.CertificateVerificationError
+		if errors.As(err, &certErr) && r.suppliedFor(app.Domain) {
+			r.hint("%s is served with the certificate you supplied, which this machine does not trust: %s. A certificate from an authority of your own is trusted only where that authority is installed", address, cause(certErr.Err))
+			return
+		}
 		if errors.As(err, &certErr) {
 			r.problem("%s has no valid certificate yet: %s. Caddy obtains one on the first request once DNS points at the server; try again in a minute", address, cause(certErr.Err))
 			return
