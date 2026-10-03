@@ -6,190 +6,65 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.5 — The proxy, and running it for a year
-
-Three things in one release. What 0.4 — the first half hour, from an empty
-server to a running application — left unfinished. What sits in front of the
-applications: Cloudflare, headers and authentication, and what the proxy could
-tell about the traffic it carries. And what an installation needs once it has
-been up for months: backups that happen without anyone remembering, alerts
-before a limit is hit, keys that can be rotated.
-
-### Left over from 0.4
-
-Small things that the first real installations turned up, none of them
-blocking, each a question a new user should not have to ask.
-
-**The CLI on the server knows its own agent.** The installer puts `shipwick`
-on the server but not how to reach the agent, whose port is deliberately not
-published; the first command run there fails with a tunnel hint meant for
-laptops. The installer will save a context for root — the API hostname and
-the token it already has — so that `shipwick ps` works on the server as it
-does anywhere else.
-
-**Commands that know `shipwick.yaml`.** `deploy` and `validate` read it;
-`status`, `logs`, `stop` and the others that take the application's name
-from `deploy.yaml` do not, and ask for a name in a directory that has only a
-`shipwick.yaml`. `shipwick init` in such a directory should add an entry to
-the file instead of writing a second one next to it.
-
-**Sending only the layers the server lacks.** With `build: .` the whole image
-travels on every deployment, base layers included: 59 MB for a ten-line Node
-application whose own layer is a few kilobytes. The agent already has most of
-it after the first time.
-
-**Asking the agent before building.** A document the agent will refuse — a
-port already published, a secret that is not stored — is refused after the
-image was built and sent. The CLI checks the domain itself today; a dry run
-of the agent's own validation would cover every case with one request.
-
-**A failed deployment cleans up after itself.** The image sent for a
-deployment that then fails stays until the application's next successful
-deployment sweeps it; it should go when the failure is recorded.
-
-**A quieter build.** `docker build` prints forty lines for a build that takes
-two seconds. Show a progress line while it runs and the full output only when
-it fails.
-
-**`logs -f` that says it is waiting.** Following an application that has
-printed nothing yet shows an empty screen, which reads as a hang.
-
-**Why replacing one replica takes fourteen seconds.** A first deployment of
-the example application takes 2.4 s, every later one 13.7 s. Find where the
-time goes when a single replica is replaced, and whether it has to.
-
-**More kinds of project for `init`.** SvelteKit, Remix and Astro with a
-server, a Next.js static export, Python projects locked with `uv`; a warning
-when there is no lock file and the build is therefore not reproducible; and
-`build: {dockerfile: X}` without `context` meaning the directory of the file.
-
-**Static sites: a fallback page and a clean switch.** A single-page
-application needs unknown paths to answer with `index.html`
-(`static: {dir: dist, fallback: index.html}`). And an application that turns
-from a folder into a container leaves its folders in the proxy until it is
-deleted.
-
-**Compression for the API and the dashboard.** Application routes are
-compressed; the agent's own API and the dashboard are not, because the
-encoder may hold back the first lines of a followed log. Measure it against a
-real proxy, and compress everything that is not a stream.
-
-**The dashboard's address, where the CLI can find it.** The agent does not
-report the dashboard's hostname, so `shipwick open --dashboard` does not exist
-and a first deployment cannot end with a link to it.
-
-**Dashboard details.** A `429` says how long to wait and the dashboard polls
-on regardless; the log viewer offers static applications, which have no logs;
-a deployment refused for a missing secret could offer to add it.
-
-**`doctor` recognises Cloudflare.** The agent names Cloudflare's proxy when a
-record points at it; `doctor` says "a CDN". One list of ranges, one wording.
-
-**The GitHub Action against a real server.** `shipwick/deploy` is tested for
-downloading and verifying the CLI on every runner; a deployment from a
-workflow to a live agent has not been run end to end.
-
-### The proxy
-
-**Cloudflare in front of the server.** Today an application's DNS record must
-point straight at the server (Cloudflare "DNS only"), because Caddy proves
-ownership of a hostname over HTTP and the proxy in between breaks that. With a
-Cloudflare API token on the agent (`SHIPWICK_CLOUDFLARE_API_TOKEN`, DNS edit
-rights on the zone), Caddy will prove ownership through a DNS record instead,
-so the orange cloud can stay on. That needs a Caddy image of Shipwick's own,
-built with the Cloudflare DNS module; Cloudflare's address ranges as trusted
-proxies, so that applications see the visitor's address rather than
-Cloudflare's; and a note on the zone's SSL mode, which must be *Full (strict)*.
-Wildcard certificates come with it.
-
-**Custom proxy behaviour per application.** Response headers, basic
-authentication on a path, a redirect from one path to another. A small set of
-options in `deploy.yaml`, modelled as data and rendered into Caddy's
-configuration like everything else; never a raw Caddyfile.
-
-**Request logs and traffic from the proxy.** What the proxy sees — status
-codes, latency, requests per second per application — is not visible today;
-`shipwick logs` shows only what the application writes. The proxy's access
-log, kept per application and summarised in the dashboard.
-
-**Paths on one domain.** `example.com/api` served by `api`, everything else
-by `web`: a `path` next to `domain`, the longest match wins, and the two
-applications keep their own replicas, health checks and rollouts. Today a
-hostname belongs to one application.
-
-**Certificate status.** `shipwick status` and the dashboard say when a
-hostname is served but its certificate is still being obtained, and why.
-
-**A certificate of your own.** A hostname whose certificate comes from
-somewhere else — a corporate authority, a wildcard bought years ago — served
-with the certificate and key you give the agent, kept encrypted like secrets
-are, and reported before it expires. Automatic certificates stay the default.
-
-**Time to finish for long connections.** A replica that is being replaced
-leaves the proxy first and is then given a moment to finish what it has in
-hand; that moment is the same for every application. `deploy.stop_timeout`
-in `deploy.yaml`, for the application that holds WebSockets or long uploads.
-
-### Running it for a year
-
-**Scheduled backups.** `backups` in `deploy.yaml`: a schedule, how many to
-keep, and where to put them — a directory on the server first, an S3-compatible
-bucket after. `shipwick backup` stays for the one you take by hand.
-
-**Backups a database can be restored from.** An archive of a volume taken
-while Postgres writes to it may not be one Postgres can start from. A
-command run in the replica before the archive is taken (`backups.before`:
-`pg_dump`, a checkpoint, a lock), or stopping the application for the
-duration, chosen per application.
-
-**Backups that are known to restore.** `shipwick backup verify`: restore the
-latest backup into a scratch volume, start the image against it, run the
-health check, throw it away. A backup nobody has restored is a hope.
-
-**The agent's own state, backed up without being asked.** `shipwick.db` and
-`encryption.key` go with the scheduled backups, encrypted under a passphrase
-that is not on the server, and the agent warns in `shipwick doctor` and the
-dashboard while no copy of the key exists anywhere else. Losing the key today
-loses every secret, and only the documentation says so.
-
-**Alerts from metrics.** A replica near its memory limit, a disk filling up,
-a health check failing for longer than a threshold: posted to the webhook like
-deployment outcomes are.
-
-**Registry credentials the agent keeps.** `shipwick registry login ghcr.io`
-stores a read-only token on the server, encrypted like environment values, and
-the agent uses it when it pulls. Today a private image needs `docker login` on
-the server and a mount in `compose.override.yml`. Credential helpers
-(`credsStore`) in `~/.docker/config.json` are read as well.
-
-**Key rotation.** `shipwick-agent rotate-key` re-encrypts every stored
-environment value under a new key, without a stop.
-
-**Moving to a new server.** `shipwick export` writes every application's
-configuration and secrets and a backup of every volume into one archive;
-`shipwick import` on the new server deploys them in dependency order and
-restores the data. The same command backs up the agent's own `shipwick.db`
-and `encryption.key`, which today the documentation asks you to copy by hand.
-
-**A second server kept ready.** Shipwick does not fail over. What it can do
-is keep a standby honest: the scheduled export restored on a second server on
-the same schedule, applications deployed and stopped there, and one command
-(`shipwick standby promote`) that starts them when the first server is gone
-and prints the DNS records to change. Minutes of downtime and a person in the
-loop, stated as such.
-
-**Deployments that survive an agent restart.** An interrupted deployment is
-marked `FAILED` and cleaned up; the containers it had started are removed.
-Resuming where it stopped would cost a restart nothing.
-
-**Metrics for whoever already has a Prometheus.** `GET /metrics` on the
-agent, in the Prometheus text format: replicas, health, restarts, CPU and
-memory per application, deployment outcomes. A week of history in SQLite
-stays for those who have nothing else; this is for those who do.
-
 ## 0.6 — Teams
 
-More than one person, more than one server, and a record of who did what.
+More than one person, more than one server, and a record of who did what;
+and first, what 0.5 — the proxy, backups, alerts, moving to another server —
+left unfinished.
+
+### Left over from 0.5
+
+Limits that 0.5 states in its documentation instead of hiding, each to be
+removed rather than explained.
+
+**Backups larger than 5 GB to a bucket.** An archive is sent to the bucket in
+one request, which S3-compatible services cap at 5 GB; a larger volume backs
+up to the server's disk only. Multipart upload removes the limit, for
+scheduled exports as well.
+
+**Backups the database has forgotten.** A server restored from yesterday's
+state does not know the backups taken since, though they are in the bucket.
+A command that adopts what the bucket holds.
+
+**A time limit for `backups.before`.** The command that runs before an
+archive is taken has one hour, fixed. `backups.before_timeout`.
+
+**A promotion that can be followed.** `shipwick standby promote` holds one
+request open until every application has started; a lost connection loses
+the answer, though not the promotion. It should be started and polled like a
+deployment, and what a standby last imported should survive a restart of its
+agent.
+
+**Exports and imports in the dashboard.** The dashboard writes an export to
+the backups and promotes a standby; a file of one's own, and an import from
+one, are the CLI's.
+
+**An init process, on request.** A process that runs as PID 1 and has no
+handler for `SIGTERM` — Node started as `node server.js` — is killed when
+its grace period ends. `init: true` in `deploy.yaml` would give it one that
+passes the signal on; it cannot be the default, because images that bring
+their own refuse a second.
+
+**A replaced replica that says so.** A container that is being stopped after
+a deployment is listed among the application's containers with nothing to
+tell it apart but the deployment it belongs to. A field in the API, for the
+dashboard and `shipwick status`.
+
+**Certificate and alert state in the list of applications.** Both are on an
+application's own page and on the server's; the list shows neither.
+
+**Redirect hostnames and `path`.** `www.example.com` redirects to the
+domain; with an application under `/api` it should redirect to the domain
+and its path.
+
+**Credential helpers.** `shipwick registry login` stores a credential on the
+server. A `credsStore` in the server's `~/.docker/config.json` is not read.
+
+**Traffic under another project name.** The agent finds the proxy's access
+log by the compose project `shipwick`; an installation under another name
+has no traffic figures and says so.
+
+### Teams
 
 **Roles per application.** A token that may deploy one application and read
 the others.
@@ -351,8 +226,8 @@ replacement with health checks and automatic rollback is the strategy, and
 traffic splitting and a way to judge the canary, for a benefit that shows at
 a scale one server does not reach.
 
-**Automatic failover.** See *A second server kept ready* in 0.5 for what is
-offered instead, and *Scheduling across machines* below for why.
+**Automatic failover.** See *A second server kept ready* in the handbook for
+what is offered instead, and *Scheduling across machines* below for why.
 
 **User accounts, SAML, LDAP.** The dashboard will accept identities from an
 OpenID Connect provider (0.6) and will not keep passwords, sessions for
