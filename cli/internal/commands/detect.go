@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ type projectKind string
 const (
 	kindNuxt   projectKind = "nuxt"
 	kindNext   projectKind = "next"
+	kindSvelte projectKind = "sveltekit"
 	kindNode   projectKind = "node"
 	kindDotnet projectKind = "dotnet"
 	kindGo     projectKind = "go"
@@ -63,6 +65,8 @@ type nodeProject struct {
 	Standalone  bool   // Next: output: "standalone" is set
 	Start       string // the CMD, as a JSON array
 	StaticDir   string // Vite, Astro: the folder the build script produces
+	NoLock      bool   // no lock file: the dependency tree is resolved anew on every build
+	Host        bool   // the server listens on localhost unless HOST says otherwise
 }
 
 type dotnetProject struct {
@@ -84,12 +88,16 @@ type goProject struct {
 type pythonProject struct {
 	Version      string // "3.13": the python image tag
 	Requirements bool   // requirements.txt exists; otherwise pyproject.toml is installed
+	Uv           bool   // uv.lock exists: the build installs exactly what it pins
 	Command      string // the CMD, as a JSON array
 }
 
 type staticProject struct {
 	Dir   string // the folder to serve, relative to deploy.yaml
 	Build string // the script that produces it, when it is a build output: "npm run build"
+	// Fallback is the page that answers the paths naming no file, for a
+	// single-page application whose router reads the path in the browser.
+	Fallback string
 }
 
 // detectProject looks at dir and reports what kind of application it holds.
@@ -152,6 +160,9 @@ var (
 	// shellPattern marks a start script that only a shell can run; the
 	// Dockerfile then goes through the package manager instead of guessing.
 	shellPattern = regexp.MustCompile("[&|;<>$`\"'\\\\*?()]")
+	// nextExport is `output: "export"` in a next.config file: the build
+	// writes plain files to out/ and there is no server to run.
+	nextExport = regexp.MustCompile("\\boutput\\s*:\\s*[\"'`]export[\"'`]")
 )
 
 func detectNode(dir string) (project, bool, error) {
@@ -187,11 +198,44 @@ func detectNode(dir string) (project, bool, error) {
 		if p.Node.NextConfig != "" {
 			config, _ := readProjectFile(filepath.Join(dir, p.Node.NextConfig))
 			p.Node.Standalone = strings.Contains(string(config), "standalone")
+			if nextExport.Match(config) {
+				p = builtSite(p, "a Next.js site exported by "+p.Node.Run+" build", "out/")
+			}
+		}
+	case pkg.depends("@sveltejs/kit"):
+		switch {
+		case pkg.depends("@sveltejs/adapter-node"):
+			p.Kind, p.Label = kindSvelte, "a SvelteKit application"
+			p.HealthPath, p.HealthLive = "/", true
+		case pkg.depends("@sveltejs/adapter-static"):
+			p = builtSite(p, "a SvelteKit site built by "+p.Node.Run+" build", "build/")
+		default:
+			// adapter-auto builds for the platforms it knows, and a server
+			// of one's own is none of them.
+			return project{}, false, errors.New("this SvelteKit project has no adapter that Shipwick can deploy\n\nInstall @sveltejs/adapter-node (a server) or @sveltejs/adapter-static (files the proxy serves), set it in svelte.config.js, and run shipwick init again")
+		}
+	case pkg.depends("@remix-run/node") || pkg.depends("@remix-run/serve"):
+		p.Kind, p.Label = kindNode, "a Remix application"
+		p.HealthPath, p.HealthLive = "/", true
+		p.Node.Start = remixStart(pkg)
+	case pkg.depends("astro") && pkg.depends("@astrojs/node") && p.Node.HasBuild:
+		// The Node adapter's standalone server; without the adapter Astro
+		// builds to files, which is the next case.
+		p.Kind, p.Label = kindNode, "an Astro application"
+		p.HealthPath, p.HealthLive = "/", true
+		p.Node.Host = true
+		p.Node.Start = jsonArray("node", "./dist/server/entry.mjs")
+		if !scriptPortPattern.MatchString(pkg.Scripts["start"]) {
+			p.Port = 4321
 		}
 	case (pkg.depends("vite") || pkg.depends("astro")) && p.Node.HasBuild && !server:
 		// A frontend that builds to files: the proxy serves those, no container.
-		p.Kind, p.Label, p.Port = kindStatic, "a site built by "+p.Node.Run+" build", 0
-		p.Static = staticProject{Dir: "dist/", Build: p.Node.Run + " build"}
+		p = builtSite(p, "a site built by "+p.Node.Run+" build", "dist/")
+		if !pkg.depends("astro") {
+			// Vite alone builds one page and routes in the browser; Astro
+			// builds a file for every page.
+			p.Static.Fallback = "index.html"
+		}
 	case server || pkg.Scripts["start"] != "":
 		p.Kind, p.Label = kindNode, "a Node.js application"
 		p.HealthPath = "/health"
@@ -200,6 +244,30 @@ func detectNode(dir string) (project, bool, error) {
 		return project{}, false, nil
 	}
 	return p, true, nil
+}
+
+// builtSite turns a package.json project into the folder its build script
+// writes.
+func builtSite(p project, label, dir string) project {
+	p.Kind, p.Label, p.Port = kindStatic, label, 0
+	p.HealthPath, p.HealthLive = "", false
+	p.Static = staticProject{Dir: dir, Build: p.Node.Run + " build"}
+	return p
+}
+
+// remixStart is the CMD of a Remix application: remix-serve with the
+// arguments of the start script, run directly so that it is PID 1. A start
+// script of another shape — a server of one's own — is treated like any Node
+// project's.
+func remixStart(pkg packageJSON) string {
+	fields := strings.Fields(pkg.Scripts["start"])
+	switch {
+	case len(fields) == 0 && pkg.depends("@remix-run/serve"):
+		return jsonArray("node_modules/.bin/remix-serve", "./build/server/index.js")
+	case len(fields) > 0 && fields[0] == "remix-serve" && !shellPattern.MatchString(strings.Join(fields, " ")):
+		return jsonArray(append([]string{"node_modules/.bin/remix-serve"}, fields[1:]...)...)
+	}
+	return nodeStart(pkg)
 }
 
 // nodeInstall picks the package manager from the lock file that is present.
@@ -225,8 +293,8 @@ func nodeInstall(dir string) nodeProject {
 	}
 	// No lock file: the build cannot be reproducible, but it can work.
 	return nodeProject{
-		Manifests: "package.json",
-		Install:   "npm install", InstallProd: "npm install --omit=dev", Prune: "npm prune --omit=dev", Run: "npm run",
+		Manifests: "package.json", NoLock: true,
+		Install: "npm install", InstallProd: "npm install --omit=dev", Prune: "npm prune --omit=dev", Run: "npm run",
 	}
 }
 
@@ -372,7 +440,7 @@ var (
 
 func detectPython(dir string) (project, error) {
 	var deps strings.Builder
-	py := pythonProject{Version: "3.13"}
+	py := pythonProject{Version: "3.13", Uv: exists(dir, "uv.lock") && exists(dir, "pyproject.toml")}
 	for _, name := range []string{"requirements.txt", "pyproject.toml"} {
 		data, err := readProjectFile(filepath.Join(dir, name))
 		if err != nil {

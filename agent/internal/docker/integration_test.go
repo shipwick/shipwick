@@ -52,7 +52,7 @@ func TestIntegrationContainerLifecycle(t *testing.T) {
 	if err := rt.EnsureNetwork(ctx); err != nil {
 		t.Fatalf("EnsureNetwork must be idempotent: %v", err)
 	}
-	if err := rt.PullImage(ctx, testImage); err != nil {
+	if err := rt.PullImage(ctx, testImage, nil); err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
 	if ok, err := rt.ImageExists(ctx, testImage); err != nil || !ok {
@@ -166,7 +166,7 @@ func TestIntegrationFollowLogs(t *testing.T) {
 	if err := rt.EnsureNetwork(ctx); err != nil {
 		t.Fatalf("EnsureNetwork: %v", err)
 	}
-	if err := rt.PullImage(ctx, testImage); err != nil {
+	if err := rt.PullImage(ctx, testImage, nil); err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
 	id, _, err := rt.CreateContainer(ctx, ContainerSpec{App: app, DeploymentID: 1, Sequence: 1, Replica: 1, Image: testImage})
@@ -221,7 +221,7 @@ func TestIntegrationStats(t *testing.T) {
 	if err := rt.EnsureNetwork(ctx); err != nil {
 		t.Fatalf("EnsureNetwork: %v", err)
 	}
-	if err := rt.PullImage(ctx, testImage); err != nil {
+	if err := rt.PullImage(ctx, testImage, nil); err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
 	id, _, err := rt.CreateContainer(ctx, ContainerSpec{App: app, DeploymentID: 1, Sequence: 1, Replica: 1, Image: testImage, MemoryBytes: 64 << 20})
@@ -272,7 +272,7 @@ func TestIntegrationStats(t *testing.T) {
 
 func TestIntegrationPullMissingImageFails(t *testing.T) {
 	rt, ctx := newIntegrationRuntime(t)
-	if err := rt.PullImage(ctx, "shipwick/does-not-exist:nope"); err == nil {
+	if err := rt.PullImage(ctx, "shipwick/does-not-exist:nope", nil); err == nil {
 		t.Error("expected an error pulling a missing image")
 	}
 }
@@ -299,7 +299,7 @@ func TestIntegrationServiceNames(t *testing.T) {
 	if err := rt.EnsureNetwork(ctx); err != nil {
 		t.Fatalf("EnsureNetwork: %v", err)
 	}
-	if err := rt.PullImage(ctx, testImage); err != nil {
+	if err := rt.PullImage(ctx, testImage, nil); err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
 
@@ -390,5 +390,72 @@ func TestIntegrationServiceNames(t *testing.T) {
 	}
 	if resolves() {
 		t.Error("a restarted replica came back under its name although the name was taken away while it was stopped")
+	}
+}
+
+func TestIntegrationFollowOutput(t *testing.T) {
+	rt, ctx := newIntegrationRuntime(t)
+	app := fmt.Sprintf("it-output-%d", time.Now().UnixNano()%1_000_000)
+
+	if err := rt.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+	if err := rt.PullImage(ctx, testImage, nil); err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+	started := time.Now().Add(-time.Minute)
+	id, _, err := rt.CreateContainer(ctx, ContainerSpec{App: app, DeploymentID: 1, Sequence: 1, Replica: 1, Image: testImage,
+		Entrypoint: []string{"sh", "-c", "echo one; echo not-this >&2; echo two; exec sleep 300"}})
+	if err != nil {
+		t.Fatalf("CreateContainer: %v", err)
+	}
+	t.Cleanup(func() { rt.RemoveContainer(context.Background(), id) })
+	if err := rt.StartContainer(ctx, id); err != nil {
+		t.Fatalf("StartContainer: %v", err)
+	}
+
+	follow := func(since time.Time) (<-chan string, <-chan error) {
+		lines := make(chan string, 100)
+		done := make(chan error, 1)
+		go func() {
+			done <- rt.FollowOutput(ctx, id, since, func(line []byte) { lines <- string(line) })
+		}()
+		return lines, done
+	}
+
+	// Standard output only, line by line, without Docker's timestamps.
+	lines, first := follow(started)
+	for _, want := range []string{"one", "two"} {
+		select {
+		case got := <-lines:
+			if got != want {
+				t.Fatalf("line = %q, want %q", got, want)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("no line, want %q", want)
+		}
+	}
+
+	// From a later moment on, what was written before is not repeated.
+	lateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	err = rt.FollowOutput(lateCtx, id, time.Now().Add(time.Minute), func(line []byte) {
+		t.Errorf("a follow from later on was handed %q", line)
+	})
+	if err != nil {
+		t.Errorf("FollowOutput ended by its context: %v", err)
+	}
+
+	// The container going away ends the stream without an error.
+	if err := rt.RemoveContainer(ctx, id); err != nil {
+		t.Fatalf("RemoveContainer: %v", err)
+	}
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Errorf("FollowOutput after container removal: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("FollowOutput did not return after its container was removed")
 	}
 }

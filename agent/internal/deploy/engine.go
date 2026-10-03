@@ -35,7 +35,9 @@ var (
 // production implementation.
 type Runtime interface {
 	EnsureNetwork(ctx context.Context) error
-	PullImage(ctx context.Context, image string) error
+	// PullImage pulls with the credential given; with none, with whatever
+	// the Docker configuration file on the server offers for the registry.
+	PullImage(ctx context.Context, image string, auth *docker.RegistryAuth) error
 	ImageExists(ctx context.Context, image string) (bool, error)
 	// RemoveImage untags an image, or returns docker.ErrImageInUse if a
 	// container still uses it.
@@ -74,6 +76,15 @@ type Runtime interface {
 	// ProxyContainer is the reverse proxy's own container, for the files it
 	// serves itself.
 	ProxyContainer(ctx context.Context) (string, error)
+	// ImageLayers returns the diff IDs of every image's layers, base layer
+	// first: what the daemon has, for a client that asks what to send.
+	ImageLayers(ctx context.Context) ([][]string, error)
+	// RegistryLogin checks a credential against its registry and keeps
+	// nothing; a credential that is not accepted is a *docker.LoginError.
+	RegistryLogin(ctx context.Context, auth docker.RegistryAuth) error
+	// FollowOutput streams the lines a container writes to standard output
+	// from `since` on, until it stops. The proxy's access log is read with it.
+	FollowOutput(ctx context.Context, id string, since time.Time, emit func(line []byte)) error
 }
 
 type Options struct {
@@ -152,6 +163,32 @@ type Options struct {
 	// deployment that serves them, one archive per application. Empty means
 	// static applications cannot be uploaded to this agent.
 	UploadDir string
+
+	// DashboardURL is where the dashboard is served, for clients that want
+	// to send the user there. Empty: it has no hostname.
+	DashboardURL string
+	// AlertMemoryPercent is the share of its memory limit at which a replica
+	// raises an alert, AlertDiskPercent how full the disk may get before it
+	// does. DiskUsage measures that disk; nil, or not ok, means it cannot be
+	// measured here, and there is no disk alert.
+	AlertMemoryPercent int
+	AlertDiskPercent   int
+	DiskUsage          func() (usage api.DiskUsage, ok bool)
+	// DNSChallenge says that the proxy obtains certificates through a DNS
+	// record rather than from the server itself. A hostname may then stand
+	// behind Cloudflare's proxy, and may be a wildcard.
+	DNSChallenge bool
+	// ProxyTLSAddr is where the proxy accepts TLS connections, as the agent
+	// reaches it: the certificate each hostname is served with is read there.
+	// CertificateProbe does the reading; tests substitute their own.
+	ProxyTLSAddr     string
+	CertificateProbe CertificateProbe
+	// Backups is where the agent keeps the backups it takes, and what it
+	// backs up of itself: see backups.go.
+	Backups BackupOptions
+	// Transfer is what the agent does on a schedule for the server that would
+	// replace it, or as that server: see export.go and standby.go.
+	Transfer TransferOptions
 }
 
 // ProbeFunc checks one replica once. A nil error means healthy.
@@ -206,6 +243,12 @@ func (o *Options) applyDefaults() {
 	if o.MetricsRetention == 0 {
 		o.MetricsRetention = 7 * 24 * time.Hour
 	}
+	if o.AlertMemoryPercent == 0 {
+		o.AlertMemoryPercent = defaultAlertMemoryPercent
+	}
+	if o.AlertDiskPercent == 0 {
+		o.AlertDiskPercent = defaultAlertDiskPercent
+	}
 }
 
 // cleanupTimeout bounds work that must happen even when the triggering
@@ -252,6 +295,29 @@ type Engine struct {
 	// names are the names each container answers to on the services network,
 	// as far as this agent gave or found them: see setNames. Guarded by mu.
 	names map[string][]string
+
+	// alerts are the conditions that hold right now: see alerts.go.
+	alerts alertBook
+	// certs are the certificates the operator supplied: see certificates.go.
+	certs certificateCache
+
+	// hashes are the bcrypt hashes of the basic-auth accounts in the routes:
+	// see accounts.go.
+	hashes hashCache
+
+	// traffic is what the proxy's access log said (traffic.go), certStatus
+	// what its certificates look like (certstatus.go).
+	traffic    *trafficRecorder
+	certStatus *certWatch
+	// drains are the containers being retired in the background, by ID: see
+	// drain.go. Guarded by mu.
+	drains map[string]*drain
+	// backups is when each application was last looked at for a backup that
+	// is due: see backups.go.
+	backups *backupSchedule
+	// transfer is the import that runs or ran last, and how far the export
+	// and standby schedules have looked: see import.go.
+	transfer *transfer
 }
 
 // appLock records who holds an application, because the two kinds of holder
@@ -279,9 +345,14 @@ func New(st *store.Store, rt Runtime, opts Options) *Engine {
 		names:          map[string][]string{},
 	}
 	e.idle = sync.NewCond(&e.mu)
+	e.drains = map[string]*drain{}
 	e.sup = newSupervisor(e)
 	e.metrics = newMetricsCache()
 	e.jobs = newJobRunner()
+	e.traffic = newTrafficRecorder()
+	e.certStatus = newCertWatch()
+	e.backups = newBackupSchedule()
+	e.transfer = newTransfer()
 	return e
 }
 
@@ -374,6 +445,37 @@ func (e *Engine) Deploy(ctx context.Context, app spec.App) (store.Deployment, er
 	})
 }
 
+// admit is what every deployment passes before it is recorded, whatever its
+// origin; a refusal here is a config error, and nothing has been recorded,
+// pulled or started. Validate runs the same checks for a document that is not
+// being deployed yet: beforeBuild then lets a `build` without its image pass,
+// because the image is built once the document is known to be acceptable.
+func (e *Engine) admit(ctx context.Context, app spec.App, beforeBuild bool) error {
+	if app.Build != nil && app.Image == "" && !beforeBuild {
+		return ErrImageNotBuilt
+	}
+	if err := e.checkDomain(ctx, app); err != nil {
+		return err
+	}
+	if err := e.checkWildcards(ctx, app); err != nil {
+		return err
+	}
+	return e.checkPublish(ctx, app.Name, app.Publish)
+}
+
+// Validate answers what Deploy would answer for app, short of deploying it:
+// nothing is recorded, pulled or started, and no lock is taken — a deployment
+// that is running for the application neither delays the answer nor notices
+// the question. It is asked before an image is built or a folder uploaded, so
+// neither has to exist yet.
+func (e *Engine) Validate(ctx context.Context, app spec.App) error {
+	app, err := e.resolveSecrets(ctx, app)
+	if err != nil {
+		return err
+	}
+	return e.admit(ctx, app, true)
+}
+
 // origin is what a deployment is made from: a spec, and where it came from.
 type origin struct {
 	spec     spec.App
@@ -382,6 +484,10 @@ type origin struct {
 	// static is the uploaded folder a static application serves; nil for an
 	// application that runs containers.
 	static *store.StaticFiles
+	// dormant: the deployment is to exist without running (see
+	// executeDormant). An import sets it for an application that was stopped
+	// where it comes from.
+	dormant bool
 }
 
 // start is the one way a deployment begins, whatever its origin. resolve runs
@@ -397,16 +503,7 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 		return store.Deployment{}, err
 	}
 	app := o.spec
-	// Refused up front, as a config error: nothing is recorded, pulled or started.
-	if app.Build != nil && app.Image == "" {
-		e.unlock(name)
-		return store.Deployment{}, ErrImageNotBuilt
-	}
-	if err := e.checkDomain(ctx, app); err != nil {
-		e.unlock(name)
-		return store.Deployment{}, err
-	}
-	if err := e.checkPublish(ctx, app.Name, app.Publish); err != nil {
+	if err := e.admit(ctx, app, false); err != nil {
 		e.unlock(name)
 		return store.Deployment{}, err
 	}
@@ -421,21 +518,34 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 		return store.Deployment{}, err
 	}
 	e.log.Info("deployment created", "app", d.Application, "deployment", d.ID, "version", d.Version, "kind", d.Kind)
+	r := e.newRollout(d)
+	r.dormant = o.dormant
+	e.launch(r)
+	return d, nil
+}
 
+// launch runs a deployment in the background. The caller holds the
+// application's lock and hands it over.
+func (e *Engine) launch(r *rollout) {
+	d := r.d
 	go func() {
 		defer e.opDone()
-		e.run(d)
+		interrupted := e.run(r)
 
 		// completed_at is the signal clients wait for before issuing the next
 		// operation, so the lock must be free by the time it becomes visible.
-		e.release(name)
+		e.release(d.Application)
+		if interrupted {
+			// Not completed: the agent that starts next takes it from here,
+			// and whoever polls it keeps polling.
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
 		if err := e.store.CompleteDeployment(ctx, d.ID, time.Now()); err != nil {
 			e.log.Error("could not stamp deployment completion", "deployment", d.ID, "error", err)
 		}
 	}()
-	return d, nil
 }
 
 // Wait blocks until every operation in progress, background deployments
@@ -448,9 +558,9 @@ func (e *Engine) Wait() {
 	}
 }
 
-// Shutdown rejects new operations, aborts in-flight deployments (each is
-// marked FAILED and cleaned up) and waits for running operations until ctx
-// expires.
+// Shutdown rejects new operations, interrupts in-flight deployments (each
+// stays as it is, for the next start to resume: see resume.go) and waits for
+// running operations until ctx expires.
 func (e *Engine) Shutdown(ctx context.Context) error {
 	e.mu.Lock()
 	e.closed = true
@@ -489,7 +599,7 @@ func (e *Engine) pullImage(ctx context.Context, d *store.Deployment) error {
 		e.step(ctx, d, "Using image %s, sent from a developer's machine", d.Image)
 		return nil
 	}
-	pullErr := e.rt.PullImage(ctx, d.Image)
+	pullErr := e.pull(ctx, d.Image)
 	if pullErr == nil {
 		e.step(ctx, d, "Pulled image %s", d.Image)
 		return nil
@@ -648,6 +758,9 @@ func (e *Engine) retireOthers(ctx context.Context, d *store.Deployment, previous
 		if c.Job != "" {
 			continue // a job of the old version runs to its end
 		}
+		if e.draining(c.ID) {
+			continue // replaced a moment ago and on its way out: see drain.go
+		}
 		if c.DeploymentID != d.ID {
 			old = append(old, c)
 		}
@@ -669,13 +782,14 @@ func (e *Engine) retireOthers(ctx context.Context, d *store.Deployment, previous
 // period rather than one per container. The result is aligned with the input.
 func (e *Engine) retireAll(ctx context.Context, containers []docker.Container) []error {
 	return parallel(containers, func(c docker.Container) error {
-		return e.retireContainer(ctx, c.ID)
+		return e.retireContainer(ctx, c.ID, e.gracePeriodOf(ctx, c.DeploymentID))
 	})
 }
 
-// retireContainer stops a container gracefully, then removes it.
-func (e *Engine) retireContainer(ctx context.Context, id string) error {
-	if err := e.rt.StopContainer(ctx, id, e.opts.StopTimeout); err != nil {
+// retireContainer stops a container gracefully, with timeout as its grace
+// period, then removes it.
+func (e *Engine) retireContainer(ctx context.Context, id string, timeout time.Duration) error {
+	if err := e.rt.StopContainer(ctx, id, timeout); err != nil {
 		e.log.Warn("graceful stop failed, forcing removal", "container", id, "error", err)
 	}
 	return e.removeContainer(ctx, id)

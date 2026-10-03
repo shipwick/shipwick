@@ -119,7 +119,7 @@ func (e *Engine) launchJob(ctx context.Context, d store.Deployment, run store.Jo
 		User:       d.Spec.User,
 		Job:        &docker.JobSpec{Name: run.Job, RunID: run.ID},
 	}
-	id, name, err := e.rt.CreateContainer(ctx, cspec)
+	id, name, err := e.createContainer(ctx, cspec)
 	if err != nil {
 		e.finishRun(run, api.RunFailed, nil, "could not create the container: "+err.Error())
 		return "", err

@@ -77,7 +77,7 @@ trimmed. Values are at most 64 KB.`,
 				return err
 			}
 			c.ui.Success("Stored secret %s", name)
-			c.ui.Println(c.ui.Styled(ui.Dim, fmt.Sprintf("  Use it as ${%s} in an env value of deploy.yaml; it applies from the next deployment on.", name)))
+			c.ui.Println(c.ui.Styled(ui.Dim, fmt.Sprintf("  Use it as ${%s} in an env value or a proxy.basic_auth password of deploy.yaml; it applies from the next deployment on.", name)))
 			return nil
 		},
 	}
@@ -89,19 +89,28 @@ trimmed. Values are at most 64 KB.`,
 // without echo, or from whatever standard input is. It never returns the
 // value in an error.
 func (c *cli) readSecretValue(name, fromFile string) (string, error) {
+	return c.readHidden("Value for "+name, fromFile, false, api.MaxSecretValueBytes,
+		"no value on standard input\n\nPipe it in: printf '%s' \"$VALUE\" | shipwick secret set "+name+"\nor give a file with --from-file")
+}
+
+// readHidden is how every value that must not be seen is read: from the file
+// given, from a terminal without echo under the prompt, or from whatever
+// standard input is — and from standard input in any case when the caller was
+// asked to. noInput is the error for an empty pipe.
+func (c *cli) readHidden(prompt, fromFile string, fromStdin bool, limit int64, noInput string) (string, error) {
 	var raw []byte
 	var err error
 	switch {
 	case fromFile != "":
 		raw, err = os.ReadFile(fromFile)
-	case isTerminal(c.in):
-		c.ui.Printf("Value for %s: ", name)
+	case isTerminal(c.in) && !fromStdin:
+		c.ui.Printf("%s: ", prompt)
 		raw, err = term.ReadPassword(int(c.in.(*os.File).Fd()))
 		c.ui.Println()
 	default:
-		raw, err = io.ReadAll(io.LimitReader(c.in, api.MaxSecretValueBytes+2))
+		raw, err = io.ReadAll(io.LimitReader(c.in, limit+2))
 		if err == nil && len(raw) == 0 {
-			return "", errors.New("no value on standard input\n\nPipe it in: printf '%s' \"$VALUE\" | shipwick secret set " + name + "\nor give a file with --from-file")
+			return "", errors.New(noInput)
 		}
 	}
 	if err != nil {

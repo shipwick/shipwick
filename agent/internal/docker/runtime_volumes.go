@@ -60,6 +60,9 @@ func (r *Runtime) ListVolumes(ctx context.Context) ([]Volume, error) {
 		if app == "" || !ok || volume == "" {
 			continue // labelled by hand, or by a build that named volumes differently
 		}
+		if IsScratchVolume(volume) {
+			continue // gone with the verification that made it
+		}
 		size, known := sizes[v.Name]
 		if !known {
 			size = -1

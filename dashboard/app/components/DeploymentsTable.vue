@@ -20,7 +20,7 @@ function duration(d: Deployment): string {
 }
 
 function hasOrigin(d: Deployment): boolean {
-  return d.kind === 'rollback' || d.kind === 'redeploy'
+  return d.kind !== 'deploy'
 }
 
 // Who started each deployment. The column only appears once the agent records

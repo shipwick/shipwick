@@ -78,12 +78,30 @@ type Fake struct {
 	removedVolumes []string
 	// loaded are the references LoadImage was given, see fake_images.go.
 	loaded []string
+	// registries: private images and refused logins, see fake_registry.go.
+	registries registryState
 
 	// ProxyErr makes ProxyContainer fail: the proxy is not a container here.
 	// The proxy's directories and what was removed from it: see fake_proxy.go.
 	ProxyErr     error
 	proxyDirs    map[string]bool
 	proxyRemoved []string
+
+	// layers are the images ImageLayers reports, see fake_layers.go.
+	// LayersErr makes it fail; LoadErr makes LoadImage refuse an archive
+	// after reading it, as the daemon does.
+	layers    [][]string
+	LayersErr error
+	LoadErr   error
+	// FollowErr makes FollowOutput fail. What containers print on standard
+	// output and who followed it: see fake_traffic.go.
+	FollowErr error
+	output    map[string]chan []byte
+	follows   []time.Time
+	// How containers stop: see fake_stop.go.
+	stop *stopControl
+	// SaveErr makes SaveImage fail: see fake_export.go.
+	SaveErr error
 }
 
 func New() *Fake {
@@ -157,7 +175,10 @@ func (f *Fake) Pulled() []string {
 
 func (f *Fake) EnsureNetwork(context.Context) error { return nil }
 
-func (f *Fake) PullImage(ctx context.Context, image string) error {
+func (f *Fake) PullImage(ctx context.Context, image string, auth *docker.RegistryAuth) error {
+	if err := f.recordPull(image, auth); err != nil {
+		return err
+	}
 	if f.PullDelay > 0 {
 		select {
 		case <-time.After(f.PullDelay):
@@ -249,12 +270,15 @@ func (f *Fake) StartContainer(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *Fake) StopContainer(_ context.Context, id string, _ time.Duration) error {
+func (f *Fake) StopContainer(ctx context.Context, id string, timeout time.Duration) error {
 	time.Sleep(f.StopDelay)
+	if err := f.holdStop(ctx, id); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c, ok := f.containers[id]; ok && c.Running {
-		c.Running, c.State, c.ExitCode, c.IP = false, "exited", 0, ""
+		c.Running, c.State, c.ExitCode, c.IP = false, "exited", f.stopExit(c, timeout), ""
 		f.stoppedAt[c.Name] = time.Now()
 		f.signalStopped(id)
 	}

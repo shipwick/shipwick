@@ -61,15 +61,16 @@ func (r raw) validateBuild(verr *ValidationError) *Build {
 	}
 	b := &Build{Dockerfile: DefaultDockerfile}
 
-	if context := strings.TrimSpace(r.Build.Context); context == "" {
-		verr.add("build.context", "is required", ".")
-	} else {
-		cleaned, err := validateBuildPath(context)
-		if err != nil {
-			verr.add("build.context", err.Error(), ". for the directory of deploy.yaml, or a folder in it such as api")
-		}
-		b.Context = cleaned
+	// A build that names only its Dockerfile is built where deploy.yaml is.
+	context := strings.TrimSpace(r.Build.Context)
+	if context == "" {
+		context = "."
 	}
+	cleaned, err := validateBuildPath(context)
+	if err != nil {
+		verr.add("build.context", err.Error(), ". for the directory of deploy.yaml, or a folder in it such as api")
+	}
+	b.Context = cleaned
 
 	if dockerfile := strings.TrimSpace(r.Build.Dockerfile); dockerfile != "" {
 		cleaned, err := validateBuildPath(dockerfile)
@@ -79,7 +80,7 @@ func (r raw) validateBuild(verr *ValidationError) *Build {
 		b.Dockerfile = cleaned
 	}
 
-	if r.Static != "" {
+	if r.Static.Dir != "" {
 		verr.add("build", "cannot be combined with static: a static application has no image to build", "one of build and static")
 	}
 	// The CLI fills in image with the reference the server answered; any

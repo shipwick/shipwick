@@ -7,12 +7,14 @@
 #   name: web
 #   static: dist/
 #   domain: example.com
+# A single-page application answers every path that names no file with one page:
+#   static: {dir: dist/, fallback: index.html}
 
 # Lowercase letters, digits and dashes. Identifies the application on the server.
 name: my-api
 
-# Any image reference Docker understands. For private registries, run
-# `docker login <registry>` once on the server; Shipwick uses those credentials.
+# Any image reference Docker understands. For a private registry, give the
+# server a credential once: shipwick registry login ghcr.io --username <name>
 # Pin a version tag: deployments are recorded by it (1.4.2 here).
 image: ghcr.io/company/my-api:1.4.2
 
@@ -21,8 +23,8 @@ image: ghcr.io/company/my-api:1.4.2
 # server. Paths are relative to this file. Replaces `image`.
 # build: .
 # build:
-#   context: .
-#   dockerfile: Dockerfile   # default
+#   context: .               # default: the directory of this file
+#   dockerfile: Dockerfile   # default; relative to the context
 
 # Run something other than the image's default: these replace its ENTRYPOINT,
 # CMD and USER. A string is one argument; use a list for several. Nothing is
@@ -41,8 +43,31 @@ domain: api.example.com
 
 # More hostnames served exactly like `domain`, and hostnames redirected to it
 # (308, same path and query) — www, an old domain. Each gets a certificate.
+# `domain` and aliases may be a wildcard, "*.example.com", when the agent has
+# a Cloudflare API token or you supplied a certificate that covers it
+# (shipwick cert set).
 # aliases: [api2.example.com]
 # redirects: [www.api.example.com]
+
+# Serve only one path of the domain, and everything under it; another
+# application takes another path, or the rest. The longest path wins.
+# path: /api
+
+# What the proxy does for this application besides passing requests on.
+# Every path here is the path as the visitor asks for it.
+# proxy:
+#   strip_prefix: true              # the application sees /users for /api/users; needs path
+#   headers:                        # set on every response
+#     X-Frame-Options: DENY
+#     Strict-Transport-Security: max-age=31536000
+#   basic_auth:
+#     - path: /api/admin            # optional; without it, the whole application
+#       username: admin
+#       password: ${ADMIN_PASSWORD} # a secret, filled in like an env value
+#   redirects:
+#     - from: /api/old
+#       to: /api/new                # or an https:// URL
+#       status: 308                 # 301, 302, 307 or 308; default 308
 
 # Number of identical containers to run. Default: 1.
 replicas: 2
@@ -98,6 +123,18 @@ deploy:
 #   - name: data
 #     path: /var/lib/postgresql/data
 
+# Backups of the volumes, taken by the server on a schedule (five cron fields,
+# UTC) and kept there and, when the agent has one, in an S3 bucket. `before`
+# runs inside the running replica first — a dump, a checkpoint — and a non-zero
+# exit fails the backup; `stop: true` stops the application while the archive
+# is taken. `shipwick backups` lists them, `shipwick backups verify` proves
+# that one restores.
+# backups:
+#   schedule: "0 3 * * *"
+#   keep: 7       # successful backups kept; default 7, up to 365
+#   before: ["pg_dump", "-U", "postgres", "-f", "/var/lib/postgresql/data/backup.sql", "app"]
+#   stop: false   # default false
+
 # Ports that are not HTTP, published on the server itself: a database reached
 # from outside the server, a game server. Needs replicas: 1 and the recreate
 # strategy: a server port has one holder. Published ports bypass the host
@@ -111,8 +148,15 @@ deploy:
 # rolling (default): replicas are replaced one at a time, the application keeps
 # serving. recreate: the running version is stopped before the new one starts;
 # required with volumes and publish.
+#
+# stop_timeout: how long a replica that is being stopped — replaced by a
+# deployment, or by `shipwick stop` — gets to finish what it has in hand after
+# SIGTERM, before it is killed. Default 10s, up to 10m. Raise it for WebSockets
+# or long uploads; the application has to handle SIGTERM for the time to be of
+# use.
 # deploy:
 #   strategy: recreate
+#   stop_timeout: 2m
 
 # Ship logs to a collector instead of the server's disk: json-file (default),
 # local, syslog, journald, gelf, fluentd, awslogs or splunk, with the driver's

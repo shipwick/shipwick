@@ -2,6 +2,7 @@
 import type { Server } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import type { IconName } from '~/components/UiIcon.vue'
+import { summarizeAlerts, worstAlertTone } from '~/utils/alerts'
 
 /** Sidebar content; rendered in the fixed sidebar on desktop and in the drawer on small screens. */
 const props = defineProps<{
@@ -24,14 +25,20 @@ const ITEMS: Item[] = [
   { to: '/deployments', label: 'Deployments', icon: 'deployments', match: p => p.startsWith('/deployments') },
   { to: '/servers', label: 'Servers', icon: 'servers', match: p => p.startsWith('/servers') },
   { to: '/logs', label: 'Logs', icon: 'logs', match: p => p.startsWith('/logs') },
-  // Every role may list volumes and secrets; changing them is admin's, and the pages say so.
+  // Every role may list volumes, secrets, registries and certificates; changing them is admin's, and the pages say so.
   { to: '/volumes', label: 'Volumes', icon: 'disk', match: p => p.startsWith('/volumes') },
   { to: '/secrets', label: 'Secrets', icon: 'lock', match: p => p.startsWith('/secrets') },
+  { to: '/registries', label: 'Registries', icon: 'registry', match: p => p.startsWith('/registries') },
+  { to: '/certificates', label: 'Certificates', icon: 'certificate', match: p => p.startsWith('/certificates') },
   // Only once the role is known to be admin: a read-only token should not see the entry flash.
   { to: '/tokens', label: 'Tokens', icon: 'key', match: p => p.startsWith('/tokens'), admin: true },
 ]
 
 const items = computed(() => ITEMS.filter(item => !item.admin || access.knownTo('admin')))
+
+// Active alerts are visible from every page: a mark on the Servers entry, where they are listed.
+const alerts = computed(() => props.server?.alerts ?? [])
+const alertTone = computed(() => worstAlertTone(alerts.value))
 
 async function signOut() {
   signingOut.value = true
@@ -58,6 +65,14 @@ async function signOut() {
           >
             <UiIcon :name="item.icon" />
             {{ item.label }}
+            <span
+              v-if="item.to === '/servers' && alertTone"
+              class="mono ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-2xs font-medium"
+              :class="alertTone === 'danger' ? 'bg-danger-solid text-[#fff]' : 'border border-warn-line bg-warn-bg text-warn'"
+              :title="summarizeAlerts(alerts)"
+            >
+              {{ alerts.length }}<span class="sr-only"> {{ alerts.length === 1 ? 'alert' : 'alerts' }}</span>
+            </span>
           </NuxtLink>
         </li>
       </ul>

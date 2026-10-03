@@ -21,8 +21,9 @@ import (
 	"github.com/shipwick/shipwick/pkg/version"
 )
 
-// requestTimeout covers the slowest regular call: stopping an application
-// waits for every replica's graceful shutdown.
+// requestTimeout covers the slowest regular call. Stopping and deleting an
+// application are not regular: they wait for every replica's graceful
+// shutdown, which deploy.stop_timeout may set to minutes (see callVia).
 const requestTimeout = 90 * time.Second
 
 type Client struct {
@@ -80,13 +81,20 @@ func IsCode(err error, code string) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == code
 }
 
-// UnreachableError means no HTTP response was obtained at all.
+// UnreachableError means the agent did not answer: no HTTP response was
+// obtained at all, or the proxy in front of the agent answered in its place.
 type UnreachableError struct {
 	URL string
 	Err error
+	// ProxyStatus is the status the proxy answered with for an agent it could
+	// not reach; zero when nothing answered.
+	ProxyStatus int
 }
 
 func (e *UnreachableError) Error() string {
+	if e.ProxyStatus != 0 {
+		return fmt.Sprintf("the Shipwick agent at %s is not answering: the proxy in front of it returned HTTP %d", e.URL, e.ProxyStatus)
+	}
 	return fmt.Sprintf("cannot reach the Shipwick agent at %s\n  %v", e.URL, e.Err)
 }
 
@@ -114,7 +122,7 @@ func (c *Client) Deploy(ctx context.Context, name string, config []byte) (api.De
 }
 
 func (c *Client) Stop(ctx context.Context, name string) (api.ApplicationDetail, error) {
-	return call[api.ApplicationDetail](ctx, c, http.MethodPost, "/applications/"+url.PathEscape(name)+"/stop", nil, nil)
+	return callVia[api.ApplicationDetail](ctx, c, c.stream, http.MethodPost, "/applications/"+url.PathEscape(name)+"/stop", nil, nil)
 }
 
 func (c *Client) Start(ctx context.Context, name string) (api.ApplicationDetail, error) {
@@ -122,7 +130,7 @@ func (c *Client) Start(ctx context.Context, name string) (api.ApplicationDetail,
 }
 
 func (c *Client) Delete(ctx context.Context, name string) error {
-	_, err := call[struct{}](ctx, c, http.MethodDelete, "/applications/"+url.PathEscape(name), nil, nil)
+	_, err := callVia[struct{}](ctx, c, c.stream, http.MethodDelete, "/applications/"+url.PathEscape(name), nil, nil)
 	return err
 }
 
@@ -177,8 +185,15 @@ func get[T any](ctx context.Context, c *Client, path string, query url.Values) (
 }
 
 func call[T any](ctx context.Context, c *Client, method, path string, query url.Values, body []byte) (T, error) {
+	return callVia[T](ctx, c, c.http, method, path, query, body)
+}
+
+// callVia is call through a client of the caller's choice: c.stream, which
+// has no overall timeout, for the calls that wait for replicas to stop. They
+// end when the agent answers or the context does.
+func callVia[T any](ctx context.Context, c *Client, httpClient *http.Client, method, path string, query url.Values, body []byte) (T, error) {
 	var zero T
-	resp, err := c.send(ctx, c.http, method, path, query, body)
+	resp, err := c.send(ctx, httpClient, method, path, query, body)
 	if err != nil {
 		return zero, err
 	}
@@ -242,6 +257,17 @@ func decodeError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var envelope api.ErrorResponse
 	if err := json.Unmarshal(data, &envelope); err != nil || envelope.Error.Code == "" {
+		// The agent answers in the envelope, whatever it answers. These three
+		// without one are the proxy saying that the agent is away: restarting
+		// for an upgrade, or stopped. Whoever waits for a deployment waits on.
+		switch resp.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			away := &UnreachableError{ProxyStatus: resp.StatusCode, Err: fmt.Errorf("HTTP %d from the proxy", resp.StatusCode)}
+			if resp.Request != nil && resp.Request.URL != nil {
+				away.URL = resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
+			}
+			return away
+		}
 		return &APIError{
 			Status:  resp.StatusCode,
 			Code:    api.CodeInternal,

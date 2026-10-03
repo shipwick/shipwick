@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shipwick/shipwick/pkg/cloudflare"
 )
 
 // A hostname enters the proxy configuration only once it points at this
@@ -28,6 +30,10 @@ const (
 	// not hold up a rollout for long, or the supervisor's tick at all.
 	lookupTimeout = 3 * time.Second
 )
+
+// cloudflareTokenVariable is the agent's setting that lets a hostname stay
+// behind Cloudflare's proxy; messages name it.
+const cloudflareTokenVariable = "SHIPWICK_CLOUDFLARE_API_TOKEN"
 
 // hostnameCache remembers the last verdict on every hostname routing was asked
 // to serve, so that a lookup happens every hostnameReadyFor or
@@ -70,6 +76,15 @@ func (c *hostnameCache) record(host string, ready bool, why string) {
 	c.entries[host] = hostnameVerdict{ready: ready, why: why, checkedAt: c.now()}
 }
 
+// decide records a verdict that no lookup stands behind: it holds for as long
+// as whoever reached it keeps reaching it, and is due for a lookup the moment
+// they stop.
+func (c *hostnameCache) decide(host string, ready bool, why string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[host] = hostnameVerdict{ready: ready, why: why}
+}
+
 func (c *hostnameCache) get(host string) (hostnameVerdict, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -93,6 +108,10 @@ func (e *Engine) hostnameReady(host string) (ready bool, why string) {
 // resolver that does not answer must not stop replicas from being renamed.
 func (e *Engine) refreshHostnames(ctx context.Context, hosts []string) {
 	for _, h := range hosts {
+		if ready, why, decided := e.decidedWithoutLookup(h); decided {
+			e.dns.decide(h, ready, why)
+			continue
+		}
 		if !e.dns.stale(h) {
 			continue
 		}
@@ -110,7 +129,8 @@ func (e *Engine) refreshHostnames(ctx context.Context, hosts []string) {
 
 // verdict turns a lookup's result into ready, or a reason that says what to
 // do next: the record to create, with the server's own addresses, or — when
-// the hostname resolves to Cloudflare — the proxy switch to turn off. With no
+// the hostname resolves to Cloudflare — the proxy switch to turn off, unless
+// certificates come through the DNS challenge and the switch may stay on. With no
 // ServerAddresses known, resolving at all is enough, and no record can be
 // suggested.
 func (e *Engine) verdict(host string, addrs []string, err error) (ready bool, why string) {
@@ -122,9 +142,14 @@ func (e *Engine) verdict(host string, addrs []string, err error) (ready bool, wh
 		return false, "could not be resolved: " + err.Error()
 	case len(e.opts.ServerAddresses) == 0 || pointsAt(addrs, e.opts.ServerAddresses):
 		return true, ""
-	case behindCloudflare(addrs):
-		return false, fmt.Sprintf("resolves to Cloudflare's proxy (%s), not to this server: turn the proxy off for this record (DNS only), or wait for Cloudflare support in a later release",
-			strings.Join(addrs, ", "))
+	case cloudflare.Proxied(addrs):
+		if e.opts.DNSChallenge {
+			// Where Cloudflare sends the traffic cannot be seen from the
+			// outside, and the certificate no longer depends on it.
+			return true, ""
+		}
+		return false, fmt.Sprintf("resolves to Cloudflare's proxy (%s), not to this server: turn the proxy off for this record (DNS only), or set %s on the agent to keep it on",
+			strings.Join(addrs, ", "), cloudflareTokenVariable)
 	}
 	return false, fmt.Sprintf("resolves to %s, not to this server%s", strings.Join(addrs, ", "), e.recordAdvice(host, "change", "the"))
 }
@@ -158,56 +183,11 @@ func (e *Engine) recordAdvice(host, verb, article string) string {
 	if len(records) == 0 {
 		return ""
 	}
+	if e.opts.DNSChallenge {
+		// Proxied or not is the operator's choice then.
+		return fmt.Sprintf("; %s %s", verb, strings.Join(records, " and "))
+	}
 	return fmt.Sprintf("; %s %s (DNS only, not proxied)", verb, strings.Join(records, " and "))
-}
-
-// cloudflareRanges are the addresses Cloudflare's proxy answers from, as
-// published at https://www.cloudflare.com/ips-v4 and /ips-v6 on 2026-09-27;
-// the list changes rarely. A hostname behind the orange cloud resolves to one
-// of them and never to the server, and the fix is a switch in Cloudflare's
-// dashboard, not a record — the message has to say which.
-var cloudflareRanges = mustPrefixes(
-	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
-	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
-	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
-	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
-	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
-	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
-)
-
-func mustPrefixes(cidrs ...string) []netip.Prefix {
-	out := make([]netip.Prefix, 0, len(cidrs))
-	for _, c := range cidrs {
-		out = append(out, netip.MustParsePrefix(c))
-	}
-	return out
-}
-
-// behindCloudflare reports whether every one of addrs is Cloudflare's. One
-// address elsewhere means a record of the operator's own, and the advice for
-// that case applies.
-func behindCloudflare(addrs []string) bool {
-	if len(addrs) == 0 {
-		return false
-	}
-	for _, s := range addrs {
-		a, err := netip.ParseAddr(s)
-		if err != nil {
-			return false
-		}
-		a = a.Unmap()
-		inRange := false
-		for _, p := range cloudflareRanges {
-			if p.Contains(a) {
-				inRange = true
-				break
-			}
-		}
-		if !inRange {
-			return false
-		}
-	}
-	return true
 }
 
 // pointsAt reports whether any of addrs is one of server's. Addresses are

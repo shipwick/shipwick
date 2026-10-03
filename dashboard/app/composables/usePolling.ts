@@ -1,6 +1,6 @@
 import type { MaybeRefOrGetter } from 'vue'
 import type { AgentError } from '~/utils/agentError'
-import { isAbortError, toAgentError } from '~/utils/agentError'
+import { isAbortError, nextPollDelay, toAgentError } from '~/utils/agentError'
 
 export interface PollingOptions<T> {
   /** Milliseconds between the end of one request and the start of the next. Default 5000. */
@@ -20,6 +20,9 @@ export interface PollingOptions<T> {
  * - Aborts and stops when the owning component goes away (route change).
  * - Keeps the last good data on screen when a refresh fails: no layout shift,
  *   and `error` tells the page to show a "stale" notice.
+ * - A refusal that says when to come back (429 with Retry-After) is waited
+ *   out: the next request goes when that time has passed, not an interval
+ *   later. `refresh()` called by hand still goes at once.
  */
 export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, options: PollingOptions<T> = {}) {
   const data = shallowRef<T | null>(null)
@@ -34,9 +37,12 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, opti
   let timer: ReturnType<typeof setTimeout> | null = null
   let disposed = false
   let finished = false
+  /** A refusal with Retry-After (a 429) asked to be left alone until then: nothing is sent by itself before. */
+  let notBefore = 0
 
   const interval = () => Math.max(250, toValue(options.interval) ?? 5000)
   const enabled = () => toValue(options.enabled) ?? true
+  const waiting = () => Date.now() < notBefore
 
   function clearTimer() {
     if (timer !== null) {
@@ -48,7 +54,7 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, opti
   function schedule() {
     clearTimer()
     if (disposed || finished || !enabled() || document.hidden) return
-    timer = setTimeout(() => void refresh(), interval())
+    timer = setTimeout(() => void refresh(), nextPollDelay(interval(), notBefore))
   }
 
   function refresh(): Promise<void> {
@@ -65,12 +71,14 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, opti
         if (own.signal.aborted) return
         data.value = result
         error.value = null
+        notBefore = 0
         updatedAt.value = Date.now()
         if (options.until?.(result)) finished = true
       })
       .catch((cause: unknown) => {
         if (own.signal.aborted || isAbortError(cause)) return
         error.value = toAgentError(cause)
+        notBefore = Date.now() + error.value.retryAfterMs
         // An expired session is handled globally (redirect to login): stop asking.
         if (error.value.status === 401) finished = true
       })
@@ -97,7 +105,13 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, opti
     updatedAt.value = null
     loading.value = true
     refreshing.value = false
-    return enabled() ? refresh() : Promise.resolve()
+    if (!enabled()) return Promise.resolve()
+    // The refusal was about this address, not about the resource: a new key does not lift it.
+    if (waiting()) {
+      schedule()
+      return Promise.resolve()
+    }
+    return refresh()
   }
 
   /** Resumes polling after `until` stopped it. */
@@ -113,7 +127,7 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, opti
     }
     if (finished || !enabled()) return
     const age = updatedAt.value === null ? Infinity : Date.now() - updatedAt.value
-    if (age >= interval()) void refresh()
+    if (age >= interval() && !waiting()) void refresh()
     else schedule()
   }
 
@@ -124,7 +138,8 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, opti
   })
 
   watch(() => enabled(), (on) => {
-    if (on) void refresh()
+    if (on && waiting()) schedule()
+    else if (on) void refresh()
     else clearTimer()
   })
 

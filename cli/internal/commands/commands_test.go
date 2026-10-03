@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/shipwick/shipwick/cli/internal/cliconfig"
+	"github.com/shipwick/shipwick/cli/internal/ui"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/spec"
 )
@@ -55,6 +56,9 @@ type fakeAgent struct {
 	build        buildTools        // a fake docker for `deploy` with build:, see build_test.go
 	images       fakeImages        // what POST …/images received, see build_test.go
 	static       fakeStatic        // see static_test.go
+	validate     fakeValidate      // POST …/validate, see validate_test.go
+	terminal     bool              // the CLI writes as to a terminal: the progress line is on
+	after        fakeTimer         // replaces the CLI's timers
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
@@ -65,6 +69,7 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 	f.many.register(mux)
 	f.images.register(mux)
 	f.static.register(mux)
+	f.validate.register(mux)
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		health := f.health
@@ -127,6 +132,14 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 		respond(w, 200, f.history)
 	})
 	mux.HandleFunc("GET /api/v1/applications/{name}/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("follow") == "true" {
+			// The stream is one JSON object per line, and ends when the
+			// containers do.
+			for _, line := range f.logs {
+				json.NewEncoder(w).Encode(line)
+			}
+			return
+		}
 		respond(w, 200, f.logs)
 	})
 	mux.HandleFunc("GET /api/v1/applications/{name}/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -198,6 +211,10 @@ func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 	c.upgrade = f.upgrade
 	c.local = f.local
 	c.build = f.build
+	c.after = f.after
+	if f.terminal {
+		c.ui = ui.Terminal(&out, &errOut)
+	}
 	root.SetArgs(args)
 	err := root.ExecuteContext(context.Background())
 	return out.String(), errOut.String(), err

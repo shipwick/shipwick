@@ -16,22 +16,38 @@ What it does on a server:
    Then, before it writes anything, that the HTTP and HTTPS ports are free —
    unless its own Caddy holds them, which is an upgrade.
 2. Writes `/opt/shipwick/compose.yml`: the release's `compose.production.yml`,
-   in which both images are pinned to the release's version. Verified against
+   in which the three images — agent, dashboard and the proxy, Shipwick's
+   build of Caddy — are pinned to the release's version. Verified against
    the release's `checksums.txt` before it replaces anything.
 3. On first run only, writes `/opt/shipwick/.env` (mode `0600`, directory
    `0700`) with a freshly generated API token and the two optional hostnames —
    asked for in a terminal, or taken from `SHIPWICK_AGENT_DOMAIN` /
    `SHIPWICK_DASHBOARD_DOMAIN`. Hostnames are validated before anything is written.
+   Settings given for the run are kept in it too: the ports, images of your
+   own, the webhook, and `SHIPWICK_CLOUDFLARE_API_TOKEN` (certificates through
+   Cloudflare DNS, for hostnames behind Cloudflare's proxy).
 4. Pulls the images, starts the stack, waits for the agent to report healthy.
 5. Installs `shipwick`, verified the same way. **A checksum mismatch installs
    nothing** and leaves a running installation as it was.
-6. Prints the token (once, and only if it was generated in this run) and the
+6. With a hostname for the API, signs that `shipwick` in: it saves
+   `https://<SHIPWICK_AGENT_DOMAIN>` and the token from `.env` as a context of
+   the user running the installer. The CLI writes its own file
+   (`shipwick login --token-stdin --no-check`, the token on standard input);
+   the installer never writes its YAML. Without a hostname nothing is saved:
+   the agent publishes no port for the CLI to reach.
+7. Prints the token (once, and only if it was generated in this run) and the
    next steps.
 
 Properties worth keeping if you change it:
 
 - **Idempotent.** Running it again is how you upgrade. An existing `.env` —
   the token — is never rewritten.
+- **The CLI's contexts belong to the user.** The installer writes only a
+  context whose URL is this server's — the token from `.env`, again — or the
+  first one, `default`, when none is saved. Other contexts and the choice of
+  the current one are left as they are, and when only other servers are saved
+  it adds nothing. It finds the context by reading `shipwick context ls`; a
+  test in `cli/internal/commands` holds that output's shape.
 - **`compose.yml` belongs to the installer, `compose.override.yml` to the
   user.** The first is replaced on every run; the second is never touched, and
   Compose merges the two because the installer runs `docker compose` without
@@ -51,6 +67,7 @@ instead of downloading one, and with it images you built yourself:
 
 ```bash
 docker build -t ghcr.io/shipwick/agent . && docker build -t ghcr.io/shipwick/dashboard dashboard/
+docker build -t ghcr.io/shipwick/caddy -f Dockerfile.caddy .
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src:ro" \
   -e SHIPWICK_COMPOSE_FILE=/src/configs/compose.production.yml \
   -e SHIPWICK_HTTP_PORT=8080 -e SHIPWICK_HTTPS_PORT=8443 \
@@ -59,6 +76,16 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/src:ro" \
 ```
 
 Clean up with `docker compose -p shipwick down -v`.
+
+The CLI it installs is the latest release's. To test a CLI you built — what
+the installer saves for it, what it prints on the server — put the binary in
+the container's `/usr/local/bin` and set `SHIPWICK_REPO` to a repository
+without releases: the download fails with a warning and yours stays. For the
+saved context to reach the agent, the container must own ports 80 and 443 and
+trust Caddy's local authority: run the installer inside a `docker:dind`
+container started with `--add-host agent.localhost:127.0.0.1`, copy
+`/data/caddy/pki/authorities/local/root.crt` out of the Caddy container and
+point `SSL_CERT_FILE` at it.
 
 ## build-release.sh, release-notes.sh
 

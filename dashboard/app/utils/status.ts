@@ -85,6 +85,24 @@ export function containerStateDisplay(container: Pick<Container, 'state' | 'exit
   }
 }
 
+/**
+ * A container a finished deployment replaced, on its way out: it has been sent
+ * SIGTERM and gets its `deploy.stop_timeout` to exit. The agent still lists
+ * it, with the previous deployment's id and usually still `running`, but it
+ * is not a replica any more and is not counted as one. While a deployment is
+ * in flight, containers of two deployments are both in service and neither
+ * is draining.
+ */
+export function isDraining(
+  container: Pick<Container, 'deployment_id'>,
+  app: { deploying: boolean, active_deployment: { id: number } | null },
+): boolean {
+  return !app.deploying && app.active_deployment !== null && container.deployment_id !== app.active_deployment.id
+}
+
+/** How a draining container reads in the State column, instead of "Running". */
+export const DRAINING_DISPLAY: StatusDisplay = { tone: 'muted', label: 'Stopping' }
+
 export function eventLevelTone(level: EventLevel | string): Tone {
   if (level === 'error') return 'danger'
   if (level === 'warn') return 'warn'

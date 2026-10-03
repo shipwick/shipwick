@@ -37,6 +37,25 @@
 // shipwick.local/ image), and 429 RATE_LIMITED after 20 failed
 // authentications within a minute from one address.
 //
+// And what 0.5 added: `path`, `proxy`, `backups`, `deploy.stop_timeout` and
+// `static.fallback` in specs (basic-auth passwords masked; hostname conflicts
+// are by hostname and path; a wildcard hostname needs a supplied certificate
+// or the DNS challenge), POST …/validate, `certificates` on every application
+// detail, traffic (GET …/traffic?since=1h|24h|7d, sparse points; GET
+// …/requests?tail=), registries (GET /registries, PUT and DELETE
+// /registries/:registry; a registry named refused.* refuses the login, one
+// under .invalid cannot be asked), POST /server/rotate-key, supplied
+// certificates (GET /certificates, PUT and DELETE /certificates/:hostname;
+// the PEM is looked at, not parsed), backups (the ten endpoints: a backup
+// runs for a few seconds, a verification and a restore are followed through
+// `activity`), and `dashboard_url`, `alerts`, `disk`, `backups` and
+// `proxy.dns_challenge` on GET /server; and export, import and the standby
+// (POST /export answers a small file, POST /exports writes one to the backups,
+// GET /exports lists them, POST and GET /import, GET /standby, POST
+// /standby/pull and /standby/promote). A replica replaced by a deployment
+// stays listed for a few seconds after the deployment completed, as it does
+// while the real one is given its stop_timeout.
+//
 // Magic image tags for POST /applications/:name/redeploy {"image": ...}:
 //   *:fail      replica 1 crashes: FAILED, nothing of the old version was touched
 //   *:rollback  replica 1 is replaced, replica 2 crashes: FAILED → ROLLBACK →
@@ -45,6 +64,11 @@
 //   *:local     the pull fails but a local copy exists (a `warn` step)
 //   *:hookfail  the pre-deploy command exits 1: FAILED with its output as a
 //               `log` event, no replica touched (needs an app with pre_deploy)
+//   *:restart   the agent goes away for a few seconds while replica 1 is
+//               checked (connections are dropped, as when it restarts), then
+//               resumes the deployment: "Resumed after the agent restarted"
+//   *:sigterm   the replaced replica ignores SIGTERM: it stays listed for its
+//               whole grace period and is killed, with the `warn` event
 //
 // Environment:
 //   MOCK_PORT (9100), MOCK_HOST (127.0.0.1), MOCK_TOKEN
@@ -52,7 +76,27 @@
 //                    root token); endpoints above it answer 403 FORBIDDEN
 //   MOCK_WEBHOOK=1   server.notifications.webhook is true
 //   MOCK_NO_PROXY=1  server.proxy.enabled is false, and deploying an application
-//                    with a domain produces the "No reverse proxy" warn step
+//                    with a domain produces the "No reverse proxy" warn step;
+//                    traffic is 409 TRAFFIC_UNAVAILABLE, certificates `unknown`
+//   MOCK_NO_TRAFFIC=1    traffic and requests answer 409 TRAFFIC_UNAVAILABLE
+//   MOCK_ALERTS=none|warning|critical   the alerts of GET /server: none, two
+//                    warnings (the default), or those plus a critical disk
+//                    and a critical unhealthy alert
+//   MOCK_KEY_ENV=1   the encryption key is "in the environment": rotate-key
+//                    answers the new key once, then 409 KEY_ROTATION_PENDING
+//   MOCK_NO_PASSPHRASE=1 backups are not encrypted and the agent's state is
+//                    not backed up: POST /server/backups is 409
+//                    BACKUPS_NOT_ENCRYPTED
+//   MOCK_NO_BUCKET=1 backups stay on the server's disk (`destination: local`)
+//   MOCK_VERIFY_FAILS=1  a backup verification ends with `verify_error`
+//   MOCK_DNS_CHALLENGE=1 server.proxy.dns_challenge is true, and wildcard
+//                    hostnames deploy without a supplied certificate
+//   MOCK_STANDBY=1   this server is a standby: postgres, shop and docs were
+//                    imported stopped and wait for POST /standby/promote, and
+//                    exports are fetched on a schedule (POST /standby/pull
+//                    imports one over a few seconds; follow it with GET /import)
+//   MOCK_OLD_AGENT=1 answers like an agent before 0.5: the new endpoints are
+//                    404 ENDPOINT_NOT_FOUND and the new fields are absent
 
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
@@ -72,6 +116,18 @@ const RESERVED_PORTS = [80, 443, 8080, 8443, 9000]
 const VERSION = '0.1.0-mock'
 const LOG_BUFFER = 5000
 const MASK = '********'
+const OLD_AGENT = process.env.MOCK_OLD_AGENT === '1'
+const TRAFFIC_AVAILABLE = PROXY_ENABLED && process.env.MOCK_NO_TRAFFIC !== '1'
+const ALERTS = ['none', 'warning', 'critical'].includes(process.env.MOCK_ALERTS) ? process.env.MOCK_ALERTS : 'warning'
+const KEY_FROM_ENVIRONMENT = process.env.MOCK_KEY_ENV === '1'
+const PASSPHRASE = process.env.MOCK_NO_PASSPHRASE !== '1'
+const BUCKET = process.env.MOCK_NO_BUCKET !== '1'
+const VERIFY_FAILS = process.env.MOCK_VERIFY_FAILS === '1'
+const DNS_CHALLENGE = PROXY_ENABLED && process.env.MOCK_DNS_CHALLENGE === '1'
+const IS_STANDBY = process.env.MOCK_STANDBY === '1'
+const DASHBOARD_URL =`https://${OWN_HOSTNAMES[0]}`
+const SERVER_ADDRESS = '203.0.113.10'
+const DATA_DIR = '/var/lib/shipwick'
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -112,11 +168,24 @@ const uploads = new Map()
 const orphanVolumes = []
 /** remote address → times of failed authentications within the last minute */
 const authFailures = new Map()
+/** registry → {username, created_at, updated_at}; the password is not kept, the API never returns it */
+const registries = new Map()
+/** hostname → what a supplied certificate says about itself; neither the PEM nor the key is kept */
+const certificates = new Map()
+/** backup id → run, of an application's volumes or (application STATE) of the agent's own state; one sequence for both, as in the agent's table */
+const backups = new Map()
+/** ids of containers a finished deployment replaced and that are still being given their grace period */
+const draining = new Set()
+/** The key was rotated while it is "in the environment": the next rotation is refused until a restart. */
+let rotationPending = false
+/** While in the future the mock drops every connection, as an agent that is restarting does. */
+let awayUntil = 0
 
 let nextDeploymentId = 1
 let nextEventId = 1
 let nextTokenId = 1
 let nextRunId = 1
+let nextBackupId = 1
 
 function spec(name, image, extra = {}) {
   return {
@@ -185,7 +254,7 @@ const replicaList = list => (list.length === 1 ? `Replica ${list[0]}` : `Replica
 const readyMessage = (sp, list) => (sp.health ? `${replicaList(list)} passed health checks` : `${replicaList(list)} running and stable`)
 const servingMessage = (i, n, version, previousVersion) => `Replica ${i}/${n} is serving ${version}; its ${previousVersion} predecessor is retired`
 const routedMessage = (sp, to = plural(sp.replicas, 'replica')) => (PROXY_ENABLED
-  ? ['step', `Routed https://${sp.domain} to ${to}`, 'info']
+  ? ['step', `Routed https://${sp.domain}${sp.path ?? ''} to ${to}`, 'info']
   : ['step', `No reverse proxy is configured, so ${sp.domain} is not being served. Set SHIPWICK_CADDY_ADMIN on the agent`, 'warn'])
 // An image under shipwick.local/ was built by the CLI and sent here; the agent never pulls it.
 const LOCAL_IMAGE_PREFIX = 'shipwick.local/'
@@ -236,6 +305,7 @@ function staticSuccessEvents(sp, files, alreadyThere = false, olderFolders = 0) 
     ...(alreadyThere ? [] : [['step', `Copied ${plural(files.files, 'file')} into the proxy`, 'info', 900]]),
     ['state', 'HEALTH_CHECKING', 'info', 20],
     ['step', 'Found index.html', 'info', 80],
+    ...(sp.static?.fallback && sp.static.fallback !== 'index.html' ? [['step', `Found ${sp.static.fallback}, the fallback page`, 'info', 40]] : []),
     ['state', 'HEALTHY', 'info', 20],
     [...routedMessage(sp, 'the uploaded files'), 400],
     ['state', 'ACTIVE', 'info', 40],
@@ -339,6 +409,14 @@ function seed() {
       health: { path: '/health', interval: '10s', timeout: '3s', retries: 3 },
       resources: { cpu: 1, memory_bytes: 1024 ** 3 },
       pre_deploy: { command: ['dotnet', 'Migrate.dll'], timeout: '10m0s' },
+      // What the proxy does besides passing requests on; the account's password is a stored secret, masked like every value.
+      proxy: {
+        headers: { 'Strict-Transport-Security': 'max-age=31536000', 'X-Frame-Options': 'DENY' },
+        basic_auth: [{ path: '/admin', username: 'ops', password: MASK }],
+        redirects: [{ from: '/docs', to: 'https://example.com/docs/', status: 308 }],
+      },
+      // In-flight requests get half a minute to finish when a replica is replaced or stopped.
+      deploy: { strategy: 'rolling', stop_timeout: '30s' },
       jobs: [
         { name: 'nightly-report', schedule: '0 3 * * *', command: ['node', 'report.js'], timeout: '1h0m0s' },
         { name: 'cleanup-sessions', schedule: '*/15 * * * *', command: ['node', 'cleanup.js', '--older-than', '30d'], timeout: '5m0s' },
@@ -440,12 +518,37 @@ function seed() {
       resources: { memory_bytes: 2 * 1024 ** 3 },
       volumes: [{ name: 'data', path: '/var/lib/postgresql/data' }],
       publish: [{ port: 5432, host: 15432, address: '10.0.0.5', protocol: 'tcp' }],
+      // Archived every night after a checkpoint; a week of them is kept.
+      backups: { schedule: '0 3 * * *', keep: 7, before: ['psql', '-U', 'postgres', '-c', 'CHECKPOINT'] },
       deploy: { strategy: 'recreate' },
     })
     const dbActive = addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
     db.active_deployment_id = dbActive.id
     db.updated_at = dbActive.completed_at
     db.containers = makeContainers(db, dbActive)
+
+    // Its backups: one taken by hand right after the deployment, then one a night at 03:00 UTC; one of those failed, the newest are verified.
+    addBackup('postgres', { trigger: 'manual', startedAtMs: startedAt - 9 * DAY + 10 * MINUTE, durationMs: 31 * SECOND, status: 'succeeded', volumes: [{ volume: 'data', size_bytes: 2101346304 }] })
+    for (let daysAgo = 6; daysAgo >= 0; daysAgo--) {
+      const at = new Date(startedAt - daysAgo * DAY)
+      at.setUTCHours(3, 0, 0, 0)
+      const started = at.getTime()
+      if (started > startedAt) continue
+      if (daysAgo === 3) {
+        addBackup('postgres', { trigger: 'schedule', startedAtMs: started, durationMs: 2 * SECOND, status: 'failed', error: 'backups.before exited 2: psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed; nothing was archived' })
+        addAppEvent('postgres', 'warn', 'backup', 'Backup #' + (nextBackupId - 1) + ' failed: backups.before exited 2: psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed; nothing was archived', started + 2 * SECOND)
+        continue
+      }
+      const run = addBackup('postgres', { trigger: 'schedule', startedAtMs: started, durationMs: (38 + daysAgo) * SECOND, status: 'succeeded', volumes: [{ volume: 'data', size_bytes: 2254857830 - daysAgo * 18350080 }] })
+      if (daysAgo === 5) {
+        run.verify_error = 'the container did not become healthy on the restored data within 2m: TCP :5432: connection refused'
+        run.verify_output = 'PostgreSQL Database directory appears to contain a database; Skipping initialization\n\nLOG:  starting PostgreSQL 17.2 on x86_64-pc-linux-musl\nLOG:  database system was interrupted; last known up at 2026-09-27 02:59:58 UTC\nLOG:  invalid checkpoint record\nPANIC:  could not locate a valid checkpoint record'
+      }
+      if (daysAgo === 0 || daysAgo === 1) {
+        run.verified_at = iso(Math.min(startedAt - 20 * MINUTE, started + 6 * HOUR))
+        run.verify_output = VERIFY_OUTPUT
+      }
+    }
 
     addAppEvent('my-api', 'warn', 'supervisor', 'Replica 2 exited with code 137 (out of memory); restarting in 1s', startedAt - 3 * DAY)
     addAppEvent('my-api', 'info', 'supervisor', 'Replica 2 restarted', startedAt - 3 * DAY + 1200)
@@ -528,10 +631,10 @@ function seed() {
     addAppEvent('worker', 'warn', 'supervisor', 'Replica 2 did not become healthy within 30s of starting: HTTP 503', startedAt - 28 * SECOND)
   }
 
-  // STOPPED on request.
+  // STOPPED on request. It serves one path of a domain that `web` serves the rest of, and sees it without the prefix.
   {
     const app = addApp('docs', ago(60 * DAY))
-    const sp = spec('docs', 'nginx:1.27-alpine', { port: 80, domain: 'docs.example.com' })
+    const sp = spec('docs', 'nginx:1.27-alpine', { port: 80, domain: 'example.com', path: '/docs', proxy: { strip_prefix: true } })
     const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 60 * DAY, durationMs: 4300, events: successEvents(sp, null) })
     app.active_deployment_id = active.id
     app.desired_state = 'stopped'
@@ -551,10 +654,33 @@ function seed() {
   // A volume left behind by a deleted application, kept on purpose.
   orphanVolumes.push({ name: 'shipwick_pgtest_data', application: 'pgtest', volume: 'data', size_bytes: 13631488 })
 
+  // Registry credentials: where the private images above come from.
+  registries.set('ghcr.io', { username: 'acme-deploy', created_at: ago(41 * DAY), updated_at: ago(12 * DAY) })
+  registries.set('registry.example.com:5000', { username: 'shipwick', created_at: ago(19 * DAY), updated_at: ago(19 * DAY) })
+
+  // Certificates the operator supplied: one in its last 30 days, one in order, one that expired and was never replaced.
+  const supplied = (hostname, subjects, issuer, fromMs, untilMs, storedMs) => certificates.set(hostname, {
+    subjects, issuer, not_before: iso(fromMs), not_after: iso(untilMs), created_at: iso(storedMs), updated_at: iso(storedMs),
+  })
+  supplied('billing.example.com', ['billing.example.com'], 'Acme Issuing CA', startedAt - 345 * DAY, startedAt + 20 * DAY, startedAt - 340 * DAY)
+  supplied('*.internal.example.org', ['*.internal.example.org', 'internal.example.org'], 'Acme Issuing CA', startedAt - 30 * DAY, startedAt + 335 * DAY, startedAt - 30 * DAY)
+  supplied('legacy.example.com', ['legacy.example.com'], 'Sectigo RSA Domain Validation Secure Server CA', startedAt - 400 * DAY, startedAt - 4 * DAY, startedAt - 399 * DAY)
+
+  // The agent's own state: its database and key, backed up daily at a quarter past three, a week kept.
+  if (PASSPHRASE) {
+    for (let daysAgo = 6; daysAgo >= 0; daysAgo--) {
+      const at = new Date(startedAt - daysAgo * DAY)
+      at.setUTCHours(3, 17, 0, 0)
+      if (at.getTime() > startedAt) continue
+      addBackup(STATE, { trigger: 'schedule', startedAtMs: at.getTime(), durationMs: 4 * SECOND, status: 'succeeded', volumes: [{ volume: 'shipwick.db', size_bytes: 1437696 + (6 - daysAgo) * 20480 }, { volume: 'encryption.key', size_bytes: 1536 }] })
+    }
+  }
+
   // A static application: a built frontend the proxy serves itself. No container, no replicas, no image.
   {
     const app = addApp('landing', ago(15 * DAY))
-    const sp = spec('landing', '', { domain: 'acme.example.com', redirects: ['www.acme.example.com'], static: { dir: 'dist' } })
+    // A single-page application: paths that name no file get index.html, and the router in it takes over.
+    const sp = spec('landing', '', { domain: 'acme.example.com', redirects: ['www.acme.example.com'], static: { dir: 'dist', fallback: 'index.html' } })
     const first = { digest: 'sha256:9c1d7e2a4b60f3d8a5e7c2b1904f6d3e8a7b5c4d2e1f0a9b8c7d6e5f4a3b2c1d', size_bytes: 2987654, files: 39 }
     addDeployment(app, sp, { status: 'SUPERSEDED', startedAtMs: startedAt - 15 * DAY, durationMs: 2600, events: staticSuccessEvents(sp, first), by: 'ci', files: first })
     const files = { digest: 'sha256:3f2a8b1c9d4e7f60a2b5c8d1e4f7a0b3c6d9e2f5a8b1c4d7e0f3a6b9c2d5e8f1', size_bytes: 3250000, files: 42 }
@@ -651,6 +777,32 @@ function seed() {
     app.updated_at = d.completed_at
   }
 
+  // Exports of the whole server in the backups: nightly, three kept.
+  if (PASSPHRASE && !IS_STANDBY) {
+    for (let daysAgo = 2; daysAgo >= 0; daysAgo--) {
+      const at = new Date(startedAt - daysAgo * DAY)
+      at.setUTCHours(4, 0, 0, 0)
+      if (at.getTime() > startedAt) continue
+      addBackup(EXPORTS, { trigger: 'schedule', startedAtMs: at.getTime(), durationMs: 96 * SECOND, status: 'succeeded', volumes: [{ volume: 'export.tar', size_bytes: 3141592653 + (2 - daysAgo) * 20971520 }] })
+    }
+  }
+
+  // A standby holds what an export brought, deployed and stopped, until it is promoted.
+  if (IS_STANDBY) {
+    for (const [i, name] of STANDBY_APPLICATIONS.entries()) {
+      const app = apps.get(name)
+      const active = deployments.get(app.active_deployment_id)
+      active.kind = 'standby'
+      active.started_at = ago(47 * MINUTE - i * 9 * SECOND)
+      active.completed_at = ago(47 * MINUTE - i * 9 * SECOND - 6 * SECOND)
+      app.desired_state = 'stopped'
+      app.updated_at = active.completed_at
+      app.containers = makeContainers(app, active).map(c => ({ ...c, state: 'created', started_at: null, health: active.spec.health ? 'unknown' : '' }))
+    }
+    standbyPull.last_at = ago(47 * MINUTE)
+    standbyPull.last_export = 42
+  }
+
   for (const app of apps.values()) {
     for (let i = 0; i < 120; i++) generateLogLine(app, startedAt - (120 - i) * 900)
   }
@@ -700,6 +852,7 @@ function appSummary(app) {
     domain: active ? active.spec.domain ?? '' : '',
     ...(active?.spec.aliases?.length ? { aliases: active.spec.aliases } : {}),
     ...(active?.spec.redirects?.length ? { redirects: active.spec.redirects } : {}),
+    ...(active?.spec.path ? { path: active.spec.path } : {}),
     replicas: { desired, running, healthy },
     deploying: Boolean(flying),
     in_flight_deployment_id: flying ? flying.id : null,
@@ -730,7 +883,45 @@ function appDetail(app) {
     spec: active ? active.spec : null,
     active_deployment: active ? deploymentView(active) : null,
     containers: app.containers,
+    ...(OLD_AGENT ? {} : { certificates: hostCertificates(active) }),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Certificate status: what the proxy presents for each hostname
+// ---------------------------------------------------------------------------
+
+const day = ms => iso(ms).slice(0, 10)
+
+/** Hostnames that are not simply in order, so every status has one to be looked at. */
+const CERTIFICATE_STATES = {
+  'example.net': () => ({ status: 'waiting_for_dns', issuer: '', not_after: null, message: `does not resolve yet; add an A record: example.net → ${SERVER_ADDRESS}${DNS_CHALLENGE ? '' : ' (DNS only, not proxied)'}` }),
+  'app.example.com': () => ({ status: 'obtaining', issuer: '', not_after: null, message: 'the proxy has no certificate for it yet; HTTPS connections to it fail until it does' }),
+  'shop.example.com': () => ({ status: 'expiring', issuer: 'Let\'s Encrypt E7', not_after: iso(startedAt + 9 * DAY), message: `expires in 9 days, on ${day(startedAt + 9 * DAY)}` }),
+}
+
+/** A supplied certificate covers a hostname by its exact name, or by a wildcard one label up. */
+function suppliedFor(hostname) {
+  for (const [stored, c] of certificates) {
+    if (c.subjects.some(s => s === hostname || (s.startsWith('*.') && !hostname.startsWith('*.') && hostname.slice(hostname.indexOf('.') + 1) === s.slice(2)))) return { hostname: stored, ...c }
+  }
+  return null
+}
+
+/** One entry per hostname in the order domain, aliases, redirects; [] without a domain or an active deployment. */
+function hostCertificates(active) {
+  if (!active?.spec.domain) return []
+  return hostnamesOf(active.spec).map((hostname) => {
+    if (!PROXY_ENABLED) return { hostname, status: 'unknown', issuer: '', not_after: null, message: 'this agent has no reverse proxy configured' }
+    const supplied = suppliedFor(hostname)
+    if (supplied) {
+      const left = Math.floor((Date.parse(supplied.not_after) - Date.now()) / DAY)
+      const soon = left < 14
+      return { hostname, status: soon ? 'expiring' : 'ok', issuer: supplied.issuer, not_after: supplied.not_after, message: !soon ? '' : left < 0 ? `expired on ${supplied.not_after.slice(0, 10)}` : `expires in ${plural(left, 'day')}, on ${supplied.not_after.slice(0, 10)}` }
+    }
+    const special = CERTIFICATE_STATES[hostname]?.()
+    return { hostname, ...(special ?? { status: 'ok', issuer: 'Let\'s Encrypt E7', not_after: iso(startedAt + 61 * DAY), message: '' }) }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -833,6 +1024,15 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
       if (d.status === 'STARTING') state('HEALTH_CHECKING')
     })
 
+    // The agent is restarted while the first replica is being checked. It leaves
+    // the deployment as it is and picks it up again: nothing is started twice.
+    if (tag === 'restart' && i === 1) {
+      then(400, () => {
+        awayUntil = Date.now() + AWAY_MS
+      })
+      then(AWAY_MS + 200, () => pushDeploymentEvent(d, 'step', 'Resumed after the agent restarted'))
+    }
+
     if (i === failAt) {
       then(900, () => crash(i))
       if (i === 1) {
@@ -868,7 +1068,12 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
     })
     then(300, () => {
       if (old) {
-        removeContainer(old.id, i)
+        // A rollout waits for the replica it replaced before it starts the next
+        // one; the last one is not waited for. It drains in the background, and
+        // stays listed, with the previous deployment's id, until it has exited.
+        const last = app.containers.find(c => c.deployment_id === old.id && c.replica === i)
+        if (i === n && last) draining.add(last.id)
+        else removeContainer(old.id, i)
         pushDeploymentEvent(d, 'step', servingMessage(i, n, d.version, old.version))
       }
       else {
@@ -881,7 +1086,7 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
 
   then(200, () => {
     // Scaling down: surplus replicas of the previous version are retired last.
-    if (previous) app.containers = app.containers.filter(c => c.deployment_id !== previous.id)
+    if (previous) app.containers = app.containers.filter(c => c.deployment_id !== previous.id || draining.has(c.id))
     state('HEALTHY')
     if (sp.domain) {
       const [type, message, level] = routedMessage(sp)
@@ -897,9 +1102,30 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
     app.updated_at = iso(Date.now())
     pushDeploymentEvent(d, 'step', 'Deployment successful')
   })
-  then(700, complete)
+  then(700, () => {
+    complete()
+    // The deployment is over; the replica it replaced last is still on its way out.
+    const grace = parseDuration(previous?.spec.deploy?.stop_timeout ?? '') ?? DEFAULT_STOP_TIMEOUT_MS
+    const ignoresSigterm = tag === 'sigterm'
+    setTimeout(() => {
+      const gone = app.containers.filter(c => draining.has(c.id))
+      for (const c of gone) draining.delete(c.id)
+      if (apps.get(app.name) !== app || gone.length === 0) return
+      app.containers = app.containers.filter(c => !gone.includes(c))
+      if (ignoresSigterm) {
+        for (const c of gone) addAppEvent(app.name, 'warn', 'app', `The replaced container ${c.name} did not exit within ${formatGoDuration(grace).replace(/(?<=\d[hm])0[ms]/g, '')} of SIGTERM and was killed. To let it finish its requests, handle SIGTERM in the application; to give it longer, set deploy.stop_timeout`)
+      }
+      if (!app.containers.some(x => x.deployment_id === previous?.id)) endFollowers(app.name)
+    }, ignoresSigterm ? grace : Math.min(grace, DRAIN_MS)).unref()
+  })
   return d
 }
+
+/** How long a replaced replica that handles SIGTERM takes to exit here, and the grace period without deploy.stop_timeout. */
+const DRAIN_MS = 6 * SECOND
+const DEFAULT_STOP_TIMEOUT_MS = 10 * SECOND
+/** How long the `restart` tag keeps the mock away. */
+const AWAY_MS = 6 * SECOND
 
 /**
  * A static deployment: no replicas, the folder is copied into the proxy (or is
@@ -1420,26 +1646,36 @@ const configError = fields => new HttpError(400, 'INVALID_CONFIG', 'invalid depl
  * from the agent's whole validation, but the same fields and wording where it
  * checks at all.
  */
-function parseSpec(name, body) {
+function parseSpec(name, body, { validating = false } = {}) {
   if (body.name !== undefined && body.name !== name) {
     throw new HttpError(400, 'INVALID_REQUEST', `the configuration names ${JSON.stringify(body.name)} but the URL names ${JSON.stringify(name)}`)
   }
   const fields = []
   const problem = (field, message, expected) => fields.push({ field, message, ...(expected ? { expected } : {}) })
+  const STATIC_EXCLUSIVE = 'does not apply to a static application: the proxy serves the files, there is no container'
 
-  // A folder served by the proxy: a cleaned relative path, a domain, and nothing that describes a container.
+  // A folder served by the proxy: a cleaned relative path, a domain, and nothing
+  // that describes a container. Written as the folder alone, or as {dir, fallback}.
   let isStatic = false
+  let fallback
   if (body.static !== undefined && body.static !== null && body.static !== '') {
     isStatic = true
-    const dir = String(body.static).trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
-    if (dir === '' || dir === '.') problem('static', 'must name a folder below the project', 'dist')
+    const form = typeof body.static === 'object' ? body.static : { dir: body.static }
+    const dir = String(form.dir ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+    if (dir === '' && typeof body.static === 'object') problem('static.dir', 'is required: the folder the fallback page is in', 'dist')
+    else if (dir === '' || dir === '.') problem('static', 'must name a folder below the project', 'dist')
     else if (dir.startsWith('/') || dir.split('/').includes('..')) problem('static', 'must be a relative path inside the project', 'dist')
     else body.static = dir
-    if (!body.domain) problem('domain', 'is required for a static application: the proxy serves it by hostname', 'www.example.com')
-    for (const key of ['image', 'build', 'port', 'env', 'health', 'resources', 'volumes', 'publish', 'entrypoint', 'command', 'user', 'logging', 'pre_deploy', 'jobs']) {
-      if (body[key] !== undefined && body[key] !== null) problem(key, 'does not apply to a static application: the proxy serves the files, there is no container')
+    if (form.fallback !== undefined && form.fallback !== null && form.fallback !== '') {
+      fallback = String(form.fallback)
+      if (fallback.startsWith('/') || fallback.split('/').includes('..')) problem('static.fallback', `invalid value ${JSON.stringify(fallback)}: must be relative to the folder`, 'index.html, 200.html')
+      else if (!/^[\w.~-]+(\/[\w.~-]+)*$/.test(fallback)) problem('static.fallback', `invalid value ${JSON.stringify(fallback)}: name a file inside the folder, with letters, digits, dots, dashes, underscores and tildes between the slashes`, 'index.html, 200.html')
     }
-    if (body.replicas !== undefined && body.replicas !== 1) problem('replicas', 'does not apply to a static application: the proxy serves the files, there is no container')
+    if (!body.domain) problem('domain', 'is required for a static application: the proxy serves the files at it', 'example.com')
+    for (const key of ['image', 'build', 'port', 'env', 'health', 'resources', 'volumes', 'publish', 'entrypoint', 'command', 'user', 'logging', 'pre_deploy', 'jobs', 'backups']) {
+      if (body[key] !== undefined && body[key] !== null) problem(key, STATIC_EXCLUSIVE)
+    }
+    if (body.replicas !== undefined && body.replicas !== 1) problem('replicas', STATIC_EXCLUSIVE)
   }
 
   // Built where shipwick deploy runs: the document arrives with the shipwick.local/ image the agent was sent.
@@ -1448,21 +1684,25 @@ function parseSpec(name, body) {
     const raw = typeof body.build === 'string' ? { context: body.build } : body.build
     build = { context: String(raw.context ?? '').trim() || undefined, dockerfile: String(raw.dockerfile ?? '').trim() || 'Dockerfile' }
     if (!build.context) problem('build.context', 'is required', '.')
-    if (body.image === undefined || body.image === '') {
+    // Asked before the build: there is no image yet, and that is no fault of the document.
+    if ((body.image === undefined || body.image === '') && !validating) {
       throw new HttpError(400, 'INVALID_REQUEST', 'image: this application is built where shipwick deploy runs and sent to the server first; the agent never builds. Run shipwick deploy from the project')
     }
-    if (typeof body.image === 'string' && !isLocalImage(body.image)) problem('image', `must be tagged ${LOCAL_IMAGE_PREFIX}${name}:<tag> when build is set; shipwick deploy does that`, `${LOCAL_IMAGE_PREFIX}${name}:20260927-153000-a1b2`)
+    if (typeof body.image === 'string' && body.image !== '' && !isLocalImage(body.image)) problem('image', `must be tagged ${LOCAL_IMAGE_PREFIX}${name}:<tag> when build is set; shipwick deploy does that`, `${LOCAL_IMAGE_PREFIX}${name}:20260927-153000-a1b2`)
   }
-  if (!isStatic && (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image))) problem('image', 'is required', 'ghcr.io/org/app:1.0.0')
+  const unbuilt = validating && build && (body.image === undefined || body.image === '')
+  if (!isStatic && !unbuilt && (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image))) problem('image', 'is required', 'ghcr.io/org/app:1.0.0')
 
-  // `${NAME}` in an env value is filled in from the secrets kept here; a name that is not stored refuses the whole document.
+  // `${NAME}` in an env value or a basic-auth password is filled in from the secrets kept here; a name that is not stored refuses the whole document.
+  const missingSecrets = value => [...new Set([...String(value ?? '').matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(m => m[1]))].filter(n => !secrets.has(n)).sort()
   for (const [variable, value] of Object.entries(body.env ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
-    const missing = [...new Set([...String(value ?? '').matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(m => m[1]))].filter(n => !secrets.has(n)).sort()
-    for (const secret of missing) {
+    for (const secret of missingSecrets(value)) {
       problem(`env.${variable}`, `refers to \${${secret}}, which is not set where shipwick runs and not stored on the server`, `shipwick secret set ${secret}`)
     }
   }
 
+  // `domain` and aliases may be a wildcard, one leading `*.`; a redirect is a single name.
+  const validHost = (host, wildcards) => HOSTNAME.test(wildcards && host.startsWith('*.') ? host.slice(2) : host)
   const hosts = (field, list) => {
     if (list === undefined) return undefined
     if (!Array.isArray(list)) problem(field, 'must be a list of hostnames')
@@ -1471,16 +1711,96 @@ function parseSpec(name, body) {
     return Array.isArray(list) ? list.map(h => String(h ?? '').trim().toLowerCase()) : []
   }
   const domain = body.domain ? String(body.domain).trim().toLowerCase() : undefined
-  if (domain !== undefined && !HOSTNAME.test(domain)) problem('domain', `invalid value "${domain}": not a valid hostname`)
+  if (domain !== undefined && !validHost(domain, true)) problem('domain', `invalid value "${domain}": not a valid hostname`, 'api.example.com, *.example.com')
   const aliases = hosts('aliases', body.aliases)
   const redirects = hosts('redirects', body.redirects)
+  if (domain?.startsWith('*.') && redirects?.length) problem('redirects', 'cannot be sent to a wildcard domain', 'domain: example.com, with the wildcard under aliases')
   const seen = new Map(domain ? [[domain, 'domain']] : [])
   for (const [field, list] of [['aliases', aliases], ['redirects', redirects]]) {
     for (const [i, host] of (list ?? []).entries()) {
       if (host === '') problem(`${field}[${i}]`, 'is empty')
-      else if (!HOSTNAME.test(host)) problem(`${field}[${i}]`, `invalid value "${host}": not a valid hostname`)
+      else if (!validHost(host, field === 'aliases')) problem(`${field}[${i}]`, `invalid value "${host}": not a valid hostname`)
       else if (seen.has(host)) problem(`${field}[${i}]`, `"${host}" is already listed under ${seen.get(host)}`)
       else seen.set(host, `${field}[${i}]`)
+    }
+  }
+
+  // The part of the domain the application serves: /api and everything below it. `/` is the whole of it, which is no path.
+  let path
+  if (body.path !== undefined && body.path !== null && body.path !== '' && body.path !== '/') {
+    path = String(body.path)
+    if (!body.domain) problem('path', 'requires domain: a path is a part of it', 'domain: example.com')
+    else if (!path.startsWith('/')) problem('path', `invalid value ${JSON.stringify(path)}: must start with /`, '/api, /docs/v2, ...')
+    else if (path.endsWith('/')) problem('path', `invalid value ${JSON.stringify(path)}: must not end with /`, '/api, /docs/v2, ...')
+    else if (!/^(\/[\w.~-]+)+$/.test(path)) problem('path', `invalid value ${JSON.stringify(path)}: use letters, digits, dots, dashes, underscores and tildes between the slashes`, '/api, /docs/v2, ...')
+    else if (path.split('/').some(s => s === '.' || s === '..')) problem('path', `invalid value ${JSON.stringify(path)}: must not contain . or .. segments`, '/api, /docs/v2, ...')
+  }
+
+  // What the proxy does with the requests besides passing them on. Passwords are secrets: stored sealed, answered masked.
+  let proxy
+  if (body.proxy !== undefined && body.proxy !== null) {
+    const p = body.proxy
+    const within = p => path === undefined || p === path || String(p).startsWith(`${path}/`)
+    if (!body.domain) problem('proxy', 'requires domain: it says what the proxy does with the requests for it', 'domain: example.com')
+    for (const key of Object.keys(p)) if (!['strip_prefix', 'headers', 'basic_auth', 'redirects'].includes(key)) problem('proxy', `unknown field ${JSON.stringify(key)}`, 'strip_prefix, headers, basic_auth, redirects')
+    if (p.strip_prefix && path === undefined) problem('proxy.strip_prefix', 'requires path: it is the prefix that is removed', 'path: /api')
+    for (const [header, value] of Object.entries(p.headers ?? {})) {
+      if (!/^[A-Za-z0-9-]+$/.test(header)) problem('proxy.headers', `invalid header name ${JSON.stringify(header)}`, 'letters, digits and dashes, e.g. X-Frame-Options')
+      else if (typeof value !== 'string' || value === '') problem(`proxy.headers.${header}`, 'value must not be empty')
+    }
+    const accounts = (p.basic_auth ?? []).map((a, i) => {
+      const field = `proxy.basic_auth[${i}]`
+      if (!a?.username) problem(`${field}.username`, 'is required', 'admin')
+      if (a?.path !== undefined && !within(a.path)) problem(`${field}.path`, `${JSON.stringify(a.path)} is outside path ${path}, which is all this application serves`, `${path}/admin`)
+      const password = String(a?.password ?? '')
+      const missing = missingSecrets(password)
+      for (const secret of missing) problem(`${field}.password`, `refers to \${${secret}}, which is not set where shipwick runs and not stored on the server`, `shipwick secret set ${secret}`)
+      const example = '${ADMIN_PASSWORD}, with the value in the environment, in --env-file or stored with shipwick secret set'
+      if (password === '') problem(`${field}.password`, 'is required', example)
+      else if (missing.length === 0 && !password.includes('${') && password.length < 8) problem(`${field}.password`, 'is too short: at least 8 characters', example)
+      return { ...(a?.path ? { path: a.path } : {}), username: a?.username, password: MASK }
+    })
+    const pathRedirects = (p.redirects ?? []).map((r, i) => {
+      const field = `proxy.redirects[${i}]`
+      const status = r?.status ?? 308
+      if (!r?.from) problem(`${field}.from`, 'is required', `${path ?? ''}/old`)
+      else if (r.from === '/') problem(`${field}.from`, 'must be a path below /: redirecting everything would leave nothing to serve', `${path ?? ''}/old`)
+      else if (!within(r.from)) problem(`${field}.from`, `${JSON.stringify(r.from)} is outside path ${path}, which is all this application serves`, `${path}/old`)
+      if (!r?.to) problem(`${field}.to`, 'is required', '/new, https://example.org/new')
+      else if (!/^(\/(?!\/)|https:\/\/)/.test(r.to)) problem(`${field}.to`, `invalid value ${JSON.stringify(r.to)}: must be a path starting with / or an https:// URL`, '/new, https://example.org/new')
+      if (![301, 302, 307, 308].includes(status)) problem(`${field}.status`, `invalid value ${status}`, '301, 302, 307, 308')
+      return { from: r?.from, to: r?.to, status }
+    })
+    proxy = {
+      ...(p.strip_prefix ? { strip_prefix: true } : {}),
+      ...(Object.keys(p.headers ?? {}).length ? { headers: p.headers } : {}),
+      ...(accounts.length ? { basic_auth: accounts } : {}),
+      ...(pathRedirects.length ? { redirects: pathRedirects } : {}),
+    }
+    if (Object.keys(proxy).length === 0) proxy = undefined
+  }
+
+  // How long a replica gets after SIGTERM, wherever one is stopped.
+  let stopTimeout
+  if (body.deploy?.stop_timeout !== undefined && body.deploy.stop_timeout !== null && body.deploy.stop_timeout !== '') {
+    const grace = typeof body.deploy.stop_timeout === 'string' ? parseDuration(body.deploy.stop_timeout) : null
+    if (isStatic) problem('deploy.stop_timeout', STATIC_EXCLUSIVE)
+    else if (grace === null || grace < SECOND || grace > 10 * MINUTE) problem('deploy.stop_timeout', `invalid value ${JSON.stringify(body.deploy.stop_timeout)}`, '10s, 30s, 5m, ... (1s to 10m)')
+    else stopTimeout = formatGoDuration(grace)
+  }
+
+  // Backups the agent takes by itself; a backup is an archive of volumes, so it needs some.
+  let backupPlan
+  if (!isStatic && body.backups !== undefined && body.backups !== null) {
+    const b = body.backups
+    const example = '"0 3 * * *" (minute hour day-of-month month day-of-week, in UTC)'
+    if (typeof b !== 'object' || Array.isArray(b)) problem('backups', 'must be a block with a schedule', `schedule: ${example}`)
+    else {
+      if (!b.schedule) problem('backups.schedule', 'is required', example)
+      else if (cronNext(String(b.schedule), Date.now()) === null) problem('backups.schedule', `invalid value ${JSON.stringify(b.schedule)}: not a five-field cron expression that ever fires`, example)
+      if (b.keep !== undefined && (!Number.isInteger(b.keep) || b.keep < 1 || b.keep > 365)) problem('backups.keep', `invalid value ${b.keep}`, 'a number between 1 and 365')
+      if (!body.volumes?.length) problem('backups', 'needs volumes: a backup is an archive of the application\'s volumes', 'volumes:\n    - name: data\n      path: /var/lib/postgresql/data')
+      backupPlan = { schedule: String(b.schedule ?? ''), keep: b.keep ?? 7, ...(b.before ? { before: [].concat(b.before) } : {}), ...(b.stop ? { stop: true } : {}) }
     }
   }
 
@@ -1525,17 +1845,20 @@ function parseSpec(name, body) {
   }
 
   if (fields.length > 0) throw configError(fields)
+  const routing = { ...(path ? { path } : {}), ...(proxy ? { proxy } : {}) }
+  const deploy = { strategy: body.deploy?.strategy ?? 'rolling', ...(stopTimeout ? { stop_timeout: stopTimeout } : {}) }
   if (isStatic) {
     return spec(name, '', {
       domain,
       ...(aliases?.length ? { aliases } : {}),
       ...(redirects?.length ? { redirects } : {}),
-      static: { dir: body.static },
+      static: { dir: body.static, ...(fallback ? { fallback } : {}) },
+      ...routing,
       restart: body.restart ?? { policy: 'always' },
-      deploy: body.deploy ?? { strategy: 'rolling' },
+      deploy,
     })
   }
-  return spec(name, body.image, {
+  return spec(name, unbuilt ? '' : body.image, {
     ...(build ? { build } : {}),
     ...(body.port ? { port: body.port } : {}),
     ...(domain ? { domain } : {}),
@@ -1551,8 +1874,10 @@ function parseSpec(name, body) {
     ...(body.command ? { command: [].concat(body.command) } : {}),
     ...(body.user ? { user: body.user } : {}),
     ...(body.logging ? { logging: body.logging } : {}),
+    ...routing,
+    ...(backupPlan ? { backups: backupPlan } : {}),
     restart: body.restart ?? { policy: 'always' },
-    deploy: body.deploy ?? { strategy: 'rolling' },
+    deploy,
   })
 }
 
@@ -1589,12 +1914,32 @@ function checkConflicts(app, sp) {
     ...(sp.aliases ?? []).map((h, i) => [`aliases[${i}]`, h]),
     ...(sp.redirects ?? []).map((h, i) => [`redirects[${i}]`, h]),
   ]
+  // Applications share a hostname when their paths differ (compared without
+  // regard to case, as the proxy matches). A redirect hostname, and Shipwick's
+  // own, are taken whole.
+  const pathKey = other => (other.path ?? '').toLowerCase()
+  const mine = pathKey(sp)
+  const serves = other => [...(other.domain ? [other.domain] : []), ...(other.aliases ?? [])]
   for (const [field, host] of hostLines) {
-    if (OWN_HOSTNAMES.includes(host)) fields.push({ field, message: 'already served by Shipwick itself (the agent or the dashboard)' })
-    else {
-      const owner = others.find(([, other]) => hostnamesOf(other).includes(host))
-      if (owner) fields.push({ field, message: `already served by application "${owner[0]}"` })
+    if (OWN_HOSTNAMES.includes(host)) {
+      fields.push({ field, message: 'already served by Shipwick itself (the agent or the dashboard)' })
+      continue
     }
+    const whole = field.startsWith('redirects')
+    const owner = others.find(([, other]) => (other.redirects ?? []).includes(host) || (serves(other).includes(host) && (whole || pathKey(other) === mine)))
+    if (!owner) continue
+    if (whole || mine === '') fields.push({ field, message: `already served by application "${owner[0]}"` })
+    else if (field === 'domain') fields.push({ field: 'path', message: `${host}${sp.path} is already served by application "${owner[0]}"; applications share a domain under different paths` })
+    else fields.push({ field, message: `${host}${sp.path} is already served by application "${owner[0]}"` })
+  }
+  // A certificate for a wildcard comes through a DNS record or from the operator; without either there is none to serve it with.
+  for (const [field, host] of hostLines) {
+    if (!host.startsWith('*.') || DNS_CHALLENGE || [...certificates.values()].some(c => c.subjects.includes(host))) continue
+    fields.push({
+      field,
+      message: 'a certificate for a wildcard is issued only through a DNS record, and the agent is not set up for that',
+      expected: `SHIPWICK_CLOUDFLARE_API_TOKEN on the agent, or a certificate of your own: shipwick cert set '${host}' --cert fullchain.pem --key privkey.pem`,
+    })
   }
   for (const [i, p] of (sp.publish ?? []).entries()) {
     if (RESERVED_PORTS.includes(p.host)) {
@@ -1606,6 +1951,417 @@ function checkConflicts(app, sp) {
     if (owner) fields.push({ field: `publish[${i}].host`, message: `already published by application "${owner[0]}"` })
   }
   if (fields.length > 0) throw configError(fields)
+}
+
+// ---------------------------------------------------------------------------
+// Traffic: what the proxy's access log would say, generated on the fly and
+// deterministic per step, so a refresh redraws the same past.
+// ---------------------------------------------------------------------------
+
+const TRAFFIC_WINDOWS = { '1h': [HOUR, 60], '24h': [DAY, 300], '7d': [7 * DAY, 3600] }
+/** Requests a minute at the busiest time of day, by application; one that is not listed gets a trickle. */
+const TRAFFIC_RATE = { 'my-api': 210, 'web': 90, 'landing': 14, 'shop': 0.6, 'docs': 3 }
+
+function requireTraffic() {
+  if (!TRAFFIC_AVAILABLE) {
+    throw new HttpError(409, 'TRAFFIC_UNAVAILABLE', 'the proxy\'s access log cannot be read: traffic is recorded when the proxy runs as the caddy service of the agent\'s compose project')
+  }
+}
+
+/** The requests of one minute: counts by status class, bytes and percentiles. Null for a minute without a request. */
+function trafficMinute(app, sp, t) {
+  const minute = t / MINUTE
+  const rate = TRAFFIC_RATE[app.name] ?? 0.2
+  // Busiest in the afternoon (UTC), a third of that at night.
+  const hour = (t % DAY) / HOUR
+  const daily = 0.65 + 0.35 * Math.sin(((hour - 9) / 24) * 2 * Math.PI)
+  const requests = Math.floor(rate * daily * (0.7 + noise(app.name, minute) * 0.6) + noise(app.name, minute + 0.3))
+  if (requests <= 0) return null
+  // A stopped application is answered by the proxy itself: 503, quickly.
+  const stopped = app.desired_state === 'stopped' && t >= Date.parse(app.updated_at)
+  // Every so often a few minutes in which a share of the answers are errors.
+  const troubled = Math.floor(minute / 7) % 23 === 5
+  const status5xx = stopped ? requests : Math.round(requests * (troubled ? 0.04 + noise(app.name, minute + 0.6) * 0.1 : noise(app.name, minute + 0.6) < 0.03 ? 0.01 : 0))
+  const status4xx = stopped ? 0 : Math.round((requests - status5xx) * (0.01 + noise(app.name, minute + 0.7) * 0.03))
+  const status3xx = stopped ? 0 : Math.round((requests - status5xx - status4xx) * (sp.redirects?.length ? 0.04 : 0.005))
+  const p50 = stopped ? 0.4 : isStaticSpec(sp) ? 0.6 + noise(app.name, minute + 0.8) : 9 + noise(app.name, minute + 0.8) * 8 + (troubled ? 30 : 0)
+  return {
+    requests,
+    status_2xx: requests - status5xx - status4xx - status3xx,
+    status_3xx: status3xx,
+    status_4xx: status4xx,
+    status_5xx: status5xx,
+    bytes: Math.round(requests * (stopped ? 180 : 2400 + noise(app.name, minute + 0.9) * 9000)),
+    p50_ms: round1(p50),
+    p95_ms: round1(p50 * (3 + noise(app.name, minute + 0.1) * 2)),
+    p99_ms: round1(p50 * (9 + noise(app.name, minute + 0.2) * 14)),
+  }
+}
+
+/** Adds minutes up into one step. The percentiles of a sum are not the sum of percentiles; a mean weighted by requests is close enough here. */
+function addTraffic(into, m) {
+  const before = into.requests
+  for (const key of ['requests', 'status_2xx', 'status_3xx', 'status_4xx', 'status_5xx', 'bytes']) into[key] += m[key]
+  for (const key of ['p50_ms', 'p95_ms', 'p99_ms']) into[key] = round1((into[key] * before + m[key] * m.requests) / into.requests)
+}
+
+const noTraffic = () => ({ requests: 0, status_2xx: 0, status_3xx: 0, status_4xx: 0, status_5xx: 0, bytes: 0, p50_ms: 0, p95_ms: 0, p99_ms: 0 })
+
+function traffic(app, since) {
+  const [windowMs, stepSeconds] = TRAFFIC_WINDOWS[since]
+  const stepMs = stepSeconds * SECOND
+  const now = Date.now()
+  // The window starts on a step boundary, so it is up to one step longer than asked.
+  const start = Math.floor((now - windowMs) / stepMs) * stepMs
+  const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+  const totals = noTraffic()
+  const points = []
+  // Without a domain nothing reaches the application through the proxy: zeros, not an error.
+  if (active?.spec.domain) {
+    const from = Math.max(start, Math.floor(Date.parse(app.created_at) / stepMs) * stepMs)
+    for (let t = from; t <= now; t += stepMs) {
+      const step = noTraffic()
+      // A week of hours is sampled, four minutes to the hour, rather than added up minute by minute.
+      const stride = stepMs > 5 * MINUTE ? 15 : 1
+      for (let m = t; m < t + stepMs && m <= now; m += stride * MINUTE) {
+        const minute = trafficMinute(app, active.spec, m)
+        if (!minute) continue
+        if (stride > 1) for (const key of ['requests', 'status_2xx', 'status_3xx', 'status_4xx', 'status_5xx', 'bytes']) minute[key] *= stride
+        addTraffic(step, minute)
+      }
+      if (step.requests === 0) continue
+      points.push({ t: iso(t), ...step })
+      addTraffic(totals, step)
+    }
+  }
+  return { application: app.name, since: iso(start), step_seconds: stepSeconds, totals, points }
+}
+
+const REQUEST_SLOT_MS = 1500
+const REQUEST_PATHS = {
+  'my-api': ['/v1/users', '/v1/users/42', '/v1/orders', '/v1/orders/9913/items', '/v1/session', '/health', '/v1/search', '/admin/reports'],
+  'landing': ['/', '/pricing', '/assets/index-4f2a.js', '/assets/index-91bc.css', '/favicon.svg', '/about'],
+  'docs': ['/docs/', '/docs/install', '/docs/cli'],
+}
+const REQUEST_CLIENTS = ['203.0.113.7', '198.51.100.24', '192.0.2.144', '2001:db8::9f', '203.0.113.201', '198.51.100.77']
+
+/**
+ * The most recent requests, oldest first: the agent keeps the last 200 per
+ * application in memory, so the list holds nothing older than its start. One
+ * time slot yields at most one request, the same one whenever it is asked for.
+ */
+function recentRequests(app, tail) {
+  const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+  if (!active?.spec.domain) return []
+  const rate = Math.min(0.9, (TRAFFIC_RATE[app.name] ?? 0.2) / 40)
+  const stopped = app.desired_state === 'stopped'
+  const paths = REQUEST_PATHS[app.name] ?? ['/', '/login', '/api/items', '/api/items/7', '/static/app.js']
+  const first = Math.ceil((startedAt - 10 * MINUTE) / REQUEST_SLOT_MS)
+  const out = []
+  for (let slot = Math.floor(Date.now() / REQUEST_SLOT_MS); slot >= first && out.length < tail; slot--) {
+    if (noise(app.name, slot) >= rate) continue
+    const pickFrom = (list, salt) => list[Math.floor(noise(app.name, slot + salt) * list.length)]
+    const roll = noise(app.name, slot + 0.5)
+    const status = stopped ? 503 : roll < 0.9 ? 200 : roll < 0.93 ? 304 : roll < 0.96 ? 404 : roll < 0.98 ? 401 : roll < 0.99 ? 201 : 502
+    const method = status === 201 ? 'POST' : roll > 0.8 && roll < 0.86 ? 'POST' : 'GET'
+    out.push({
+      time: new Date(slot * REQUEST_SLOT_MS + Math.floor(noise(app.name, slot + 0.2) * REQUEST_SLOT_MS)).toISOString().replace('Z', `${String(Math.floor(noise(app.name, slot + 0.4) * 1000)).padStart(3, '0')}Z`),
+      method,
+      path: pickFrom(paths, 0.1),
+      status,
+      duration_ms: Math.round((stopped ? 0.3 : status === 502 ? 3000 : 2) * (1 + noise(app.name, slot + 0.3) * 40) * 1000) / 1000,
+      bytes: status === 304 ? 0 : Math.round(120 + noise(app.name, slot + 0.6) * 18000),
+      client: pickFrom(REQUEST_CLIENTS, 0.7),
+    })
+  }
+  return out.reverse()
+}
+
+// ---------------------------------------------------------------------------
+// Alerts and disk
+// ---------------------------------------------------------------------------
+
+const DISK_TOTAL = 40 * 1024 ** 3
+
+function diskUsage() {
+  // 62% full when all is well; with the critical alerts, past the 95% they are raised at.
+  return { total_bytes: DISK_TOTAL, used_bytes: Math.round(DISK_TOTAL * (ALERTS === 'critical' ? 0.97 : 0.62)) }
+}
+
+/** The conditions that hold right now, oldest first. They follow the fixtures: an alert about an application that was deleted or stopped is gone. */
+function activeAlerts() {
+  if (ALERTS === 'none') return []
+  const list = []
+  const running = name => apps.get(name)?.desired_state === 'running' && apps.get(name)?.active_deployment_id
+  if (ALERTS === 'critical') {
+    const disk = diskUsage()
+    list.push({ kind: 'disk', severity: 'critical', application: '', replica: 0, message: `The server's disk is ${Math.round((disk.used_bytes / disk.total_bytes) * 100)}% full (${formatSize(disk.total_bytes - disk.used_bytes)} of ${formatSize(disk.total_bytes)} free). See what takes the space with: docker system df`, since: ago(3 * HOUR) })
+    if (running('worker')) list.push({ kind: 'unhealthy', severity: 'critical', application: 'worker', replica: 0, message: 'worker has had 1 of 2 replicas healthy for 1h. See why with: shipwick status worker', since: ago(72 * MINUTE) })
+  }
+  if (running('worker')) list.push({ kind: 'restarts', severity: 'warning', application: 'worker', replica: 2, message: 'worker replica 2 was restarted 3 times in 10 minutes. Its last output says why: shipwick logs worker', since: ago(11 * MINUTE) })
+  if (running('web')) list.push({ kind: 'memory', severity: 'warning', application: 'web', replica: 3, message: 'web replica 3 is at 93% of its memory limit (476 MB of 512 MB). At the limit it is killed and restarted; raise resources.memory in deploy.yaml, or watch it with: shipwick status web', since: ago(6 * MINUTE) })
+  return list.sort((a, b) => a.since.localeCompare(b.since))
+}
+
+// ---------------------------------------------------------------------------
+// Registries, supplied certificates, key rotation
+// ---------------------------------------------------------------------------
+
+const REGISTRY_HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
+
+/** The name a credential is stored under: a hostname with an optional port, lower-cased; Docker Hub's three names are one. */
+function normalizeRegistry(raw) {
+  const name = String(raw ?? '').toLowerCase()
+  const invalid = new HttpError(400, 'INVALID_REQUEST', `invalid registry ${JSON.stringify(raw)}: use its hostname, with a port if it has one, e.g. ghcr.io or registry.example.com:5000`)
+  const [host, port, ...rest] = name.split(':')
+  if (name.length > 255 || rest.length > 0 || !REGISTRY_HOST.test(host)) throw invalid
+  if (port !== undefined && (!/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535)) throw invalid
+  return name === 'index.docker.io' || name === 'registry-1.docker.io' ? 'docker.io' : name
+}
+
+function validateRegistryCredential(username, password) {
+  const refuse = message => new HttpError(400, 'INVALID_REQUEST', message)
+  if (typeof username !== 'string' || username === '') throw refuse('the username is empty')
+  if (username.length > 255) throw refuse('the username is too long (max 255 characters)')
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F:]/.test(username)) throw refuse('the username must not contain a colon or control characters')
+  if (typeof password !== 'string' || password === '') throw refuse('the password is empty')
+  if (Buffer.byteLength(password) > 16 * 1024) throw refuse(`the password is too large (${Math.floor(Buffer.byteLength(password) / 1024)} KB, max 16 KB)`)
+  if (password.includes('\0')) throw refuse('the password must not contain NUL bytes')
+}
+
+/** The registry's verdict on a credential, before anything is stored. Two names make it say no, for demonstration. */
+function registryLogin(registry) {
+  const host = registry.split(':')[0]
+  if (host.startsWith('refused.')) {
+    throw new HttpError(400, 'REGISTRY_LOGIN_FAILED', `${registry} refused the login: unauthorized: incorrect username or password`, { registry, refused: true })
+  }
+  if (host.endsWith('.invalid')) {
+    throw new HttpError(400, 'REGISTRY_LOGIN_FAILED', `could not log in to ${registry}: dial tcp: lookup ${host}: no such host`, { registry, refused: false })
+  }
+}
+
+const invalidCertificate = message => new HttpError(400, 'INVALID_CERTIFICATE', message)
+
+/** A hostname as in deploy.yaml, lower-cased; one leading `*.` makes it a wildcard. */
+function certificateHostname(raw) {
+  const hostname = String(raw ?? '').toLowerCase()
+  const name = hostname.startsWith('*.') ? hostname.slice(2) : hostname
+  if (!HOSTNAME.test(name)) throw new HttpError(400, 'INVALID_REQUEST', `hostname: invalid value ${JSON.stringify(hostname)}: not a valid hostname`)
+  return hostname
+}
+
+/**
+ * Looks at the PEM the way the agent's first checks do. X.509 is not parsed
+ * here: what the certificate says about itself is made up from the hostname.
+ */
+function checkCertificate(hostname, body) {
+  for (const field of ['certificate', 'key']) {
+    if (typeof body[field] !== 'string' || body[field].trim() === '') throw new HttpError(400, 'INVALID_REQUEST', `${field} is required: PEM text`)
+    if (Buffer.byteLength(body[field]) > 64 * 1024) throw new HttpError(400, 'INVALID_REQUEST', `${field} is larger than 64 KB`)
+  }
+  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body.certificate)) throw invalidCertificate('the certificate file contains a private key: give the key separately, and only certificates here')
+  if (!body.certificate.includes('-----BEGIN CERTIFICATE-----')) throw invalidCertificate('the certificate is not PEM: expected one or more -----BEGIN CERTIFICATE----- blocks, the server\'s own first')
+  if (body.key.includes('-----BEGIN ENCRYPTED PRIVATE KEY-----') || body.key.includes('Proc-Type: 4,ENCRYPTED')) throw invalidCertificate('the key is protected by a passphrase, which the proxy cannot enter: remove it with openssl pkey -in <key> -out privkey.pem')
+  if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body.key)) throw invalidCertificate('the key is not PEM: expected a -----BEGIN PRIVATE KEY----- block')
+  const now = Date.now()
+  return { subjects: [hostname], issuer: 'Mock Issuing CA', not_before: iso(now - DAY), not_after: iso(now + 365 * DAY) }
+}
+
+const certificateView = ([hostname, c]) => ({ hostname, ...c })
+
+// ---------------------------------------------------------------------------
+// Backups: of an application's volumes, and of the agent's own state
+// ---------------------------------------------------------------------------
+
+/** What the agent's own state is recorded under; no application can be named so. */
+const STATE = '_agent'
+const STATE_KEEP = 7
+const VERIFY_OUTPUT = 'PostgreSQL Database directory appears to contain a database; Skipping initialization\n\nLOG:  starting PostgreSQL 17.2 on x86_64-pc-linux-musl\nLOG:  listening on IPv4 address "0.0.0.0", port 5432\nLOG:  database system was shut down at 2026-10-03 03:00:39 UTC\nLOG:  database system is ready to accept connections'
+const STATE_NOT_ENCRYPTED = 'the agent\'s state is not backed up: SHIPWICK_BACKUP_PASSPHRASE is not set, and the encryption key is never written anywhere unencrypted'
+
+const backupDestinations = () => (BUCKET ? ['local', 's3'] : ['local'])
+
+function addBackup(application, { trigger, startedAtMs, durationMs = null, status, volumes = [], error = '' }) {
+  const kept = status === 'succeeded'
+  const run = {
+    id: nextBackupId++,
+    application,
+    trigger,
+    status,
+    started_at: iso(startedAtMs),
+    completed_at: durationMs === null ? null : iso(startedAtMs + durationMs),
+    volumes: kept ? volumes : [],
+    destinations: kept ? backupDestinations() : [],
+    encrypted: PASSPHRASE,
+    error,
+    activity: '',
+    verified_at: null,
+    verify_error: '',
+    restored_at: null,
+    restore_error: '',
+    verify_output: '',
+  }
+  backups.set(run.id, run)
+  return run
+}
+
+/** A backup as lists and 202 answers carry it: without its application and the verification's output. */
+function backupView(run) {
+  const { application: _application, verify_output: _output, ...rest } = run
+  return rest
+}
+
+function backupDetail(run) {
+  const { application: _application, ...rest } = run
+  return rest
+}
+
+const backupsOf = application => [...backups.values()].filter(r => r.application === application).sort((a, b) => b.id - a.id)
+
+function backupId(raw) {
+  const id = Number(raw)
+  if (!/^\d+$/.test(raw ?? '') || id < 1) throw new HttpError(400, 'INVALID_REQUEST', 'backup id must be a positive number')
+  return id
+}
+
+/** The backup `raw` names for one application; `latest` is the newest that succeeded, where that is allowed. */
+function requireBackup(application, raw, allowLatest = false) {
+  if (allowLatest && raw === 'latest') {
+    const newest = backupsOf(application).find(r => r.status === 'succeeded')
+    if (!newest) throw new HttpError(404, 'NOT_FOUND', 'there is no successful backup yet; take one with: shipwick backups run')
+    return newest
+  }
+  const run = backups.get(backupId(raw))
+  if (!run || run.application !== application) throw new HttpError(404, 'NOT_FOUND', 'not found')
+  return run
+}
+
+const backupBusy = run => run.status === 'running' || run.activity !== ''
+
+function requireUsable(run) {
+  if (backupBusy(run)) throw new HttpError(409, 'BACKUP_BUSY', 'the backup is in use: it is still being taken, verified or restored')
+  if (run.status !== 'succeeded') throw new HttpError(409, 'BACKUP_NOT_USABLE', 'that backup did not succeed; nothing was kept of it')
+}
+
+/** Keeps the newest `keep` successes; failures never count and are never what is kept. */
+function pruneBackups(application, keep) {
+  const successes = backupsOf(application).filter(r => r.status === 'succeeded' && !backupBusy(r))
+  for (const old of successes.slice(keep)) backups.delete(old.id)
+}
+
+/** Starts a backup that finishes by itself after a few seconds: `running` on the first poll, done on a later one. */
+function startBackup(application, volumes, keep, wait) {
+  const run = addBackup(application, { trigger: 'manual', startedAtMs: Date.now(), status: 'running' })
+  setTimeout(() => {
+    if (!backups.has(run.id)) return
+    Object.assign(run, { status: 'succeeded', completed_at: iso(Date.now()), volumes, destinations: backupDestinations() })
+    if (keep) pruneBackups(application, keep)
+  }, wait).unref()
+  return run
+}
+
+/** The `backups` object of GET /server: where backups go, and how the agent's own state is doing. */
+function backupStatus() {
+  const last = backupsOf(STATE).find(r => r.status === 'succeeded')
+  const latest = backupsOf(STATE).find(r => r.status !== 'running')
+  return {
+    destination: BUCKET ? 's3' : 'local',
+    encrypted: PASSPHRASE,
+    state_last_at: last ? last.completed_at : null,
+    state_error: !PASSPHRASE ? STATE_NOT_ENCRYPTED : latest?.status === 'failed' ? latest.error : '',
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export, import and the standby server
+// ---------------------------------------------------------------------------
+
+/** What scheduled and requested exports are recorded under, next to the agent's own state. */
+const EXPORTS = '_export'
+const EXPORT_KEEP = 3
+const STANDBY_APPLICATIONS = ['postgres', 'shop', 'docs']
+/** How the scheduled fetch from the bucket is doing; only a standby has one. */
+const standbyPull = { schedule: '15 * * * *', last_at: null, last_export: 0, last_error: '' }
+/** The import that is running or ran last; kept in memory, so null until one has run. */
+let lastImport = null
+
+/** Deployed stopped by an import and not started since: what a promotion starts. */
+function standbyApplications() {
+  return [...apps.values()]
+    .map(app => [app, app.active_deployment_id ? deployments.get(app.active_deployment_id) : null])
+    .filter(([app, active]) => active?.kind === 'standby' && app.desired_state === 'stopped')
+    .sort(([, a], [, b]) => a.started_at.localeCompare(b.started_at))
+}
+
+/** The records that send an application's hostnames to this server. */
+const recordsFor = list => list.flatMap(([, active]) => hostnamesOf(active.spec).filter(h => !h.startsWith('*.')).map(hostname => ({ hostname, type: 'A', value: SERVER_ADDRESS })))
+
+function standbyView() {
+  const waiting = standbyApplications()
+  return {
+    applications: waiting.map(([app, active]) => ({ name: app.name, version: active.version, hostnames: hostnamesOf(active.spec), imported_at: active.completed_at ?? active.started_at })),
+    records: recordsFor(waiting),
+    pull: IS_STANDBY ? { ...standbyPull } : null,
+  }
+}
+
+function requireNoImport() {
+  if (lastImport?.status === 'running') throw new HttpError(409, 'IMPORT_IN_PROGRESS', 'an import is running on this server; follow it with: shipwick import --status')
+}
+
+/**
+ * An import that works through the applications one by one, a second and a
+ * half each. Stopped, it replaces what waits stopped and leaves what runs;
+ * otherwise everything that exists is left as it is, which is all the mock
+ * can know of an export it does not read.
+ */
+function startImport({ source, stopped, overwrite }) {
+  const names = [...apps.values()].filter(a => a.active_deployment_id).sort((a, b) => a.created_at.localeCompare(b.created_at)).map(a => a.name)
+  const run = {
+    status: 'running',
+    source,
+    stopped,
+    overwrite,
+    started_at: iso(Date.now()),
+    completed_at: null,
+    exported_at: null,
+    secrets: 0,
+    registries: 0,
+    certificates: 0,
+    applications: [],
+    warnings: [],
+    error: '',
+  }
+  lastImport = run
+  const step = (delay, fn) => setTimeout(() => {
+    if (lastImport === run) fn()
+  }, delay).unref()
+  step(1200, () => {
+    run.exported_at = iso(Date.now() - 12 * MINUTE)
+    run.applications = names.map(name => ({ name, status: 'pending', version: deployments.get(apps.get(name).active_deployment_id).version, deployment_id: null, volumes: [], message: '' }))
+    if (!overwrite) run.warnings = [...secrets.keys()].sort().map(name => `${name}: a secret by that name exists on this server and was kept; --overwrite replaces it`)
+  })
+  names.forEach((name, i) => {
+    step(1200 + i * 1500 + 300, () => {
+      run.applications[i].status = 'importing'
+    })
+    step(1200 + (i + 1) * 1500, () => {
+      const app = apps.get(name)
+      const entry = run.applications[i]
+      const active = app && deployments.get(app.active_deployment_id)
+      if (stopped && active?.kind === 'standby' && app.desired_state === 'stopped') {
+        active.completed_at = iso(Date.now())
+        Object.assign(entry, { status: 'imported', deployment_id: active.id, volumes: (active.spec.volumes ?? []).map(v => v.name) })
+      }
+      else if (stopped) Object.assign(entry, { status: 'skipped', message: 'it runs on this server, which was promoted or deployed to since; a stopped import replaces only what is stopped' })
+      else Object.assign(entry, { status: 'skipped', message: 'it exists on this server and was left as it is; import with --overwrite to replace it and its volumes' })
+    })
+  })
+  step(1200 + names.length * 1500 + 400, () => {
+    Object.assign(run, { status: 'succeeded', completed_at: iso(Date.now()) })
+  })
+  return run
 }
 
 // ---------------------------------------------------------------------------
@@ -1691,12 +2447,12 @@ function boolParam(url, name) {
   throw new HttpError(400, 'INVALID_REQUEST', `${name} must be true or false`)
 }
 
-async function readJSON(req, allowed) {
+async function readJSON(req, allowed, limit = 64 * 1024, expected = '') {
   const chunks = []
   let size = 0
   for await (const chunk of req) {
     size += chunk.length
-    if (size > 64 * 1024) throw new HttpError(413, 'INVALID_REQUEST', 'request body larger than 64 KB')
+    if (size > limit) throw new HttpError(413, 'INVALID_REQUEST', `request body larger than ${Math.round(limit / 1024)} KB`)
     chunks.push(chunk)
   }
   const text = Buffer.concat(chunks).toString('utf8').trim()
@@ -1707,11 +2463,11 @@ async function readJSON(req, allowed) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('not an object')
   }
   catch {
-    throw new HttpError(400, 'INVALID_REQUEST', allowed ? 'request body must be a JSON object' : 'the mock agent reads deploy.yaml as JSON only; send the document as a JSON object')
+    throw new HttpError(400, 'INVALID_REQUEST', expected ? `invalid JSON body: expected ${expected}` : allowed ? 'request body must be a JSON object' : 'the mock agent reads deploy.yaml as JSON only; send the document as a JSON object')
   }
   // Like the agent: a typo such as "imgae" must not quietly redeploy the old image.
   for (const key of Object.keys(value)) {
-    if (allowed && !allowed.includes(key)) throw new HttpError(400, 'INVALID_REQUEST', `json: unknown field ${JSON.stringify(key)}`)
+    if (allowed && !allowed.includes(key)) throw new HttpError(400, 'INVALID_REQUEST', expected ? `invalid JSON body: expected ${expected}` : `json: unknown field ${JSON.stringify(key)}`)
   }
   return value
 }
@@ -1819,7 +2575,8 @@ function requireApp(name) {
 }
 
 function requireIdle(app) {
-  if (inFlight(app.name)) {
+  // A backup being taken, or restored, holds the application like a deployment does; a verification runs beside it.
+  if (inFlight(app.name) || backupsOf(app.name).some(r => r.status === 'running' || r.activity === 'restore')) {
     throw new HttpError(409, 'DEPLOYMENT_IN_PROGRESS', `another operation is in progress for ${app.name}`)
   }
 }
@@ -1831,6 +2588,42 @@ function requireActive(app) {
 }
 
 const IMAGE_PATTERN = /^[a-z0-9]+([._\-/:][a-z0-9]+)*(:[\w][\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$/i
+
+const COLLECTIONS = ['applications', 'deployments', 'tokens', 'secrets', 'volumes', 'registries', 'certificates', 'exports']
+
+// What 0.5 added. An agent before it answers every one of these with ENDPOINT_NOT_FOUND.
+const ROUTES_05 = {
+  'POST /applications/:p/validate': 'deploy',
+  'POST /applications/:p/images/missing': 'deploy',
+  'GET /applications/:p/traffic': 'read',
+  'GET /applications/:p/requests': 'read',
+  'GET /applications/:p/backups': 'read',
+  'GET /applications/:p/backups/:x': 'read',
+  'POST /applications/:p/backups': 'deploy',
+  'POST /applications/:p/backups/:x/verify': 'deploy',
+  'POST /applications/:p/backups/:x/restore': 'admin',
+  'GET /applications/:p/backups/:x/volumes/:y/archive': 'admin',
+  'DELETE /applications/:p/backups/:x': 'admin',
+  'GET /server/backups': 'admin',
+  'GET /server/backups/:x': 'admin',
+  'POST /server/backups': 'admin',
+  'POST /server/rotate-key': 'admin',
+  'GET /registries': 'read',
+  'PUT /registries/:p': 'admin',
+  'DELETE /registries/:p': 'admin',
+  'GET /certificates': 'read',
+  'PUT /certificates/:p': 'admin',
+  'DELETE /certificates/:p': 'admin',
+  'POST /export': 'admin',
+  'GET /exports': 'admin',
+  'GET /exports/:p': 'admin',
+  'POST /exports': 'admin',
+  'POST /import': 'admin',
+  'GET /import': 'admin',
+  'GET /standby': 'read',
+  'POST /standby/pull': 'admin',
+  'POST /standby/promote': 'admin',
+}
 
 // Every endpoint and the role it needs, the agent's own table (docs/api.md).
 // A route that is not here is ENDPOINT_NOT_FOUND, answered before the token is looked at.
@@ -1869,9 +2662,25 @@ const ROUTES = {
   'DELETE /secrets/:p': 'admin',
   'GET /volumes': 'read',
   'DELETE /volumes/:p': 'admin',
+  ...(OLD_AGENT ? {} : ROUTES_05),
+}
+
+/** The route a request is looked up under: names and ids replaced by :p, :x and :y. */
+function routeOf(method, segments) {
+  const s = [...segments]
+  if (COLLECTIONS.includes(s[0]) && s.length > 1) s[1] = ':p'
+  if (s[0] === 'applications') {
+    if (s.length > 3 && ['volumes', 'runs', 'jobs', 'backups'].includes(s[2])) s[3] = ':x'
+    if (s.length > 5 && s[2] === 'backups' && s[4] === 'volumes') s[5] = ':y'
+  }
+  if (s[0] === 'server' && s[1] === 'backups' && s.length > 2) s[2] = ':x'
+  return `${method} /${s.join('/')}`
 }
 
 async function handle(req, res) {
+  // An agent that is restarting answers nothing: the connection just ends.
+  if (Date.now() < awayUntil) return req.socket.destroy()
+
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
   const method = req.method ?? 'GET'
   const path = url.pathname
@@ -1881,8 +2690,7 @@ async function handle(req, res) {
   }
 
   const segments = path.startsWith('/api/v1/') ? path.split('/').filter(Boolean).slice(2).map(decodeURIComponent) : []
-  const collection = ['applications', 'deployments', 'tokens', 'secrets', 'volumes'].includes(segments[0])
-  const route = `${method} /${segments.map((s, i) => (collection && i === 1 ? ':p' : collection && i === 3 && ['volumes', 'runs', 'jobs'].includes(segments[2]) ? ':x' : s)).join('/')}`
+  const route = routeOf(method, segments)
   const param = segments[1]
   const required = ROUTES[route]
 
@@ -1923,10 +2731,291 @@ async function handle(req, res) {
         memory_bytes: 8 * 1024 ** 3 - 212 * 1024 ** 2,
         applications: apps.size,
         containers: [...apps.values()].reduce((n, a) => n + a.containers.filter(c => c.state === 'running').length, 0),
-        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0 },
+        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }) },
         token: who,
         notifications: { webhook: WEBHOOK },
+        ...(OLD_AGENT ? {} : { dashboard_url: DASHBOARD_URL, alerts: activeAlerts(), disk: diskUsage(), backups: backupStatus() }),
       })
+    }
+
+    case 'GET /applications/:p/traffic': {
+      const app = requireApp(param)
+      const since = url.searchParams.get('since') || '1h'
+      if (!TRAFFIC_WINDOWS[since]) throw new HttpError(400, 'INVALID_REQUEST', 'since must be 1h, 24h or 7d')
+      requireTraffic()
+      return sendJSON(res, 200, traffic(app, since))
+    }
+
+    case 'GET /applications/:p/requests': {
+      const app = requireApp(param)
+      const tail = intParam(url, 'tail', 50, 1, 200)
+      requireTraffic()
+      return sendJSON(res, 200, recentRequests(app, tail))
+    }
+
+    case 'POST /applications/:p/validate': {
+      // What deploy would answer for the same document, without recording anything. An unknown application is not an error: it is what a first deployment looks like.
+      if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
+      const body = await readJSON(req, null)
+      const sp = parseSpec(param, body, { validating: true })
+      checkConflicts(apps.get(param) ?? null, sp)
+      return sendJSON(res, 200, { valid: true })
+    }
+
+    case 'POST /applications/:p/images/missing': {
+      // The mock holds no image store: it lacks every layer it is asked about.
+      const body = await readJSON(req, ['layers'])
+      if (!Array.isArray(body.layers) || body.layers.some(l => typeof l !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(l))) {
+        throw new HttpError(400, 'INVALID_REQUEST', 'layers must be a list of sha256:<64 hex characters> digests')
+      }
+      return sendJSON(res, 200, { missing: body.layers })
+    }
+
+    case 'GET /applications/:p/backups': {
+      const app = requireApp(param)
+      const limit = intParam(url, 'limit', 50, 1, 500)
+      return sendJSON(res, 200, backupsOf(app.name).slice(0, limit).map(backupView))
+    }
+
+    case 'GET /applications/:p/backups/:x': {
+      const app = requireApp(param)
+      return sendJSON(res, 200, backupDetail(requireBackup(app.name, segments[3])))
+    }
+
+    case 'POST /applications/:p/backups': {
+      const app = requireApp(param)
+      const active = requireActive(app)
+      const volumes = active.spec.volumes ?? []
+      if (volumes.length === 0) throw new HttpError(409, 'NO_VOLUMES', 'the application has no volumes; a backup is an archive of its volumes')
+      requireIdle(app)
+      const sizes = volumes.map(v => ({ volume: v.name, size_bytes: managedVolumes().find(m => m.application === app.name && m.volume === v.name && m.size_bytes > 0)?.size_bytes ?? 4096 }))
+      const run = startBackup(app.name, sizes, active.spec.backups?.keep ?? 0, 4 * SECOND)
+      return sendJSON(res, 202, backupView(run), { location: `/api/v1/applications/${app.name}/backups/${run.id}` })
+    }
+
+    case 'POST /applications/:p/backups/:x/verify': {
+      const app = requireApp(param)
+      const run = requireBackup(app.name, segments[3], true)
+      requireUsable(run)
+      requireActive(app)
+      run.activity = 'verify'
+      setTimeout(() => {
+        if (!backups.has(run.id)) return
+        run.activity = ''
+        if (VERIFY_FAILS) {
+          Object.assign(run, { verified_at: null, verify_error: 'the container did not become healthy on the restored data within 2m: TCP :5432: connection refused', verify_output: 'LOG:  starting PostgreSQL 17.2 on x86_64-pc-linux-musl\nLOG:  invalid checkpoint record\nPANIC:  could not locate a valid checkpoint record' })
+          addAppEvent(app.name, 'warn', 'backup', `Backup #${run.id} did not verify: ${run.verify_error}`)
+        }
+        else {
+          Object.assign(run, { verified_at: iso(Date.now()), verify_error: '', verify_output: VERIFY_OUTPUT })
+          addAppEvent(app.name, 'info', 'backup', `Backup #${run.id} verified: it restores, and a container of the current image passed its health check on it`)
+        }
+      }, 5 * SECOND).unref()
+      return sendJSON(res, 202, backupView(run))
+    }
+
+    case 'POST /applications/:p/backups/:x/restore': {
+      const app = requireApp(param)
+      const run = requireBackup(app.name, segments[3])
+      requireUsable(run)
+      requireIdle(app)
+      const active = requireActive(app)
+      // A backup may hold a volume the application no longer mounts: there is nowhere to restore it to.
+      if (run.volumes.some(v => !(active.spec.volumes ?? []).some(m => m.name === v.volume))) throw new HttpError(404, 'NOT_FOUND', 'the backup holds a volume the application no longer has')
+      if (app.desired_state !== 'stopped' || app.containers.some(c => c.state === 'running')) {
+        throw new HttpError(409, 'APPLICATION_RUNNING', 'the application is running; stop it first with: shipwick stop')
+      }
+      run.activity = 'restore'
+      setTimeout(() => {
+        if (!backups.has(run.id)) return
+        Object.assign(run, { activity: '', restored_at: iso(Date.now()), restore_error: '' })
+        if (apps.get(app.name) !== app) return
+        // The replica is created again around the restored volumes, and stays stopped.
+        app.containers = makeContainers(app, active, { 1: { state: 'created', started_at: null, health: active.spec.health ? 'unknown' : '' } })
+        app.updated_at = iso(Date.now())
+        for (const v of run.volumes) addAppEvent(app.name, 'info', 'app', `Volume ${v.volume} restored from a backup (${formatSize(v.size_bytes)})`)
+      }, 4 * SECOND).unref()
+      return sendJSON(res, 202, backupView(run))
+    }
+
+    case 'GET /applications/:p/backups/:x/volumes/:y/archive': {
+      const app = requireApp(param)
+      const run = requireBackup(app.name, segments[3])
+      requireUsable(run)
+      if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(segments[5] ?? '')) throw new HttpError(400, 'INVALID_REQUEST', 'volume: lowercase letters, digits and dashes only')
+      if (!run.volumes.some(v => v.volume === segments[5])) throw new HttpError(404, 'NOT_FOUND', 'the backup holds no volume by that name')
+      const archive = tarArchive(VOLUME_FILES)
+      res.writeHead(200, {
+        'content-type': 'application/x-tar',
+        'content-disposition': `attachment; filename="${app.name}-${segments[5]}-backup-${run.id}.tar"`,
+        'content-length': archive.length,
+      })
+      return res.end(archive)
+    }
+
+    case 'DELETE /applications/:p/backups/:x': {
+      const app = requireApp(param)
+      const run = requireBackup(app.name, segments[3])
+      if (backupBusy(run)) throw new HttpError(409, 'BACKUP_BUSY', 'the backup is in use: it is still being taken, verified or restored')
+      backups.delete(run.id)
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /server/backups':
+      return sendJSON(res, 200, backupsOf(STATE).slice(0, intParam(url, 'limit', 50, 1, 500)).map(backupView))
+
+    case 'GET /server/backups/:x':
+      return sendJSON(res, 200, backupView(requireBackup(STATE, segments[2])))
+
+    case 'POST /server/backups': {
+      // The key is never written unencrypted, so without a passphrase there is no backup of the state at all.
+      if (!PASSPHRASE) throw new HttpError(409, 'BACKUPS_NOT_ENCRYPTED', STATE_NOT_ENCRYPTED)
+      if (backupsOf(STATE).some(backupBusy)) throw new HttpError(409, 'BACKUP_BUSY', 'a backup of the agent\'s state is already running')
+      const run = startBackup(STATE, [{ volume: 'shipwick.db', size_bytes: 1560576 }, { volume: 'encryption.key', size_bytes: 1536 }], STATE_KEEP, 3 * SECOND)
+      return sendJSON(res, 202, backupView(run), { location: `/api/v1/server/backups/${run.id}` })
+    }
+
+    case 'POST /server/rotate-key': {
+      if (KEY_FROM_ENVIRONMENT && rotationPending) {
+        throw new HttpError(409, 'KEY_ROTATION_PENDING', 'the key was already rotated since the agent started, and its environment still holds the old one: put the new key in the agent\'s environment and restart it first', { key_file: `${DATA_DIR}/encryption.key.new` })
+      }
+      // What is sealed: secrets, registry passwords and certificate keys, and every deployment whose spec holds a value.
+      const counts = {
+        values: secrets.size + registries.size + certificates.size,
+        deployments: [...deployments.values()].filter(d => Object.keys(d.spec.env ?? {}).length > 0 || d.spec.proxy?.basic_auth?.length).length,
+      }
+      if (!KEY_FROM_ENVIRONMENT) return sendJSON(res, 200, { ...counts, key_source: 'file', key_file: `${DATA_DIR}/encryption.key` })
+      rotationPending = true
+      // The one time the key is shown: the agent cannot change its own environment.
+      return sendJSON(res, 200, { ...counts, key_source: 'environment', key: randomBytes(32).toString('hex'), key_file: `${DATA_DIR}/encryption.key.new` })
+    }
+
+    case 'POST /export': {
+      // The real answer is the whole server, encrypted with the passphrase; here it is a file that starts like one.
+      const body = await readJSON(req, ['passphrase', 'applications'], 64 * 1024, '{"passphrase": "…"}')
+      if (typeof body.passphrase !== 'string' || body.passphrase.length < 12) throw new HttpError(400, 'INVALID_REQUEST', 'passphrase: at least 12 characters; the export holds every secret of the server')
+      for (const name of body.applications ?? []) if (!apps.has(name)) throw new HttpError(404, 'NOT_FOUND', `no application named ${JSON.stringify(name)}`)
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
+      const file = Buffer.concat([Buffer.from('SWBACKUP'), randomBytes(1016)])
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="shipwick-export-${stamp}.swexport"` })
+      return res.end(file)
+    }
+
+    case 'GET /exports':
+      return sendJSON(res, 200, backupsOf(EXPORTS).slice(0, intParam(url, 'limit', 50, 1, 500)).map(backupView))
+
+    case 'GET /exports/:p':
+      return sendJSON(res, 200, backupView(requireBackup(EXPORTS, param)))
+
+    case 'POST /exports': {
+      // An export holds every secret of the server: it is only ever written encrypted.
+      if (!PASSPHRASE) throw new HttpError(409, 'BACKUPS_NOT_ENCRYPTED', 'an export holds every secret of the server and is only ever written encrypted: SHIPWICK_BACKUP_PASSPHRASE is not set on the agent')
+      if (backupsOf(EXPORTS).some(backupBusy)) throw new HttpError(409, 'EXPORT_IN_PROGRESS', 'an export is being written already; see it with: shipwick export --list')
+      // An application with nothing deployed yet has nothing to export, whatever is in flight for it.
+      const busy = [...apps.values()].find(a => a.active_deployment_id && inFlight(a.name))
+      if (busy) throw new HttpError(409, 'DEPLOYMENT_IN_PROGRESS', `another operation is in progress for ${busy.name}`)
+      const run = startBackup(EXPORTS, [{ volume: 'export.tar', size_bytes: 3204448256 }], EXPORT_KEEP, 5 * SECOND)
+      return sendJSON(res, 202, backupView(run), { location: `/api/v1/exports/${run.id}` })
+    }
+
+    case 'POST /import': {
+      const [type] = String(req.headers['content-type'] ?? '').split(';')
+      if (type.trim() !== 'application/octet-stream') throw new HttpError(400, 'INVALID_REQUEST', 'the body must be an export sent as Content-Type: application/octet-stream')
+      const stopped = boolParam(url, 'stopped')
+      const overwrite = boolParam(url, 'overwrite')
+      if (!req.headers['x-shipwick-passphrase']) throw new HttpError(400, 'INVALID_REQUEST', 'the passphrase of the export is sent base64-encoded in the X-Shipwick-Passphrase header')
+      requireNoImport()
+      const chunks = []
+      for await (const chunk of req) if (chunks.length < 4) chunks.push(chunk)
+      if (!Buffer.concat(chunks).subarray(0, 8).equals(Buffer.from('SWBACKUP'))) throw new HttpError(400, 'INVALID_EXPORT', 'this is not an export: it does not start like a file shipwick export writes')
+      // The request stays open for the whole import and answers at the end; GET /import follows it meanwhile.
+      const run = startImport({ source: 'upload', stopped, overwrite })
+      await new Promise((resolve) => {
+        const timer = setInterval(() => {
+          if (run.status !== 'running') {
+            clearInterval(timer)
+            resolve()
+          }
+        }, 250)
+      })
+      return sendJSON(res, 200, run)
+    }
+
+    case 'GET /import':
+      if (!lastImport) throw new HttpError(404, 'NOT_FOUND', 'no import has run on this server since the agent started')
+      return sendJSON(res, 200, lastImport)
+
+    case 'GET /standby':
+      return sendJSON(res, 200, standbyView())
+
+    case 'POST /standby/pull': {
+      if (!IS_STANDBY) throw new HttpError(409, 'STANDBY_NOT_CONFIGURED', 'this agent has no bucket to fetch exports from: set SHIPWICK_BACKUP_S3_* and SHIPWICK_BACKUP_PASSPHRASE to those of the server it stands by for, and SHIPWICK_STANDBY_SCHEDULE')
+      requireNoImport()
+      standbyPull.last_export += 1
+      standbyPull.last_at = iso(Date.now())
+      const run = startImport({ source: `export #${standbyPull.last_export} from the bucket`, stopped: true, overwrite: true })
+      return sendJSON(res, 202, run, { location: '/api/v1/import' })
+    }
+
+    case 'POST /standby/promote': {
+      requireNoImport()
+      const waiting = standbyApplications()
+      // Started in the order they were imported; the answer comes when the last one is ready.
+      await new Promise(resolve => setTimeout(resolve, 1200 + waiting.length * 900))
+      const started = waiting.map(([app, active]) => {
+        if (apps.get(app.name) !== app) return { name: app.name, status: 'failed', message: 'the application was deleted while the promotion ran' }
+        app.desired_state = 'running'
+        app.containers = makeContainers(app, { ...active, completed_at: iso(Date.now()) })
+        app.updated_at = iso(Date.now())
+        addAppEvent(app.name, 'info', 'app', `Application started${byWho}`)
+        return { name: app.name, status: 'running', message: '' }
+      })
+      return sendJSON(res, 200, { applications: started, records: recordsFor(waiting) })
+    }
+
+    case 'GET /registries':
+      return sendJSON(res, 200, [...registries.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([registry, r]) => ({ registry, ...r })))
+
+    case 'PUT /registries/:p': {
+      const registry = normalizeRegistry(param)
+      const body = await readJSON(req, ['username', 'password'])
+      validateRegistryCredential(body.username, body.password)
+      if (!registries.has(registry) && registries.size >= 50) throw new HttpError(400, 'INVALID_REQUEST', 'at most 50 registries can be stored; remove one first')
+      // The registry is asked before anything is stored; the password is neither kept nor echoed.
+      registryLogin(registry)
+      const now = iso(Date.now())
+      registries.set(registry, { username: body.username, created_at: registries.get(registry)?.created_at ?? now, updated_at: now })
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'DELETE /registries/:p': {
+      const registry = normalizeRegistry(param)
+      if (!registries.delete(registry)) throw new HttpError(404, 'NOT_FOUND', `no credential is stored for ${registry}`)
+      res.writeHead(204)
+      return res.end()
+    }
+
+    case 'GET /certificates':
+      return sendJSON(res, 200, [...certificates.entries()].sort(([a], [b]) => a.localeCompare(b)).map(certificateView))
+
+    case 'PUT /certificates/:p': {
+      const hostname = certificateHostname(param)
+      const body = await readJSON(req, ['certificate', 'key'], 513 * 1024, '{"certificate": "<PEM>", "key": "<PEM>"}')
+      const said = checkCertificate(hostname, body)
+      if (!certificates.has(hostname) && certificates.size >= 50) throw new HttpError(400, 'INVALID_REQUEST', 'at most 50 certificates can be stored; remove one first')
+      const now = iso(Date.now())
+      // Neither the PEM nor the key is kept: only what the certificate says about itself.
+      certificates.set(hostname, { ...said, created_at: certificates.get(hostname)?.created_at ?? now, updated_at: now })
+      return sendJSON(res, 200, certificateView([hostname, certificates.get(hostname)]))
+    }
+
+    case 'DELETE /certificates/:p': {
+      const hostname = certificateHostname(param)
+      if (!certificates.delete(hostname)) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      res.writeHead(204)
+      return res.end()
     }
 
     case 'GET /applications':

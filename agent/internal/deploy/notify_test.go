@@ -181,7 +181,8 @@ func TestCrashLoopIsOneOutageNotification(t *testing.T) {
 	if _, looping := s.engine.sup.snapshot(id); !looping {
 		t.Fatal("precondition: replica should be crash-looping")
 	}
-	if kinds := rec.Kinds(); len(kinds) != 1 || kinds[0] != notify.ApplicationDown {
+	// One more after five minutes: the alert that it has stayed down.
+	if kinds := rec.Kinds(); len(kinds) != 2 || kinds[0] != notify.ApplicationDown || kinds[1] != notify.AlertRaised {
 		t.Errorf("notifications = %v; every restart of a crash loop must not be a message", kinds)
 	}
 
@@ -190,7 +191,7 @@ func TestCrashLoopIsOneOutageNotification(t *testing.T) {
 	for range 8 {
 		s.advance(time.Minute)
 	}
-	if kinds := rec.Kinds(); len(kinds) != 2 || kinds[1] != notify.ApplicationRecovered {
+	if kinds := rec.Kinds(); len(kinds) != 3 || kinds[2] != notify.ApplicationRecovered {
 		t.Errorf("notifications = %v; a replica that stayed up is a recovery", kinds)
 	}
 }

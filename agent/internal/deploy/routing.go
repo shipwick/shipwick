@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
@@ -23,30 +24,75 @@ type Proxy interface {
 	// nothing changed: the supervisor calls it every tick.
 	Sync(ctx context.Context, routes []proxy.Route) error
 	Status() proxy.Status
+	// SetCertificates replaces the certificates the operator supplied; the
+	// next Sync serves the hostnames they cover with them.
+	SetCertificates(certs []proxy.Certificate)
 }
 
 // DomainConflictError is returned when a deployment claims a hostname that
 // something else already serves — as its domain, an alias or a redirect.
+// Applications may share a hostname when each serves a path of its own: the
+// conflict is then the hostname with the same path, or with none on both.
 type DomainConflictError struct {
 	Domain string
-	Field  string // where deploy.yaml claims it: "domain", "aliases[0]", "redirects[1]"
+	Path   string // the path both claim; empty when it is the whole hostname
+	Field  string // where deploy.yaml claims it: "domain", "path", "aliases[0]", "redirects[1]"
 	Owner  string // an application, or Shipwick itself
 }
 
 func (e *DomainConflictError) Error() string {
-	return fmt.Sprintf("%s: %s is already served by %s", e.Field, e.Domain, e.Owner)
+	return fmt.Sprintf("%s: %s%s is already served by %s", e.Field, e.Domain, e.Path, e.Owner)
 }
 
-// hostnames is everything one application answers to: its domain, the
-// aliases served like it, and the redirects sent to it.
+// Message is the error as a validation error words it, under Field.
+func (e *DomainConflictError) Message() string {
+	switch {
+	case e.Field == "path":
+		return fmt.Sprintf("%s%s is already served by %s; applications share a domain under different paths", e.Domain, e.Path, e.Owner)
+	case e.Path != "":
+		return fmt.Sprintf("%s%s is already served by %s", e.Domain, e.Path, e.Owner)
+	}
+	return "already served by " + e.Owner
+}
+
+// hostnames is everything one application answers to — its domain, the
+// aliases served like it, and the redirects sent to it — and what the proxy
+// does for it there. A rollout hands it over whole, so that the hostnames and
+// the behaviour of a version switch in the same instant as its replicas.
 type hostnames struct {
 	domain    string
 	aliases   []string
 	redirects []string
+	// path is the part of domain and aliases the application serves; empty
+	// means all of it. Redirects are whole hostnames.
+	path string
+	// proxy is the application's proxy block, fallback its static fallback page.
+	proxy    *spec.Proxy
+	fallback string
 }
 
 func hostnamesOf(a spec.App) hostnames {
-	return hostnames{domain: a.Domain, aliases: a.Aliases, redirects: a.Redirects}
+	h := hostnames{domain: a.Domain, aliases: a.Aliases, redirects: a.Redirects, path: a.Path, proxy: a.Proxy}
+	if a.Static != nil {
+		h.fallback = a.Static.Fallback
+	}
+	return h
+}
+
+// served are the hostnames the application serves itself: all but the redirects.
+func (h hostnames) served() []namedHost {
+	var out []namedHost
+	for _, n := range h.all() {
+		if !strings.HasPrefix(n.field, "redirects[") {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// part names one path of one hostname, the way the proxy tells paths apart.
+func part(host, path string) string {
+	return host + spec.PathKey(path)
 }
 
 // all lists every hostname with the deploy.yaml field that names it.
@@ -80,19 +126,23 @@ func routeHostnames(r proxy.Route) []string {
 	return append(out, r.Redirects...)
 }
 
-// checkDomain refuses a hostname that is already taken, whatever role it has
-// on either side. Two routes for one hostname would silently send all traffic
-// to whichever sorts first.
+// checkDomain refuses a hostname that is already taken. Two applications may
+// serve one hostname under different paths; the same path twice, or no path
+// twice, would silently send all traffic to whichever sorts first. A hostname
+// that is redirected, or that is Shipwick's own, is taken whole: a redirect
+// has no paths to share.
 func (e *Engine) checkDomain(ctx context.Context, app spec.App) error {
-	claims := hostnamesOf(app).all()
-	if len(claims) == 0 {
+	mine := hostnamesOf(app)
+	if len(mine.all()) == 0 {
 		return nil
 	}
 	apps, err := e.store.ListApplications(ctx)
 	if err != nil {
 		return err
 	}
-	owners := map[string]string{}
+	whole := map[string]string{}  // hostname → who has all of it
+	parts := map[string]string{}  // hostname and path → who serves it
+	shared := map[string]string{} // hostname → one of those who serve a part of it
 	for _, other := range apps {
 		if other.Name == app.Name || other.ActiveDeploymentID == nil {
 			continue
@@ -101,18 +151,37 @@ func (e *Engine) checkDomain(ctx context.Context, app spec.App) error {
 		if err != nil {
 			return err
 		}
-		for _, h := range hostnamesOf(d.Spec).all() {
-			owners[h.host] = fmt.Sprintf("application %q", other.Name)
+		owner := fmt.Sprintf("application %q", other.Name)
+		theirs := hostnamesOf(d.Spec)
+		for _, h := range theirs.served() {
+			parts[part(h.host, theirs.path)], shared[h.host] = owner, owner
+		}
+		for _, h := range theirs.redirects {
+			whole[h] = owner
 		}
 	}
 	for _, r := range e.opts.ExtraRoutes {
 		for _, h := range routeHostnames(r) {
-			owners[h] = "Shipwick itself (the agent or the dashboard)"
+			whole[h] = "Shipwick itself (the agent or the dashboard)"
 		}
 	}
-	for _, c := range claims {
-		if owner := owners[c.host]; owner != "" {
+	for _, c := range mine.all() {
+		if owner := whole[c.host]; owner != "" {
 			return &DomainConflictError{Domain: c.host, Field: c.field, Owner: owner}
+		}
+		if strings.HasPrefix(c.field, "redirects[") {
+			if owner := shared[c.host]; owner != "" {
+				return &DomainConflictError{Domain: c.host, Field: c.field, Owner: owner}
+			}
+			continue
+		}
+		if owner := parts[part(c.host, mine.path)]; owner != "" {
+			conflict := &DomainConflictError{Domain: c.host, Path: mine.path, Field: c.field, Owner: owner}
+			// The domain is fine to share; it is the path that has to differ.
+			if c.field == "domain" && mine.path != "" {
+				conflict.Field = "path"
+			}
+			return conflict
 		}
 	}
 	return nil
@@ -185,6 +254,10 @@ func (e *Engine) clearRouteOverride(app string) {
 // established at that instant.
 func (e *Engine) SyncProxy(ctx context.Context) error {
 	if e.opts.Proxy != nil {
+		// What a supplied certificate covers does not wait for DNS, so the
+		// certificates are read before the hostnames are judged. A failure is
+		// reported further down, where the proxy would have been told.
+		e.suppliedCertificates(ctx)
 		// DNS first, and before the lock: a lookup may take its whole timeout,
 		// and nothing that renames replicas should wait for a resolver. The
 		// plans are computed again under the lock; only the cache is read there.
@@ -241,8 +314,16 @@ func (e *Engine) SyncProxy(ctx context.Context) error {
 			e.lastRoutes = now
 			e.explainUnserved(plans, containers, routes)
 		}
-		if err := e.opts.Proxy.Sync(ctx, routes); err != nil {
-			failures = append(failures, err)
+		// Without the certificates the proxy keeps the configuration it has:
+		// one without them would send it to an authority for hostnames that
+		// were never meant to get a certificate that way.
+		if supplied, err := e.suppliedCertificates(ctx); err != nil {
+			failures = append(failures, fmt.Errorf("read certificates: %w", err))
+		} else {
+			e.opts.Proxy.SetCertificates(proxyCertificates(supplied))
+			if err := e.opts.Proxy.Sync(ctx, routes); err != nil {
+				failures = append(failures, err)
+			}
 		}
 	}
 	return errors.Join(failures...)
@@ -261,7 +342,11 @@ func (e *Engine) noteHeldBack(ctx context.Context, plans []routingPlan) {
 			if !ready {
 				held[h.host] = why
 			} else if _, was := e.heldBack[h.host]; was {
-				e.appEvent(ctx, store.Application{ID: p.appID, Name: p.app}, fmt.Sprintf("%s now points at this server and is being served", h.host))
+				now := "now points at this server and is being served"
+				if note := e.certificateNote(h.host); note != "" {
+					now = "is now served" + note
+				}
+				e.appEvent(ctx, store.Application{ID: p.appID, Name: p.app}, h.host+" "+now)
 			}
 		}
 	}
@@ -295,10 +380,10 @@ func describeHeld(held map[string]string) string {
 func (e *Engine) explainUnserved(plans []routingPlan, containers map[string]docker.Container, routes []proxy.Route) {
 	served := map[string]bool{}
 	for _, r := range routes {
-		served[r.Domain] = len(r.Backends) > 0 || len(r.Upstreams) > 0 || r.StaticRoot != ""
+		served[part(r.Domain, r.Path)] = len(r.Backends) > 0 || len(r.Upstreams) > 0 || r.StaticRoot != ""
 	}
 	for _, p := range plans {
-		if p.hosts.domain == "" || served[p.hosts.domain] {
+		if p.hosts.domain == "" || served[part(p.hosts.domain, p.hosts.path)] {
 			continue
 		}
 		if ready, _ := e.hostnameReady(p.hosts.domain); !ready {
@@ -331,6 +416,9 @@ func describeRoutes(routes []proxy.Route) string {
 		}
 		sort.Strings(behind)
 		served := append([]string{r.Domain}, r.Aliases...)
+		for i := range served {
+			served[i] += r.Path
+		}
 		parts = append(parts, strings.Join(served, ",")+"→"+strings.Join(behind, "+"))
 		for _, h := range r.Redirects {
 			parts = append(parts, h+"→308")
@@ -432,18 +520,33 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
 // could lock the operator out of the very agent that reports the problem.
 func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Container) []proxy.Route {
 	routes := append([]proxy.Route(nil), e.opts.ExtraRoutes...)
-	taken := map[string]bool{}
+	// taken are hostnames nobody else may have any part of: Shipwick's own
+	// and the redirected ones. parts are the paths of hostnames that are
+	// served, and shared the hostnames they belong to.
+	taken, parts, shared := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, r := range routes {
 		claim(taken, routeHostnames(r))
 	}
+	// free is the subset of hosts this plan may serve under its path.
+	free := func(hosts []string, path string) []string {
+		var out []string
+		for _, h := range hosts {
+			if !taken[h] && !parts[part(h, path)] {
+				parts[part(h, path)], shared[h] = true, true
+				out = append(out, h)
+			}
+		}
+		return out
+	}
+	used := map[string]bool{}
+	defer e.hashes.keep(used)
 
 	for _, p := range plans {
 		// checkDomain prevents duplicates; this keeps a config sane even if
 		// one slipped in (e.g. two first deployments racing for a domain).
-		if p.hosts.domain == "" || taken[p.hosts.domain] {
+		if p.hosts.domain == "" || len(free([]string{p.hosts.domain}, p.hosts.path)) == 0 {
 			continue
 		}
-		taken[p.hosts.domain] = true
 		// The whole route waits for the domain, aliases and redirects
 		// included: the redirects' target is the domain, and an alias is
 		// served "exactly like" a domain that is not served yet.
@@ -451,7 +554,33 @@ func (e *Engine) routesFor(plans []routingPlan, containers map[string]docker.Con
 			continue
 		}
 
-		route := proxy.Route{Domain: p.hosts.domain, Aliases: claim(taken, e.readyHosts(p.hosts.aliases)), Redirects: claim(taken, e.readyHosts(p.hosts.redirects)), StaticRoot: p.staticRoot}
+		var redirects []string
+		for _, h := range e.readyHosts(p.hosts.redirects) {
+			if !shared[h] {
+				redirects = append(redirects, h)
+			}
+		}
+		route := proxy.Route{
+			Domain:         p.hosts.domain,
+			Aliases:        free(e.readyHosts(p.hosts.aliases), p.hosts.path),
+			Redirects:      claim(taken, redirects),
+			StaticRoot:     p.staticRoot,
+			StaticFallback: p.hosts.fallback,
+			Path:           p.hosts.path,
+		}
+		if px := p.hosts.proxy; px != nil {
+			accounts, err := e.hashes.accounts(px.BasicAuth, used)
+			if err != nil {
+				// Serving it without its accounts is the one thing that must
+				// not happen; until the next sync it is not served at all.
+				e.log.Error("could not hash a basic-auth password; the application is not routed", "app", p.app, "error", err)
+				continue
+			}
+			route.StripPrefix, route.Headers, route.BasicAuth = px.StripPrefix, px.Headers, accounts
+			for _, r := range px.Redirects {
+				route.PathRedirects = append(route.PathRedirects, proxy.PathRedirect{From: r.From, To: r.To, Status: r.Status})
+			}
+		}
 		for _, m := range p.members {
 			c, exists := containers[m.replica.ContainerID]
 			if !exists || !c.Running {
@@ -541,8 +670,8 @@ func (e *Engine) startNameless(ctx context.Context, id string) error {
 
 // restartNameless is a restart in three steps instead of Docker's one, for the
 // same reason.
-func (e *Engine) restartNameless(ctx context.Context, id string) error {
-	if err := e.rt.StopContainer(ctx, id, e.opts.StopTimeout); err != nil {
+func (e *Engine) restartNameless(ctx context.Context, id string, timeout time.Duration) error {
+	if err := e.rt.StopContainer(ctx, id, timeout); err != nil {
 		return err
 	}
 	return e.startNameless(ctx, id)
@@ -553,7 +682,9 @@ func (e *Engine) ProxyStatus() proxy.Status {
 	if e.opts.Proxy == nil {
 		return proxy.Status{}
 	}
-	return e.opts.Proxy.Status()
+	status := e.opts.Proxy.Status()
+	status.DNSChallenge = e.opts.DNSChallenge
+	return status
 }
 
 // serving reports who serves the application while a rollout is in charge of

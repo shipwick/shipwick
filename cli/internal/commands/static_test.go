@@ -121,14 +121,15 @@ func TestDeployStaticUploadsTheFolderFirst(t *testing.T) {
 		t.Errorf("piped output carries no progress line, and no replica count for a folder:\n%s", out)
 	}
 
-	// The folder goes first; the deployment names what the agent kept.
+	// The agent is asked first, then the folder goes; the deployment names
+	// what the agent kept.
 	var order []string
 	for _, r := range f.requests {
 		if strings.Contains(r, "/applications/web/") {
 			order = append(order, r)
 		}
 	}
-	want := []string{"PUT /api/v1/applications/web/static", "POST /api/v1/applications/web/deploy?static=" + url.QueryEscape(staticDigest)}
+	want := []string{"POST /api/v1/applications/web/validate", "PUT /api/v1/applications/web/static", "POST /api/v1/applications/web/deploy?static=" + url.QueryEscape(staticDigest)}
 	if strings.Join(order, "\n") != strings.Join(want, "\n") {
 		t.Errorf("requests = %v, want %v", order, want)
 	}

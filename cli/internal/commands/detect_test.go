@@ -87,6 +87,87 @@ func TestDetectProject(t *testing.T) {
 			},
 		},
 		{
+			name: "Next with output: export is the folder its build writes",
+			files: map[string]string{
+				"package.json":   `{"dependencies":{"next":"15"},"scripts":{"build":"next build"}}`,
+				"next.config.js": "module.exports = {\n  output: 'export',\n}\n",
+				"yarn.lock":      "",
+			},
+			want: project{Kind: kindStatic, Label: "a Next.js site exported by yarn build"},
+			check: func(t *testing.T, p project) {
+				if p.Static != (staticProject{Dir: "out/", Build: "yarn build"}) {
+					t.Errorf("static = %+v", p.Static)
+				}
+			},
+		},
+		{
+			name: "SvelteKit with adapter-node is a server",
+			files: map[string]string{
+				"package.json":      `{"devDependencies":{"@sveltejs/kit":"^2","@sveltejs/adapter-node":"^5","vite":"^6"},"scripts":{"build":"vite build"}}`,
+				"package-lock.json": "{}",
+			},
+			want: project{Kind: kindSvelte, Label: "a SvelteKit application", Port: 3000, HealthPath: "/", HealthLive: true},
+			check: func(t *testing.T, p project) {
+				if p.Node.Install != "npm ci" || p.Node.NoLock {
+					t.Errorf("node = %+v", p.Node)
+				}
+			},
+		},
+		{
+			name:  "SvelteKit with adapter-static is the folder its build writes",
+			files: map[string]string{"package.json": `{"devDependencies":{"@sveltejs/kit":"^2","@sveltejs/adapter-static":"^3","vite":"^6"},"scripts":{"build":"vite build"}}`},
+			want:  project{Kind: kindStatic, Label: "a SvelteKit site built by npm run build"},
+			check: func(t *testing.T, p project) {
+				if p.Static != (staticProject{Dir: "build/", Build: "npm run build"}) {
+					t.Errorf("static = %+v", p.Static)
+				}
+			},
+		},
+		{
+			name:  "broken: SvelteKit with an adapter that targets no server",
+			files: map[string]string{"package.json": `{"devDependencies":{"@sveltejs/kit":"^2","@sveltejs/adapter-auto":"^4","vite":"^6"},"scripts":{"build":"vite build"}}`},
+		},
+		{
+			name:  "Remix runs remix-serve without npm in between",
+			files: map[string]string{"package.json": `{"dependencies":{"@remix-run/node":"^2","@remix-run/serve":"^2"},"devDependencies":{"vite":"^5"},"scripts":{"build":"remix vite:build","start":"remix-serve ./build/server/index.js"}}`},
+			want:  project{Kind: kindNode, Label: "a Remix application", Port: 3000, HealthPath: "/", HealthLive: true},
+			check: func(t *testing.T, p project) {
+				if p.Node.Start != `["node_modules/.bin/remix-serve", "./build/server/index.js"]` || !p.Node.HasBuild || !p.Node.NoLock {
+					t.Errorf("node = %+v", p.Node)
+				}
+			},
+		},
+		{
+			name:  "Remix behind a server of one's own starts as that server does",
+			files: map[string]string{"package.json": `{"dependencies":{"@remix-run/node":"^2","express":"^4"},"scripts":{"build":"remix vite:build","start":"node server.js"}}`},
+			want:  project{Kind: kindNode, Label: "a Remix application", Port: 3000, HealthPath: "/", HealthLive: true},
+			check: func(t *testing.T, p project) {
+				if p.Node.Start != `["node", "server.js"]` {
+					t.Errorf("node = %+v", p.Node)
+				}
+			},
+		},
+		{
+			name:  "Astro with the Node adapter is a server",
+			files: map[string]string{"package.json": `{"dependencies":{"astro":"^5","@astrojs/node":"^9"},"scripts":{"build":"astro build"}}`},
+			want:  project{Kind: kindNode, Label: "an Astro application", Port: 4321, HealthPath: "/", HealthLive: true},
+			check: func(t *testing.T, p project) {
+				if p.Node.Start != `["node", "./dist/server/entry.mjs"]` || !p.Node.Host {
+					t.Errorf("node = %+v", p.Node)
+				}
+			},
+		},
+		{
+			name:  "Astro without an adapter is the folder its build writes",
+			files: map[string]string{"package.json": `{"dependencies":{"astro":"^5"},"scripts":{"build":"astro build"}}`},
+			want:  project{Kind: kindStatic, Label: "a site built by npm run build"},
+			check: func(t *testing.T, p project) {
+				if p.Static != (staticProject{Dir: "dist/", Build: "npm run build"}) {
+					t.Errorf("static = %+v", p.Static)
+				}
+			},
+		},
+		{
 			name:  "an Express server, its port read from the start script",
 			files: map[string]string{"package.json": `{"dependencies":{"express":"^5"},"scripts":{"start":"PORT=4000 node server.js"}}`},
 			want:  project{Kind: kindNode, Label: "a Node.js application", Port: 4000, HealthPath: "/health"},
@@ -236,6 +317,20 @@ func TestDetectProject(t *testing.T) {
 			want:  project{Kind: kindPython, Label: "a Python application", Port: 8000, HealthPath: "/health"},
 			check: func(t *testing.T, p project) {
 				if p.Python.Command != `["python", "app.py"]` || p.Python.Version != "3.13" {
+					t.Errorf("python = %+v", p.Python)
+				}
+			},
+		},
+		{
+			name: "a project locked with uv is installed from its lock file",
+			files: map[string]string{
+				"pyproject.toml": "[project]\nname = \"api\"\nrequires-python = \">=3.12\"\ndependencies = [\n    \"fastapi>=0.110\",\n]\n",
+				"uv.lock":        "version = 1\n",
+				"main.py":        "",
+			},
+			want: project{Kind: kindPython, Label: "a Python application", Port: 8000, HealthPath: "/health"},
+			check: func(t *testing.T, p project) {
+				if !p.Python.Uv || p.Python.Requirements || p.Python.Version != "3.12" {
 					t.Errorf("python = %+v", p.Python)
 				}
 			},

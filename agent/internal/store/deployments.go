@@ -84,6 +84,8 @@ func (s *Store) CreateDeploymentFrom(ctx context.Context, app spec.App, kind str
 // registering the application if it is new.
 func (s *Store) insertDeployment(ctx context.Context, d Deployment, now time.Time) (Deployment, error) {
 	app := d.Spec
+	s.keyMu.RLock()
+	defer s.keyMu.RUnlock()
 	sealed, err := s.sealSpec(app)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("encrypt environment values: %w", err)

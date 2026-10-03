@@ -143,7 +143,7 @@ func (e *Engine) Restore(ctx context.Context, name, volume string, archive io.Re
 	// Removing the containers is what frees the volume; the replica rows go
 	// with them, so that a start in between finds nothing to start.
 	for _, r := range replicas {
-		if err := e.retireContainer(ctx, r.ContainerID); err != nil {
+		if err := e.retireContainer(ctx, r.ContainerID, e.gracePeriod(d.Spec)); err != nil {
 			return fmt.Errorf("remove replica %d: %w", r.Index, err)
 		}
 	}

@@ -10,8 +10,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	dockerclient "github.com/moby/moby/client"
 	"go.yaml.in/yaml/v3"
@@ -36,9 +37,19 @@ type buildTools struct {
 	// save streams an image from the local Docker daemon in `docker save`
 	// format.
 	save func(ctx context.Context, image string) (io.ReadCloser, error)
+	// layers returns an image's layers as the local Docker daemon knows
+	// them: diff IDs, base layer first. See layers.go.
+	layers func(ctx context.Context, image string) ([]string, error)
 }
 
 func (b buildTools) withDefaults() buildTools {
+	if b.layers == nil {
+		// A substituted image store has no Docker behind it to ask.
+		b.layers = noImageLayers
+		if b.save == nil {
+			b.layers = dockerImageLayers
+		}
+	}
 	if b.run == nil {
 		b.run = func(ctx context.Context, dir string, argv []string, out io.Writer) error {
 			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -82,13 +93,8 @@ func (c *closeBoth) Close() error {
 func (c *cli) buildImage(ctx context.Context, cl *client.Client, file string, data []byte, app spec.App) ([]byte, error) {
 	tools := c.build.withDefaults()
 
-	// A domain another application serves would be refused by the agent
-	// after the build and the upload; asking first spares both. The agent
-	// still checks, since it is the one that knows.
-	if app.Domain != "" {
-		if err := c.domainIsFree(ctx, cl, app); err != nil {
-			return nil, err
-		}
+	if err := c.askFirst(ctx, cl, app, data, "built"); err != nil {
+		return nil, err
 	}
 
 	server, err := cl.Server(ctx)
@@ -106,34 +112,172 @@ func (c *cli) buildImage(ctx context.Context, cl *client.Client, file string, da
 	// Both paths are validated relative paths and the reference is ours:
 	// nothing here came from anywhere a shell could see.
 	argv := []string{"docker", "build", "--platform", platform, "-f", path.Join(app.Build.Context, app.Build.Dockerfile), "-t", image, app.Build.Context}
-	c.ui.Println(c.ui.Styled(ui.Dim, "$ "+strings.Join(argv, " ")))
-	tail := &tailWriter{}
-	if err := tools.run(ctx, filepath.Dir(file), argv, io.MultiWriter(&dimWriter{ui: c.ui}, tail)); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return nil, errors.New("docker is not installed on this machine, and build: needs it here (the server never builds); install Docker Desktop or set image: instead")
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("docker build failed: %w\n\n%s", err, tail.String())
+	if err := c.runBuild(ctx, tools, filepath.Dir(file), argv); err != nil {
+		return nil, err
 	}
 	c.ui.Success("Built %s for %s", image, platform)
 
-	archive, err := tools.save(ctx, image)
+	loaded, err := c.sendImage(ctx, cl, tools, app.Name, image)
 	if err != nil {
 		return nil, err
 	}
-	defer archive.Close()
-	progress := &progressReader{r: archive, report: func(n int64) {
-		c.ui.Progress("Sending image to the server (%s)", spec.FormatMemory(n))
-	}}
-	loaded, err := cl.PushImage(ctx, app.Name, progress, 0)
-	c.ui.Done()
-	if err != nil {
-		return nil, err
-	}
-	c.ui.Success("Sent image to the server (%s)", spec.FormatMemory(loaded.SizeBytes))
 	return overrideImage(data, loaded.Image), nil
+}
+
+// askFirst has the agent validate the document before anything is built or
+// uploaded. What the agent refuses for reasons only it knows — a domain
+// another application serves, a port already published, a secret that is not
+// stored — it would otherwise refuse after the build and the upload. It
+// checks again when the deployment starts. An agent older than the operation
+// is asked the one thing an older shipwick checked itself: whether the
+// domain is free. spared completes that message: "built", "uploaded".
+func (c *cli) askFirst(ctx context.Context, cl *client.Client, app spec.App, data []byte, spared string) error {
+	if supported, err := cl.Validate(ctx, app.Name, data); supported || err != nil {
+		return err
+	}
+	if app.Domain == "" {
+		return nil
+	}
+	return c.domainIsFree(ctx, cl, app, spared)
+}
+
+// runBuild runs `docker build` and shows it the way its reader needs it. A
+// pipeline's log is read afterwards and gets every line, as does --verbose.
+// A person at a terminal gets one line that says the build is moving, and
+// everything only when it fails; several applications sharing a terminal
+// have no such line, so their builds are silent until they end.
+func (c *cli) runBuild(ctx context.Context, tools buildTools, dir string, argv []string) error {
+	if c.verbose || !c.ui.Watched() {
+		c.ui.Println(c.ui.Styled(ui.Dim, "$ "+strings.Join(argv, " ")))
+		tail := &tailWriter{}
+		err := tools.run(ctx, dir, argv, io.MultiWriter(&dimWriter{ui: c.ui}, tail))
+		return buildError(ctx, err, tail.String())
+	}
+
+	started := c.now()
+	out := &buildOutput{show: func(last string) {
+		line := "Building the image (" + elapsed(c.now().Sub(started)) + ")"
+		if last != "" {
+			line += " — " + last
+		}
+		// "… " comes before it, and a line that reaches the last column wraps.
+		c.ui.Progress("%s", truncate(line, max(c.ui.Width()-3, 20)))
+	}}
+	out.refresh()
+	// docker can be silent for a long step; the time keeps saying it runs.
+	done := make(chan struct{})
+	ticking := make(chan struct{})
+	go func() {
+		defer close(ticking)
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-tick.C:
+				out.refresh()
+			case <-done:
+				return
+			}
+		}
+	}()
+	err := tools.run(ctx, dir, argv, out)
+	close(done)
+	<-ticking
+	c.ui.Done()
+
+	if err = buildError(ctx, err, ""); err != nil && ctx.Err() == nil && !errors.Is(err, errNoDocker) {
+		c.ui.Println(c.ui.Styled(ui.Dim, "$ "+strings.Join(argv, " ")))
+		c.ui.Printf("%s", c.ui.Styled(ui.Dim, out.String()))
+	}
+	return err
+}
+
+var errNoDocker = errors.New("docker is not installed on this machine, and build: needs it here (the server never builds); install Docker Desktop or set image: instead")
+
+// buildError says how `docker build` failed; tail is the end of its output
+// when that is not on screen already.
+func buildError(ctx context.Context, err error, tail string) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, exec.ErrNotFound):
+		return errNoDocker
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case tail == "":
+		return fmt.Errorf("docker build failed: %w", err)
+	}
+	return fmt.Errorf("docker build failed: %w\n\n%s", err, tail)
+}
+
+// buildOutput keeps everything `docker build` printed, for the case that it
+// fails, and passes the last line on as it changes.
+type buildOutput struct {
+	mu   sync.Mutex
+	all  strings.Builder
+	rest string // the line still being written
+	last string
+	show func(last string)
+}
+
+func (w *buildOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.all.Write(p)
+	w.rest += string(p)
+	for {
+		line, rest, ok := strings.Cut(w.rest, "\n")
+		if !ok {
+			break
+		}
+		w.rest = rest
+		// A line docker rewrote in place ends with its last version.
+		if i := strings.LastIndexByte(strings.TrimRight(line, "\r"), '\r'); i >= 0 {
+			line = line[i+1:]
+		}
+		if line = printable(line); line != "" {
+			w.last = line
+		}
+	}
+	w.show(w.last)
+	return len(p), nil
+}
+
+func (w *buildOutput) refresh() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.show(w.last)
+}
+
+// String is the whole output, ending in a newline when there is any.
+func (w *buildOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := w.all.String()
+	if s != "" && !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	return s
+}
+
+// printable is a line of another program's output made fit for the progress
+// line: no escape sequences' control characters, no surrounding space.
+func printable(line string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, line))
+}
+
+// elapsed renders a running time in whole seconds: "12s", "1m05s".
+func elapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%dm%02ds", s/60, s%60)
 }
 
 // dockerPlatform turns the architecture the server reports (uname -m) into
@@ -273,24 +417,16 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 
 // domainIsFree asks the server which hostnames its other applications serve
 // and reports the first of this application's that one of them already does.
-func (c *cli) domainIsFree(ctx context.Context, cl *client.Client, app spec.App) error {
+// Two applications may serve one hostname under different paths; a hostname
+// that is redirected is taken whole. It is what is asked of an agent too old
+// to validate a document itself.
+func (c *cli) domainIsFree(ctx context.Context, cl *client.Client, app spec.App, spared string) error {
 	others, err := cl.Applications(ctx)
 	if err != nil {
 		return nil // the deploy itself will say what is wrong
 	}
-	mine := append([]string{app.Domain}, app.Aliases...)
-	mine = append(mine, app.Redirects...)
-	for _, other := range others {
-		if other.Name == app.Name {
-			continue
-		}
-		theirs := append([]string{other.Domain}, other.Aliases...)
-		theirs = append(theirs, other.Redirects...)
-		for _, h := range mine {
-			if h != "" && slices.Contains(theirs, h) {
-				return fmt.Errorf("%s is already served by application %q; nothing was built\n\nUse another domain, or change or delete that application first: shipwick delete %s", h, other.Name, other.Name)
-			}
-		}
+	if taken, owner := takenHostname(app, others); taken != "" {
+		return fmt.Errorf("%s is already served by application %q; nothing was %s\n\nUse another domain or another path, or change or delete that application first: shipwick delete %s", taken, owner, spared, owner)
 	}
 	return nil
 }

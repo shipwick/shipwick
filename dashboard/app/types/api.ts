@@ -45,6 +45,32 @@ export type ApiErrorCode =
   | 'VOLUME_IN_USE'
   /** 20 authentications from this address failed within a minute; answered without checking the token. */
   | 'RATE_LIMITED'
+  /** An image archive left out layers the server lacks; only the CLI sends images. */
+  | 'IMAGE_INCOMPLETE'
+  /** A registry refused a credential, or could not be asked; details: {registry, refused}. Nothing was stored. */
+  | 'REGISTRY_LOGIN_FAILED'
+  /** The key was rotated since the agent started and its environment still holds the old one; details: {key_file}. */
+  | 'KEY_ROTATION_PENDING'
+  /** A supplied certificate or its key cannot serve the hostname; the message says why. */
+  | 'INVALID_CERTIFICATE'
+  /** The agent has no access log to read: no proxy, or not the caddy container of its compose project. */
+  | 'TRAFFIC_UNAVAILABLE'
+  /** The backup is still being taken, verified, restored or removed. */
+  | 'BACKUP_BUSY'
+  /** The backup failed, so nothing was kept of it; or its files do not decrypt. */
+  | 'BACKUP_NOT_USABLE'
+  /** A backup was asked of an application without volumes. */
+  | 'NO_VOLUMES'
+  /** A backup of the agent's state was asked for and SHIPWICK_BACKUP_PASSPHRASE is not set. */
+  | 'BACKUPS_NOT_ENCRYPTED'
+  /** The body is not an export, was written with another passphrase, or is damaged. */
+  | 'INVALID_EXPORT'
+  /** An import is running; a server takes one at a time. */
+  | 'IMPORT_IN_PROGRESS'
+  /** A scheduled or requested export is being written. */
+  | 'EXPORT_IN_PROGRESS'
+  /** The agent has no bucket to fetch exports from. */
+  | 'STANDBY_NOT_CONFIGURED'
   | 'RUNTIME_UNAVAILABLE'
   | 'INTERNAL_ERROR'
   // Added by the dashboard's server-side proxy, never by the agent:
@@ -101,6 +127,8 @@ export interface Application {
   aliases?: string[]
   /** Hostnames answered with a redirect to `domain`; absent when there are none. */
   redirects?: string[]
+  /** The part of `domain` and the aliases the application serves ("/api"); absent when it serves all of it. */
+  path?: string
   replicas: ReplicaCount
   deploying: boolean
   /** The deployment to follow while `deploying` is true. */
@@ -165,6 +193,45 @@ export interface SpecBuild {
 export interface SpecStatic {
   /** Relative to deploy.yaml, on the developer's machine. */
   dir: string
+  /** The page served with 200 for a path that names no file (a single-page application's index.html); absent without one. */
+  fallback?: string
+}
+
+/** An account the proxy asks for before it lets a request through. The password is always masked ("********"). */
+export interface SpecBasicAuth {
+  /** The path the account protects, as the visitor asks for it; absent for the whole application. */
+  path?: string
+  username: string
+  password: string
+}
+
+/** A redirect the proxy answers itself. `from` lies under the application's path; `to` may point anywhere on the host. */
+export interface SpecPathRedirect {
+  from: string
+  to: string
+  status: number
+}
+
+/** What the proxy does with the application's requests besides passing them on. Every part is absent when unset. */
+export interface SpecProxy {
+  /** The application's `path` is removed before the request reaches it. */
+  strip_prefix?: boolean
+  /** Added to every response. */
+  headers?: Record<string, string>
+  basic_auth?: SpecBasicAuth[]
+  redirects?: SpecPathRedirect[]
+}
+
+/** Backups of the application's volumes the agent takes by itself. */
+export interface SpecBackups {
+  /** Five cron fields, read in UTC. */
+  schedule: string
+  /** How many successful backups are kept. */
+  keep: number
+  /** Run in the replica before the volumes are archived (a database dump or checkpoint). */
+  before?: string[]
+  /** The application is stopped while the archive is taken, and started again. */
+  stop?: boolean
 }
 
 export interface AppSpec {
@@ -195,8 +262,13 @@ export interface AppSpec {
   /** Commands run on a schedule in one-off containers from the application's image. */
   jobs?: SpecJob[]
   logging?: SpecLogging
+  /** The part of the domain the application serves; absent when it serves all of it. */
+  path?: string
+  proxy?: SpecProxy
+  backups?: SpecBackups
   restart: { policy: 'always' | 'on-failure' | 'never' | string }
-  deploy: { strategy: 'rolling' | 'recreate' | string }
+  /** `stop_timeout`: how long a replica gets after SIGTERM before it is killed, a Go duration ("2m0s"); absent means the agent's default. */
+  deploy: { strategy: 'rolling' | 'recreate' | string, stop_timeout?: string }
 }
 
 export interface SpecHook {
@@ -277,13 +349,19 @@ export interface LoadedImage {
 /**
  * deploy: a deploy.yaml was submitted. redeploy: the active configuration
  * again, possibly with another image. rollback: the configuration of an
- * earlier successful deployment.
+ * earlier successful deployment. import: the configuration an export carried,
+ * deployed on another server. standby: the same, deployed stopped on a
+ * standby; a promotion starts it.
  */
-export type DeploymentKind = 'deploy' | 'redeploy' | 'rollback'
+export type DeploymentKind = 'deploy' | 'redeploy' | 'rollback' | 'import' | 'standby'
 
 export type EventLevel = 'info' | 'warn' | 'error'
-/** `job`: a scheduled job or one-off command that failed or timed out (level warn); successful runs record nothing. */
-export type EventType = 'step' | 'state' | 'log' | 'app' | 'supervisor' | 'job'
+/**
+ * `job`: a scheduled job or one-off command that failed or timed out (level warn); successful runs record nothing.
+ * `alert`: an alert about the application raised (warn, or error when critical) or cleared (info).
+ * `backup`: a scheduled backup that failed, a verification, a restore.
+ */
+export type EventType = 'step' | 'state' | 'log' | 'app' | 'supervisor' | 'job' | 'alert' | 'backup'
 
 export interface AgentEvent {
   id: number
@@ -302,7 +380,27 @@ export interface DeploymentDetail extends Deployment {
 export interface ApplicationDetail extends Application {
   spec: AppSpec | null
   active_deployment: Deployment | null
+  /**
+   * After a deployment completed this may still list a container of the
+   * previous one: it is being given its `stop_timeout` to exit, and is not
+   * counted in `replicas`.
+   */
   containers: Container[]
+  /** One entry per hostname, in the order domain, aliases, redirects; empty without a domain. Absent on agents before 0.5. */
+  certificates?: HostnameCertificate[]
+}
+
+export type CertificateStatus = 'ok' | 'expiring' | 'obtaining' | 'waiting_for_dns' | 'unknown'
+
+/** The certificate the proxy presents for one of an application's hostnames. */
+export interface HostnameCertificate {
+  hostname: string
+  status: CertificateStatus | string
+  /** Set once a certificate has been seen; "" before. */
+  issuer: string
+  not_after: string | null
+  /** Says what is going on for every status but ok, where it is "". */
+  message: string
 }
 
 export interface LogLine {
@@ -318,6 +416,8 @@ export interface ProxyStatus {
   reachable: boolean
   error: string
   routes: number
+  /** Certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards. Absent on agents before 0.5. */
+  dns_challenge?: boolean
 }
 
 /** Who a request was made as: the token's name and role. */
@@ -348,6 +448,51 @@ export interface Server {
   token?: TokenIdentity
   /** Absent on older agents; treat as no webhook. */
   notifications?: NotificationStatus
+  /** `https://<SHIPWICK_DASHBOARD_DOMAIN>`, or "" when the dashboard has no hostname. Absent on agents before 0.5. */
+  dashboard_url?: string
+  /** The conditions that hold right now, oldest first; [] when there are none. Absent on agents before 0.5. */
+  alerts?: Alert[]
+  /** The filesystem that holds the agent's data; null where it cannot be measured. Absent on agents before 0.5. */
+  disk?: DiskUsage | null
+  /** Where backups go and how the agent's own state is doing. Absent on agents before 0.5. */
+  backups?: BackupStatus
+}
+
+export type AlertKind = 'memory' | 'disk' | 'restarts' | 'unhealthy'
+export type AlertSeverity = 'warning' | 'critical'
+
+/** A condition that holds right now and that somebody should look at. */
+export interface Alert {
+  kind: AlertKind | string
+  /** Only `disk` and `unhealthy` become critical. */
+  severity: AlertSeverity | string
+  /** "" for `disk`. */
+  application: string
+  /** 0 for `disk` and `unhealthy`. */
+  replica: number
+  /** A complete sentence, with what to do about it. */
+  message: string
+  /** When it was raised; unchanged when a warning turns critical. */
+  since: string
+}
+
+/** `used_bytes / total_bytes` is the percentage `df` shows. */
+export interface DiskUsage {
+  total_bytes: number
+  used_bytes: number
+}
+
+export type BackupDestination = 'none' | 'local' | 's3'
+
+/** The `backups` object of GET /server. */
+export interface BackupStatus {
+  destination: BackupDestination | string
+  /** SHIPWICK_BACKUP_PASSPHRASE is set. The agent's state is only ever backed up encrypted. */
+  encrypted: boolean
+  /** The last successful backup of the agent's state; null if there has been none. */
+  state_last_at: string | null
+  /** Why the state is not backed up, or why the last attempt failed; "" when the last attempt succeeded. */
+  state_error: string
 }
 
 export interface ReplicaMetrics {
@@ -520,4 +665,232 @@ export interface RollbackRequest {
 
 export interface RedeployRequest {
   image?: string
+}
+
+/** Accepted values of `since` on the traffic endpoint: the same three as the metrics history. */
+export type TrafficRange = MetricsRange
+
+/** The requests of one stretch of time. The percentiles are 0 when there were no requests. */
+export interface TrafficCounts {
+  requests: number
+  status_2xx: number
+  status_3xx: number
+  status_4xx: number
+  status_5xx: number
+  /** Response bodies as sent, after compression. */
+  bytes: number
+  p50_ms: number
+  p95_ms: number
+  p99_ms: number
+}
+
+export interface TrafficPoint extends TrafficCounts {
+  /** Start of the step. */
+  t: string
+}
+
+/** GET /applications/:name/traffic: what the proxy's access log says about the application's requests. */
+export interface Traffic {
+  application: string
+  /** Start of the window, on a step boundary. */
+  since: string
+  /** 60, 300 or 3600. */
+  step_seconds: number
+  totals: TrafficCounts
+  /** Ordered by time. Sparse: a step without a request has no point, and a missing point is zero. */
+  points: TrafficPoint[]
+}
+
+/** One line of the proxy's access log. The path carries no query string, and no headers are kept. */
+export interface RequestLine {
+  time: string
+  method: string
+  path: string
+  status: number
+  duration_ms: number
+  bytes: number
+  /** The address the proxy saw. */
+  client: string
+}
+
+/** A stored registry credential as GET /registries lists it: never the password. */
+export interface Registry {
+  /** A hostname with an optional port, as image references name it. */
+  registry: string
+  username: string
+  created_at: string
+  updated_at: string
+}
+
+/** Body of PUT /registries/:registry, for creating and replacing alike. */
+export interface SetRegistryRequest {
+  username: string
+  password: string
+}
+
+/** The answer to POST /server/rotate-key. */
+export interface KeyRotation {
+  /** Re-encrypted secrets and registry passwords. */
+  values: number
+  /** Deployment records whose values were re-encrypted. */
+  deployments: number
+  /** `environment`: the key is set in the agent's environment, which the agent cannot change. */
+  key_source: 'file' | 'environment' | string
+  /** The file on the server that holds the new key. */
+  key_file: string
+  /** The new key, for `environment` only: this response is the one time the API shows it. */
+  key?: string
+}
+
+/** A certificate the operator supplied, as GET /certificates lists it: what the chain says about itself, never the key or the PEM. */
+export interface Certificate {
+  /** The name it is stored under; a wildcard certificate under the wildcard. */
+  hostname: string
+  /** The DNS names of the chain's first certificate: the hostnames served with it. */
+  subjects: string[]
+  issuer: string
+  not_before: string
+  not_after: string
+  created_at: string
+  updated_at: string
+}
+
+/** Body of PUT /certificates/:hostname: the chain, the hostname's own certificate first, and its key, both PEM. */
+export interface SetCertificateRequest {
+  certificate: string
+  key: string
+}
+
+/** The answer to POST /applications/:name/validate for a document a deployment would accept. */
+export interface Validation {
+  valid: boolean
+}
+
+export type BackupRunStatus = 'running' | 'succeeded' | 'failed'
+
+/** One archive of a backup: a volume, or for the agent's state one of its two files. */
+export interface BackupVolume {
+  volume: string
+  /** Of the tar archive, before encryption. */
+  size_bytes: number
+}
+
+/**
+ * One backup of an application's volumes, or of the agent's state. Poll it
+ * until `completed_at` is set; a verification or a restore of it until
+ * `activity` is empty again.
+ */
+export interface BackupRun {
+  id: number
+  trigger: 'schedule' | 'manual' | string
+  status: BackupRunStatus
+  started_at: string
+  completed_at: string | null
+  /** [] while running and when failed. */
+  volumes: BackupVolume[]
+  /** Of "local" and "s3"; [] while running and when failed. */
+  destinations: string[]
+  encrypted: boolean
+  error: string
+  /** "verify" or "restore" while one is in progress, else "". */
+  activity: '' | 'verify' | 'restore' | string
+  /** When the backup last proved to restore; at most one of this and `verify_error` is set. */
+  verified_at: string | null
+  verify_error: string
+  restored_at: string | null
+  restore_error: string
+}
+
+export interface BackupRunDetail extends BackupRun {
+  /** The last 200 lines (64 KB) the verification's container wrote; "" if never verified. */
+  verify_output: string
+}
+
+export type ImportStatus = 'running' | 'succeeded' | 'failed'
+export type ImportedStatus = 'pending' | 'importing' | 'imported' | 'skipped' | 'failed'
+
+/** One application of an import. */
+export interface ImportedApplication {
+  name: string
+  status: ImportedStatus | string
+  version: string
+  deployment_id: number | null
+  /** Restored before the application first started. */
+  volumes: string[]
+  /** Why it was skipped or failed, and what to do about it; "" otherwise. */
+  message: string
+}
+
+/**
+ * The import a server is running, or ran last: GET /import. It is kept in the
+ * agent's memory, so an agent that restarts has forgotten it (404 NOT_FOUND).
+ * Poll it until `completed_at` is set.
+ */
+export interface Import {
+  status: ImportStatus | string
+  /** "upload", or "export #<id> from the bucket" for one a standby fetched. */
+  source: string
+  /** Deployed stopped, as a standby holds applications. */
+  stopped: boolean
+  overwrite: boolean
+  started_at: string
+  completed_at: string | null
+  /** When the export was written; null until it has been read. */
+  exported_at: string | null
+  secrets: number
+  registries: number
+  certificates: number
+  /** In the order they are deployed. */
+  applications: ImportedApplication[]
+  /** What was kept as it was, or could not be taken over. */
+  warnings: string[]
+  error: string
+}
+
+/** A record to create or change so that a hostname reaches this server. */
+export interface DNSRecord {
+  hostname: string
+  type: 'A' | 'AAAA' | string
+  /** "" when the agent does not know its own address. */
+  value: string
+}
+
+export interface StandbyApplication {
+  name: string
+  version: string
+  hostnames: string[]
+  imported_at: string
+}
+
+/** How the scheduled import from the bucket is doing. */
+export interface StandbyPull {
+  /** Five cron fields, read in UTC. */
+  schedule: string
+  last_at: string | null
+  /** The export imported last; 0 when there has been none. */
+  last_export: number
+  last_error: string
+}
+
+/** GET /standby: what a server holds for the day it has to take over. */
+export interface Standby {
+  /** Imported stopped, waiting for a promotion. */
+  applications: StandbyApplication[]
+  /** What a promotion will ask for. */
+  records: DNSRecord[]
+  /** Null when the agent does not fetch exports on a schedule. */
+  pull: StandbyPull | null
+}
+
+export interface PromotedApplication {
+  name: string
+  /** running: started and ready. started: not ready within its startup budget. failed: could not be started. */
+  status: 'running' | 'started' | 'failed' | string
+  message: string
+}
+
+/** The answer of POST /standby/promote. */
+export interface Promotion {
+  applications: PromotedApplication[]
+  records: DNSRecord[]
 }

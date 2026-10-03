@@ -119,3 +119,30 @@ func TestStaticApplicationInJSON(t *testing.T) {
 		t.Fatalf("Parse = %+v, %v", app, err)
 	}
 }
+
+func TestStaticFallback(t *testing.T) {
+	app, err := Parse([]byte("name: web\nstatic:\n  dir: dist/\n  fallback: index.html\ndomain: example.com\n"))
+	if err != nil || app.Static.Dir != "dist" || app.Static.Fallback != "index.html" {
+		t.Fatalf("Static = %+v, %v", app.Static, err)
+	}
+	if app, err := Parse([]byte("name: web\nstatic: {dir: dist, fallback: app/200.html}\ndomain: example.com\n")); err != nil || app.Static.Fallback != "app/200.html" {
+		t.Errorf("a file in a subfolder: %+v, %v", app.Static, err)
+	}
+	if app, err := Parse([]byte("name: web\nstatic: {dir: dist}\ndomain: example.com\n")); err != nil || app.Static.Fallback != "" {
+		t.Errorf("no fallback: %+v, %v", app.Static, err)
+	}
+
+	for _, tt := range []struct{ name, static, field, msg string }{
+		{"absolute", "{dir: dist, fallback: /index.html}", "static.fallback", "relative to the folder"},
+		{"outside the folder", "{dir: dist, fallback: ../index.html}", "static.fallback", "inside the folder"},
+		{"a folder", "{dir: dist, fallback: app/}", "static.fallback", "inside the folder"},
+		{"not clean", "{dir: dist, fallback: ./index.html}", "static.fallback", "inside the folder"},
+		{"a placeholder of the proxy", "{dir: dist, fallback: \"{env.HOME}\"}", "static.fallback", "inside the folder"},
+		{"without a folder", "{fallback: index.html}", "static.dir", "is required"},
+		{"misspelt key", "{dir: dist, fallbck: index.html}", "line 2", `unknown field "fallbck"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wantFieldError(t, "name: web\nstatic: "+tt.static+"\ndomain: example.com\n", tt.field, tt.msg)
+		})
+	}
+}

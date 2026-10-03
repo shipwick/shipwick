@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,6 +37,37 @@ const (
 	EnvEncryptionKey = "SHIPWICK_ENCRYPTION_KEY"
 	EnvWebhookURL    = "SHIPWICK_WEBHOOK_URL"
 	EnvWebhookSecret = "SHIPWICK_WEBHOOK_SECRET"
+)
+
+// Alert thresholds, in percent: see Config.
+const (
+	EnvAlertMemoryPercent = "SHIPWICK_ALERT_MEMORY_PERCENT"
+	EnvAlertDiskPercent   = "SHIPWICK_ALERT_DISK_PERCENT"
+)
+
+// Bounds of the alert thresholds. An alert is cleared a few points below
+// where it is raised, which a very low threshold would leave no room for;
+// and the disk alert turns critical at 95, so its warning must come before.
+const (
+	minAlertPercent     = 50
+	maxAlertDiskPercent = 94
+)
+const (
+	// EnvCloudflareToken is a Cloudflare API token that may read the zone and
+	// edit its DNS records. With it the proxy obtains certificates through
+	// the DNS challenge, so hostnames can stay behind Cloudflare's proxy.
+	EnvCloudflareToken = "SHIPWICK_CLOUDFLARE_API_TOKEN"
+)
+
+// cloudflareToken is the form of a Cloudflare API token. The proxy refuses any
+// other with an error that quotes the value, and treats braces in it as
+// placeholders; neither must be reachable.
+var cloudflareToken = regexp.MustCompile(`^([A-Za-z0-9_-]{35,50}|cf(ut|at)_[A-Za-z0-9_-]{32,256})$`)
+
+const (
+	// EnvProxyTLSAddr is where the agent reaches the proxy's TLS port, to see
+	// the certificates it serves.
+	EnvProxyTLSAddr = "SHIPWICK_PROXY_TLS_ADDR"
 )
 
 // MinTokenLength rejects tokens that are trivially guessable.
@@ -73,6 +105,22 @@ type Config struct {
 	// signs each request.
 	WebhookURL    string
 	WebhookSecret string
+	// AlertMemoryPercent is the share of its memory limit at which a replica
+	// raises an alert; AlertDiskPercent how full the disk that holds DataDir
+	// may get before it does. Zero: the engine's defaults, 90 and 85.
+	AlertMemoryPercent int
+	AlertDiskPercent   int
+	// CloudflareToken is the raw value of SHIPWICK_CLOUDFLARE_API_TOKEN, if
+	// set. It is handed to the proxy inside its configuration and must never
+	// be logged.
+	CloudflareToken string
+	// ProxyTLSAddr is the proxy's TLS port as the agent reaches it, "host:port":
+	// the agent connects there to report each hostname's certificate.
+	ProxyTLSAddr string
+	// Backups says where the agent keeps the backups it takes: see backups.go.
+	Backups Backups
+	// Transfer is the scheduled export and the standby: see transfer.go.
+	Transfer Transfer
 }
 
 func (c Config) DatabasePath() string {
@@ -102,6 +150,23 @@ func Load(getenv func(string) string) (Config, error) {
 		EncryptionKey: strings.TrimSpace(getenv(EnvEncryptionKey)),
 		WebhookURL:    strings.TrimSpace(getenv(EnvWebhookURL)),
 		WebhookSecret: getenv(EnvWebhookSecret),
+	}
+	var err error
+	if cfg.AlertMemoryPercent, err = percent(getenv, EnvAlertMemoryPercent, 100); err != nil {
+		return Config{}, err
+	}
+	if cfg.AlertDiskPercent, err = percent(getenv, EnvAlertDiskPercent, maxAlertDiskPercent); err != nil {
+		return Config{}, err
+	}
+	cfg.ProxyTLSAddr = valueOr(strings.TrimSpace(getenv(EnvProxyTLSAddr)), "caddy:443")
+	if _, _, err := net.SplitHostPort(cfg.ProxyTLSAddr); err != nil {
+		return Config{}, fmt.Errorf("%s: invalid value %q (expected host:port)", EnvProxyTLSAddr, cfg.ProxyTLSAddr)
+	}
+	if err := cfg.loadBackups(getenv); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.loadTransfer(getenv); err != nil {
+		return Config{}, err
 	}
 	if cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		return Config{}, fmt.Errorf("%s: invalid value %q (expected text or json)", EnvLogFormat, cfg.LogFormat)
@@ -156,7 +221,31 @@ func Load(getenv func(string) string) (Config, error) {
 	} else if cfg.WebhookSecret != "" {
 		return Config{}, fmt.Errorf("%s is set but %s is not", EnvWebhookSecret, EnvWebhookURL)
 	}
+	cfg.CloudflareToken = strings.TrimSpace(getenv(EnvCloudflareToken))
+	if cfg.CloudflareToken != "" {
+		// The value is a secret: the error names the rule, not the value.
+		if !cloudflareToken.MatchString(cfg.CloudflareToken) {
+			return Config{}, fmt.Errorf("%s: not a Cloudflare API token (letters, digits, - and _, at least 35 characters); create one at dash.cloudflare.com → My Profile → API Tokens, not a Global API Key", EnvCloudflareToken)
+		}
+		if cfg.CaddyAdmin == "" {
+			return Config{}, fmt.Errorf("%s needs a reverse proxy to obtain certificates with it: set %s as well", EnvCloudflareToken, EnvCaddyAdmin)
+		}
+	}
 	return cfg, nil
+}
+
+// percent reads an alert threshold: a whole number of percent, or zero when
+// the variable is not set.
+func percent(getenv func(string) string, name string, highest int) (int, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(raw, "%"))
+	if err != nil || n < minAlertPercent || n > highest {
+		return 0, fmt.Errorf("%s: invalid value %q (expected a whole number from %d to %d)", name, raw, minAlertPercent, highest)
+	}
+	return n, nil
 }
 
 func valueOr(v, fallback string) string {

@@ -41,7 +41,7 @@ func (e *Engine) LoadImage(ctx context.Context, app string, archive io.Reader) (
 	counted := &countingReader{r: archive}
 	refs, err := e.rt.LoadImage(ctx, counted)
 	if err != nil {
-		return api.LoadedImage{}, err
+		return api.LoadedImage{}, incompleteImage(err)
 	}
 
 	prefix := spec.LocalImagePrefix(app)

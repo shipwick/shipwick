@@ -26,6 +26,9 @@ type Status struct {
 	Reachable bool
 	Error     string
 	Routes    int
+	// DNSChallenge: certificates are obtained through a DNS record, so a
+	// hostname may stand behind Cloudflare's proxy and may be a wildcard.
+	DNSChallenge bool
 }
 
 // Caddy applies routes through Caddy's admin API.
@@ -40,6 +43,7 @@ type Caddy struct {
 	routes      int
 	lastErr     error
 	everReached bool
+	tls         TLS // see tls.go
 }
 
 // NewCaddy creates a client for the admin endpoint at addr, given either as
@@ -94,7 +98,7 @@ func (c *Caddy) Sync(ctx context.Context, routes []Route) error {
 }
 
 func (c *Caddy) sync(ctx context.Context, routes []Route) error {
-	config, fingerprint, err := Build(c.adminListen, routes)
+	config, fingerprint, err := BuildWithTLS(c.adminListen, routes, c.tls)
 	if err != nil {
 		return fmt.Errorf("build proxy config: %w", err)
 	}
@@ -115,7 +119,7 @@ func (c *Caddy) sync(ctx context.Context, routes []Route) error {
 	}
 
 	if err := c.load(ctx, config); err != nil {
-		return err
+		return c.tls.scrub(err)
 	}
 	c.applied, c.verifiedAt = fingerprint, time.Now()
 	return nil
@@ -125,7 +129,7 @@ func (c *Caddy) sync(ctx context.Context, routes []Route) error {
 func (c *Caddy) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := Status{Enabled: true, Reachable: c.everReached && c.lastErr == nil, Routes: c.routes}
+	s := Status{Enabled: true, Reachable: c.everReached && c.lastErr == nil, Routes: c.routes, DNSChallenge: c.tls.CloudflareToken != ""}
 	if c.lastErr != nil {
 		s.Error = c.lastErr.Error()
 	}

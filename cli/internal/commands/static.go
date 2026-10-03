@@ -47,6 +47,15 @@ func (c *cli) deployStatic(ctx context.Context, cl *client.Client, file string, 
 	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
 		return api.Deployment{}, fmt.Errorf("the folder %s has no index.html\n\nBuild the site first, then deploy the folder the build produced", shown)
 	}
+	if fallback := app.Static.Fallback; fallback != "" {
+		// The agent looks again, at what actually arrived.
+		if info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(fallback))); err != nil || info.IsDir() {
+			return api.Deployment{}, fmt.Errorf("%s names %s as static.fallback, and the folder %s has no such file\n\nName a file the build produces: for a single-page application that is index.html", file, fallback, shown)
+		}
+	}
+	if err := c.askFirst(ctx, cl, app, data, "uploaded"); err != nil {
+		return api.Deployment{}, err
+	}
 
 	// Written to a file, not memory: a folder may be hundreds of megabytes,
 	// and the request needs its length up front.

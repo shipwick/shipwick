@@ -48,9 +48,109 @@ type rollout struct {
 	// staticPart is the directory a static rollout is extracting into, until
 	// it is checked and renamed; removed if the rollout fails (see static.go).
 	staticPart string
+
+	// resumed: the deployment was begun by an agent that has since stopped,
+	// and is taken from the state it was left in (see resume.go). surveyed
+	// says that what exists of it has been looked at: adopted are the replicas
+	// of d found alive, by index, and inService those of them that were in
+	// rotation already.
+	resumed   bool
+	surveyed  bool
+	adopted   map[int]store.Replica
+	inService map[int]bool
+	// unverified are replicas of the previous version that a resumed rollback
+	// finds alive without knowing whether they were ever checked.
+	unverified []store.Replica
+
+	// dormant: the containers are created and nothing is started (see
+	// executeDormant). A standby deployment is dormant by its kind, which is
+	// in its record and so survives a restart of the agent.
+	dormant bool
 }
 
-func (e *Engine) run(d store.Deployment) {
+// progress orders the statuses a deployment passes through, on its way up
+// and, after FAILED, on its way back.
+var progress = map[api.DeploymentStatus]int{
+	api.StatusPending:        0,
+	api.StatusBuilding:       1,
+	api.StatusStarting:       2,
+	api.StatusHealthChecking: 3,
+	api.StatusHealthy:        4,
+	api.StatusFailed:         5,
+	api.StatusRollback:       6,
+	api.StatusRestoring:      7,
+}
+
+// reach moves the deployment on to the given status, unless it is there
+// already or past it: a resumed deployment starts wherever it was left.
+func (r *rollout) reach(ctx context.Context, to api.DeploymentStatus) error {
+	if progress[r.d.Status] >= progress[to] {
+		return nil
+	}
+	return r.e.transition(ctx, r.d, to)
+}
+
+// bring makes the given replicas of d run: those a resumed rollout found
+// alive are adopted, started if they were not running, and the others come to
+// exist the one way replicas do. It returns them in order, and how many it
+// created.
+func (r *rollout) bring(ctx context.Context, indexes []int) (replicas []store.Replica, created int, err error) {
+	e, d := r.e, r.d
+	var missing []int
+	for _, i := range indexes {
+		rep, alive := r.adopted[i]
+		if !alive {
+			missing = append(missing, i)
+			continue
+		}
+		c, err := e.rt.InspectContainer(ctx, rep.ContainerID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("replica %d: %w", i, err)
+		}
+		if !c.Running {
+			if err := e.rt.StartContainer(ctx, rep.ContainerID); err != nil {
+				return nil, 0, fmt.Errorf("replica %d: %w", i, err)
+			}
+		}
+		replicas = append(replicas, rep)
+	}
+	fresh, err := e.ensureReplicas(ctx, *d, missing)
+	r.fresh = append(r.fresh, fresh...)
+	if err != nil {
+		return nil, 0, err
+	}
+	replicas = append(replicas, fresh...)
+	sort.Slice(replicas, func(i, j int) bool { return replicas[i].Index < replicas[j].Index })
+	return replicas, len(fresh), nil
+}
+
+// sortedReplicas lists replicas by index.
+func sortedReplicas(byIndex map[int]store.Replica) []store.Replica {
+	out := make([]store.Replica, 0, len(byIndex))
+	for _, rep := range byIndex {
+		out = append(out, rep)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	return out
+}
+
+func (e *Engine) newRollout(d store.Deployment) *rollout {
+	return &rollout{e: e, d: &d, old: map[int]store.Replica{}}
+}
+
+// run carries a deployment to its end: ACTIVE, or FAILED and whatever the
+// failure calls for. It reports true when the agent shut down under it
+// instead. The deployment is then left exactly as it is — its record in
+// flight, its containers in place — for the agent that starts next to resume.
+func (e *Engine) run(r *rollout) (interrupted bool) {
+	d := r.d
+	if r.resumed && (d.Status == api.StatusRollback || d.Status == api.StatusRestoring) {
+		r.resumeRollback()
+		e.removeFailedImage(d)
+		e.notifyAborted(r)
+		return false
+	}
+
 	timeout := e.opts.DeployTimeout
 	if d.Spec.PreDeploy != nil {
 		// The hook has its own budget, on top of the deployment's.
@@ -59,73 +159,117 @@ func (e *Engine) run(d store.Deployment) {
 	ctx, cancel := context.WithTimeout(e.baseCtx, timeout)
 	defer cancel()
 
-	r := &rollout{e: e, d: &d, old: map[int]store.Replica{}}
 	err := r.execute(ctx)
 	if err == nil {
 		e.log.Info("deployment succeeded", "app", d.Application, "deployment", d.ID, "version", d.Version)
-		return
+		return false
 	}
 
 	switch {
 	case e.baseCtx.Err() != nil:
-		err = errors.New("agent shut down during deployment")
+		// Not a failure of the deployment: an upgrade of Shipwick restarts the
+		// agent, and whatever was being deployed at that moment goes on after it.
+		e.log.Info("deployment interrupted by the agent shutting down; it resumes at the next start",
+			"app", d.Application, "deployment", d.ID, "status", d.Status)
+		return true
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		err = fmt.Errorf("deployment timed out after %s", shortDuration(timeout))
 	}
 	r.abort(err)
+	e.removeFailedImage(d)
 	e.notifyAborted(r)
+	return false
 }
 
 func (r *rollout) execute(ctx context.Context) error {
 	e, d := r.e, r.d
+	if r.resumed {
+		e.step(ctx, d, "Resumed after the agent restarted")
+	}
+	if r.dormant || d.Kind == api.KindStandby {
+		return r.executeDormant(ctx)
+	}
 	if d.Spec.Static != nil {
 		return r.executeStatic(ctx)
 	}
 
-	if err := e.transition(ctx, d, api.StatusBuilding); err != nil {
+	if err := r.reach(ctx, api.StatusBuilding); err != nil {
 		return err
 	}
-	if err := e.pullImage(ctx, d); err != nil {
-		return err
-	}
-	if d.Spec.PreDeploy != nil {
-		if err := e.runHook(ctx, d); err != nil {
+	if d.Status == api.StatusBuilding {
+		if err := e.pullImage(ctx, d); err != nil {
 			return err
+		}
+		if d.Spec.PreDeploy != nil {
+			if err := r.runHookOnce(ctx); err != nil {
+				return err
+			}
 		}
 	}
 
-	if err := e.transition(ctx, d, api.StatusStarting); err != nil {
+	if err := r.reach(ctx, api.StatusStarting); err != nil {
 		return err
 	}
 	if err := e.rt.EnsureNetwork(ctx); err != nil {
 		return err
 	}
-	if err := r.loadPrevious(ctx); err != nil {
-		return err
+	if !r.surveyed {
+		if err := r.loadPrevious(ctx); err != nil {
+			return err
+		}
 	}
-	if d.Spec.Deploy.Strategy == spec.StrategyRecreate && len(r.old) > 0 {
-		if err := r.stopPrevious(ctx); err != nil {
+	if d.Spec.Deploy.Strategy == spec.StrategyRecreate && r.prev != nil {
+		switch {
+		case len(r.inService) > 0 || (r.resumed && len(r.old) == 0 && r.retired):
+			// The switch had happened when the agent stopped: the old version
+			// is down, and stopping it "again" would only take the new one out
+			// of the proxy for a moment.
+			r.recreate = true
+			r.stopped = sortedReplicas(r.old)
+		case len(r.old) > 0:
+			if err := r.stopPrevious(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	if len(r.inService) > 0 {
+		// Back to where the rollout was: these serve, and what they replaced
+		// goes, if it has not gone already.
+		if err := r.swap(ctx, r.adoptedInService()); err != nil {
 			return err
 		}
 	}
 
 	batches := r.batches()
 	for i, batch := range batches {
-		created, err := e.ensureReplicas(ctx, *d, batch)
-		r.fresh = append(r.fresh, created...)
+		// One extra container at a time: the replica replaced a moment ago —
+		// by this rollout, or by the deployment before it — is gone before
+		// the next one starts.
+		waiting := time.Now()
+		if err := e.awaitDrains(ctx, d.Application); err != nil {
+			return err
+		}
+		if waited := time.Since(waiting); waited >= time.Second {
+			// Said because it is where the time went, and stop_timeout is
+			// what decides it.
+			e.step(ctx, d, "Waited %s for a replaced container to stop", shortDuration(waited.Round(time.Second)))
+		}
+		started, created, err := r.bring(ctx, batch)
 		if err != nil {
 			return err
 		}
 		if i == 0 {
-			e.step(ctx, d, "Started %s", plural(len(created), "container"))
-			if err := e.transition(ctx, d, api.StatusHealthChecking); err != nil {
+			if created > 0 {
+				e.step(ctx, d, "Started %s", plural(created, "container"))
+			}
+			if err := r.reach(ctx, api.StatusHealthChecking); err != nil {
 				return err
 			}
 		}
-		if err := e.awaitReady(ctx, d, created); err != nil {
+		if err := e.awaitReady(ctx, d, started); err != nil {
 			return err
 		}
-		if err := r.swap(ctx, created); err != nil {
+		if err := r.swap(ctx, started); err != nil {
 			return err
 		}
 	}
@@ -134,7 +278,12 @@ func (r *rollout) execute(ctx context.Context) error {
 		return err
 	}
 
-	if err := e.transition(ctx, d, api.StatusHealthy); err != nil {
+	// Reached here as well by a resumed deployment that had nothing left to
+	// start: the status then names the last thing it knows to be done.
+	if err := r.reach(ctx, api.StatusHealthChecking); err != nil {
+		return err
+	}
+	if err := r.reach(ctx, api.StatusHealthy); err != nil {
 		return err
 	}
 	if !CanTransition(d.Status, api.StatusActive) {
@@ -161,6 +310,7 @@ func (r *rollout) execute(ctx context.Context) error {
 			e.step(sweepCtx, d, "Removed %s of older versions", plural(n, "image"))
 		}
 	}
+	e.retireStaticLeftovers(sweepCtx, d)
 	e.step(sweepCtx, d, "Deployment successful")
 	e.notifySucceeded(sweepCtx, d, previous)
 	return nil
@@ -222,13 +372,21 @@ func (r *rollout) batches() [][]int {
 		// Nothing runs that the newcomers could disturb: all at once.
 		all := make([]int, 0, r.d.Spec.Replicas)
 		for i := 1; i <= r.d.Spec.Replicas; i++ {
-			all = append(all, i)
+			if !r.inService[i] {
+				all = append(all, i)
+			}
+		}
+		if len(all) == 0 {
+			return nil
 		}
 		return [][]int{all}
 	}
 	var batches [][]int
 	var additional []int
 	for i := 1; i <= r.d.Spec.Replicas; i++ {
+		if r.inService[i] {
+			continue // a resumed rollout had this one serving already
+		}
 		if _, replaces := r.old[i]; replaces {
 			batches = append(batches, []int{i})
 		} else {
@@ -305,15 +463,27 @@ func (r *rollout) swap(ctx context.Context, ready []store.Replica) error {
 
 	if len(outgoing) > 0 {
 		r.retired = true
-		// Uncancellable: a half-retired replica helps nobody, and the rollback
-		// that a cancellation triggers expects "retired" to mean gone.
+		// Uncancellable: a half-retired replica helps nobody.
 		retireCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
+		grace := e.gracePeriod(r.prev.Spec)
 		for _, rep := range outgoing {
-			if err := e.retireContainer(retireCtx, rep.ContainerID); err != nil {
+			delete(r.old, rep.Index)
+			if !r.recreate {
+				// It is out of rotation; how long it takes to exit is nothing
+				// the deployment has to wait for (see drain.go). Whoever needs
+				// it gone — the next batch, a rollback — waits for the drain.
+				// An agent that is shutting down leaves it where it is; the
+				// rollout that resumes finds it and retires it then.
+				c := docker.Container{ID: rep.ContainerID, Name: rep.ContainerName, App: d.Application, DeploymentID: rep.DeploymentID, Replica: rep.Index}
+				e.retireInBackground(c, grace, d)
+				continue
+			}
+			// Under recreate it stopped before the new version started, and
+			// removing it takes no time.
+			if err := e.retireContainer(retireCtx, rep.ContainerID, grace); err != nil {
 				e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Could not remove old container %s: %v", rep.ContainerName, err))
 			}
-			delete(r.old, rep.Index)
 		}
 	}
 
@@ -349,9 +519,9 @@ func (r *rollout) announceRouting(ctx context.Context, to string) {
 		hosts := hostnamesOf(d.Spec)
 		e.refreshHostnames(ctx, hosts.list())
 		if ready, why := e.hostnameReady(hosts.domain); ready {
-			e.step(ctx, d, "Routed https://%s to %s", d.Spec.Domain, to)
+			e.step(ctx, d, "Routed https://%s%s to %s%s", d.Spec.Domain, d.Spec.Path, to, e.certificateNote(hosts.domain))
 		} else {
-			e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Routing https://%s is waiting for DNS: %s. It is served, and its certificate obtained, once the record points at this server", d.Spec.Domain, why))
+			e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Routing https://%s%s is waiting for DNS: %s. It is served, and its certificate obtained, once the record points at this server", d.Spec.Domain, d.Spec.Path, why))
 		}
 		for _, h := range hosts.all() {
 			if h.host == hosts.domain {
@@ -407,14 +577,8 @@ func (r *rollout) stopPrevious(ctx context.Context) error {
 		return fmt.Errorf("could not take %s out of service: %w", d.Application, err)
 	}
 
-	indexes := make([]int, 0, len(r.old))
-	for i := range r.old {
-		indexes = append(indexes, i)
-	}
-	sort.Ints(indexes)
-	for _, i := range indexes {
-		rep := r.old[i]
-		if err := e.rt.StopContainer(ctx, rep.ContainerID, e.opts.StopTimeout); err != nil {
+	for _, rep := range sortedReplicas(r.old) {
+		if err := e.rt.StopContainer(ctx, rep.ContainerID, e.gracePeriod(prev.Spec)); err != nil {
 			return fmt.Errorf("stop replica %d of %s: %w", rep.Index, prev.Version, err)
 		}
 		r.stopped = append(r.stopped, rep)
@@ -429,7 +593,7 @@ func (r *rollout) stopPrevious(ctx context.Context) error {
 func (r *rollout) rollBackRecreate(ctx context.Context, cause error) {
 	e, d, prev := r.e, r.d, r.prev
 
-	if err := e.transition(ctx, d, api.StatusRollback); err != nil {
+	if err := r.reach(ctx, api.StatusRollback); err != nil {
 		e.log.Error("could not start rollback", "deployment", d.ID, "error", err)
 		r.discard(ctx, r.fresh)
 		return
@@ -438,35 +602,42 @@ func (r *rollout) rollBackRecreate(ctx context.Context, cause error) {
 	e.routeVia(d.Application, routeOverride{hosts: hostnamesOf(prev.Spec), desired: r.desired()})
 	e.syncProxyBestEffort(ctx, d.Application)
 	for _, rep := range r.fresh {
-		if err := e.retireContainer(ctx, rep.ContainerID); err != nil {
+		if err := e.retireContainer(ctx, rep.ContainerID, e.gracePeriod(d.Spec)); err != nil {
 			e.log.Error("could not remove failed replica", "container", rep.ContainerName, "error", err)
 		}
 	}
 	r.fresh = nil
 
 	e.step(ctx, d, "Rolling back: starting %s again", prev.Version)
-	if err := e.transition(ctx, d, api.StatusRestoring); err != nil {
+	if err := r.reach(ctx, api.StatusRestoring); err != nil {
 		e.log.Error("could not enter RESTORING", "deployment", d.ID, "error", err)
 	}
 
+	// The containers the old version kept are started again. Those removed at
+	// the switch are created anew: the volumes were not removed, and new
+	// containers of the old version find their data there.
 	var restored []store.Replica
 	var err error
-	if !r.retired {
-		for _, rep := range r.stopped {
-			if err = e.startNameless(ctx, rep.ContainerID); err != nil {
-				break
-			}
-			e.sup.reset(rep.ContainerID, prev.Spec.Health != nil)
-			restored = append(restored, rep)
+	for _, rep := range r.stopped {
+		if _, kept := r.old[rep.Index]; !kept {
+			continue
 		}
-	} else {
-		// The old containers were removed at the switch; the volumes were
-		// not. New containers of the old version find their data there.
-		missing := make([]int, 0, prev.Spec.Replicas)
+		if err = e.startNameless(ctx, rep.ContainerID); err != nil {
+			break
+		}
+		e.sup.reset(rep.ContainerID, prev.Spec.Health != nil)
+		restored = append(restored, rep)
+	}
+	if err == nil && r.retired {
+		var missing []int
 		for i := 1; i <= prev.Spec.Replicas; i++ {
-			missing = append(missing, i)
+			if _, kept := r.old[i]; !kept {
+				missing = append(missing, i)
+			}
 		}
-		restored, err = e.ensureReplicas(ctx, *prev, missing)
+		var created []store.Replica
+		created, err = e.ensureReplicas(ctx, *prev, missing)
+		restored = append(restored, created...)
 	}
 	if err == nil {
 		asPrev := *prev
@@ -511,10 +682,15 @@ func (r *rollout) discard(ctx context.Context, replicas []store.Replica) {
 func (r *rollout) rollBack(ctx context.Context, cause error) {
 	e, d, prev := r.e, r.d, r.prev
 
-	if err := e.transition(ctx, d, api.StatusRollback); err != nil {
+	if err := r.reach(ctx, api.StatusRollback); err != nil {
 		e.log.Error("could not start rollback", "deployment", d.ID, "error", err)
 		r.discard(ctx, r.fresh)
 		return
+	}
+	// The replicas this rollout replaced may still be on their way out, and
+	// the restore creates containers of the very same names.
+	if err := e.awaitDrains(ctx, d.Application); err != nil {
+		e.log.Error("retired replicas are still stopping", "deployment", d.ID, "error", err)
 	}
 	// First, the replicas that never made it into rotation: they are the
 	// failure, and they hold the one slot of headroom the restore needs.
@@ -537,8 +713,10 @@ func (r *rollout) rollBack(ctx context.Context, cause error) {
 			missing = append(missing, i)
 		}
 	}
-	e.step(ctx, d, "Rolling back: restoring %s of %s", plural(len(missing), "replica"), prev.Version)
-	if err := e.transition(ctx, d, api.StatusRestoring); err != nil {
+	if len(missing) > 0 || !r.resumed {
+		e.step(ctx, d, "Rolling back: restoring %s of %s", plural(len(missing), "replica"), prev.Version)
+	}
+	if err := r.reach(ctx, api.StatusRestoring); err != nil {
 		e.log.Error("could not enter RESTORING", "deployment", d.ID, "error", err)
 	}
 
@@ -549,7 +727,9 @@ func (r *rollout) rollBack(ctx context.Context, cause error) {
 		// part of this deployment's story, and the previous one is immutable.
 		asPrev := *prev
 		asPrev.ID = d.ID
-		err = e.awaitReady(ctx, &asPrev, restored)
+		// A resumed rollback cannot tell which of the old version's replicas
+		// it had restored and not yet verified: it verifies them all.
+		err = e.awaitReady(ctx, &asPrev, append(r.unverified, restored...))
 	}
 	if err != nil {
 		// The old version could not be completed either. Keep what serves,
@@ -619,22 +799,9 @@ func (e *Engine) createReplicas(ctx context.Context, d store.Deployment, indexes
 		if l := d.Spec.Logging; l != nil {
 			cspec.LogDriver, cspec.LogOptions = l.Driver, l.Options
 		}
-		id, name, err := e.rt.CreateContainer(ctx, cspec)
+		id, name, err := e.createContainer(ctx, cspec)
 		if err != nil {
-			// The image may have been pruned since it was deployed.
-			if exists, ierr := e.rt.ImageExists(ctx, d.Spec.Image); ierr == nil && !exists {
-				if spec.IsLocalImage(d.Spec.Image) {
-					// Nowhere to pull it from: it came from a developer's machine.
-					return created, fmt.Errorf("replica %d: image %w", i, localImageMissing(d.Spec.Image))
-				}
-				if perr := e.rt.PullImage(ctx, d.Spec.Image); perr != nil {
-					return created, fmt.Errorf("replica %d: image %s is gone and could not be pulled again: %w", i, d.Spec.Image, perr)
-				}
-				id, name, err = e.rt.CreateContainer(ctx, cspec)
-			}
-			if err != nil {
-				return created, fmt.Errorf("replica %d: %w", i, err)
-			}
+			return created, fmt.Errorf("replica %d: %w", i, err)
 		}
 		// Record immediately: cleanup after a failure relies on this row.
 		rep := store.Replica{DeploymentID: d.ID, Index: i, ContainerID: id, ContainerName: name}

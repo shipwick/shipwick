@@ -22,10 +22,12 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/api"
 	"github.com/shipwick/shipwick/agent/internal/config"
 	"github.com/shipwick/shipwick/agent/internal/deploy"
+	"github.com/shipwick/shipwick/agent/internal/disk"
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/agent/internal/notify"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
 	"github.com/shipwick/shipwick/agent/internal/store"
+	sharedapi "github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/version"
 )
 
@@ -111,7 +113,8 @@ func run() error {
 	startCtx, cancelStart := context.WithTimeout(ctx, startupTimeout)
 	defer cancelStart()
 
-	st, err := store.Open(startCtx, cfg.DatabasePath(), store.Options{EncryptionKey: encryptionKey, Logger: log})
+	st, err := store.Open(startCtx, cfg.DatabasePath(), store.Options{EncryptionKey: encryptionKey, Logger: log,
+		KeyFile: cfg.EncryptionKeyPath(), KeyFromEnvironment: cfg.EncryptionKey != ""})
 	if err != nil {
 		return err
 	}
@@ -171,11 +174,35 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", config.EnvWebhookURL, err)
 		}
-		// Closed after the engine has shut down (deferred, so last), which
-		// is when the outcome of an interrupted deployment is known.
+		// Closed after the engine has shut down (deferred, so last), so that
+		// what it still had to say on the way down is sent.
 		defer hook.Close()
 		opts.Notifier = hook
 		log.Info("notifications go to a webhook", "host", hook.Host())
+	}
+	if cfg.DashboardDomain != "" {
+		opts.DashboardURL = "https://" + cfg.DashboardDomain
+	}
+	opts.AlertMemoryPercent, opts.AlertDiskPercent = cfg.AlertMemoryPercent, cfg.AlertDiskPercent
+	opts.DiskUsage = func() (sharedapi.DiskUsage, bool) {
+		u, ok := disk.Of(cfg.DataDir)
+		return sharedapi.DiskUsage{TotalBytes: u.Total, UsedBytes: u.Used}, ok
+	}
+	if cfg.CloudflareToken != "" {
+		// Config.Load has made sure there is a proxy to give it to.
+		if caddy, ok := opts.Proxy.(*proxy.Caddy); ok {
+			caddy.UseCloudflare(cfg.CloudflareToken)
+			opts.DNSChallenge = true
+			log.Info("certificates are obtained through Cloudflare DNS; hostnames may be proxied by Cloudflare, and may be wildcards")
+		}
+	}
+
+	opts.ProxyTLSAddr = cfg.ProxyTLSAddr
+	if opts.Backups, err = backupOptions(cfg, encryptionKey, log); err != nil {
+		return err
+	}
+	if opts.Transfer, err = transferOptions(cfg, &opts.Backups, log); err != nil {
+		return err
 	}
 
 	engine := deploy.New(st, rt, opts)
@@ -189,6 +216,11 @@ func run() error {
 	}
 	// After Recover: the supervisor must only ever see settled state.
 	engine.StartSupervisor()
+	// Not fatal either: the applications run, and the next start tries again.
+	if err := engine.StartBackups(startCtx); err != nil {
+		log.Error("could not start the backup scheduler; no backups are taken until the agent is restarted", "error", err)
+	}
+	engine.StartTransfers()
 
 	apiServer := api.New(engine, st, tokenHash, log)
 	srv := &http.Server{

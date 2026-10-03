@@ -16,8 +16,19 @@ export function rollbackCandidates<T extends Pick<Deployment, 'id' | 'applicatio
     .sort((a, b) => b.id - a.id)
 }
 
+/**
+ * What an import's deployments are called in a history: "imported" for one
+ * that came with an export from another server, "imported, stopped" for one a
+ * standby holds until it is promoted. Null for every other kind.
+ */
+export function importLabel(kind: DeploymentKind | string): string | null {
+  if (kind === 'import') return 'imported'
+  if (kind === 'standby') return 'imported, stopped'
+  return null
+}
+
 export interface DeploymentOrigin {
-  kind: Exclude<DeploymentKind, 'deploy'>
+  kind: 'redeploy' | 'rollback'
   /** "rollback to" / "redeploy of": reads as a phrase in front of the source. */
   phrase: string
   /** Id of the deployment whose stored configuration was re-used; null when the agent recorded none. */

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: no CGO, static binaries
@@ -28,6 +29,18 @@ type Store struct {
 	// aead encrypts environment values on their way in and out (crypto.go);
 	// nil only for an in-memory database, which never outlives the process.
 	aead cipher.AEAD
+
+	// What key rotation needs (rotation.go). keyMu is held shared by whoever
+	// seals a value and writes it, and exclusively by a rotation, so that
+	// nothing sealed under the old key is written after the rotation has gone
+	// over the database.
+	keyMu sync.RWMutex
+	// rawKey is the key aead is made of right now, kept for Snapshot.
+	rawKey     []byte
+	keyFile    string
+	keyFromEnv bool
+	inMemory   bool
+	log        *slog.Logger
 }
 
 // Options configure Open.
@@ -37,6 +50,15 @@ type Options struct {
 	EncryptionKey []byte
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
+
+	// KeyFile is where the key is kept in the data directory. A rotation
+	// writes the new key there, and Open settles what an interrupted one left
+	// next to it. Empty: the key cannot be rotated, except in memory.
+	KeyFile string
+	// KeyFromEnvironment says that EncryptionKey was given in the environment
+	// and KeyFile is not where the agent reads it from: a rotation cannot put
+	// the new key where the next start will look for it.
+	KeyFromEnvironment bool
 }
 
 // Open opens (and creates, if needed) the database at path and applies any
@@ -70,14 +92,24 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	// and this rules out SQLITE_BUSY and lock-upgrade deadlocks entirely.
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	s := &Store{db: db, keyFile: opts.KeyFile, keyFromEnv: opts.KeyFromEnvironment, log: opts.Logger, inMemory: path == ":memory:"}
+	if s.log == nil {
+		s.log = slog.Default()
+	}
 	if len(opts.EncryptionKey) > 0 {
-		if s.aead, err = newAEAD(opts.EncryptionKey); err != nil {
+		aead, err := newAEAD(opts.EncryptionKey)
+		if err != nil {
 			db.Close()
 			return nil, err
 		}
+		s.aead = &keyring{current: aead}
+		s.rawKey = opts.EncryptionKey
 	}
 	if err := s.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.settleRotation(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -213,6 +245,72 @@ var migrations = []string{
 	`ALTER TABLE deployments ADD COLUMN static_digest TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE deployments ADD COLUMN static_files INTEGER NOT NULL DEFAULT 0;
 	 ALTER TABLE deployments ADD COLUMN static_bytes INTEGER NOT NULL DEFAULT 0;`,
+	// 10: credentials for the registries images are pulled from. The password
+	// is encrypted like a secret is, bound to the registry it is for.
+	`CREATE TABLE registries (
+		registry   TEXT PRIMARY KEY,
+		username   TEXT NOT NULL,
+		password   BLOB NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);`,
+	// 11: certificates the operator supplied, by the hostname each is stored
+	// under. The chain is public; the key is encrypted like a secret's value
+	// (crypto.go), with the hostname bound to it.
+	`CREATE TABLE certificates (
+		hostname    TEXT PRIMARY KEY,
+		certificate TEXT NOT NULL,
+		key         BLOB NOT NULL,
+		created_at  TEXT NOT NULL,
+		updated_at  TEXT NOT NULL
+	);`,
+	// 12: what the proxy's access log says about each application, one row
+	// per application and minute with traffic, pruned after the retention
+	// period like the metric samples. latency is a histogram: the counts of
+	// its buckets, comma separated (see deploy/traffic.go).
+	`CREATE TABLE traffic_samples (
+		application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+		at             TEXT NOT NULL,
+		requests       INTEGER NOT NULL,
+		status_2xx     INTEGER NOT NULL,
+		status_3xx     INTEGER NOT NULL,
+		status_4xx     INTEGER NOT NULL,
+		status_5xx     INTEGER NOT NULL,
+		bytes          INTEGER NOT NULL,
+		latency        TEXT NOT NULL
+	);
+	CREATE INDEX traffic_samples_application_at ON traffic_samples(application_id, at);`,
+	// 13: backups taken by the agent: of an application's volumes, or of the
+	// agent's own state (application '_agent'). The application is kept by
+	// name, not by reference: like its volumes, an application's backups
+	// outlive its deletion. AUTOINCREMENT: the run id names the backup's
+	// directory, and a removed run's id must not come back for another's
+	// files.
+	`CREATE TABLE backup_runs (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		application   TEXT NOT NULL,
+		trigger       TEXT NOT NULL,
+		status        TEXT NOT NULL,
+		volumes       TEXT NOT NULL DEFAULT '[]',
+		destinations  TEXT NOT NULL DEFAULT '[]',
+		encrypted     INTEGER NOT NULL DEFAULT 0,
+		error         TEXT NOT NULL DEFAULT '',
+		started_at    TEXT NOT NULL,
+		completed_at  TEXT,
+		activity      TEXT NOT NULL DEFAULT '',
+		verified_at   TEXT,
+		verify_error  TEXT NOT NULL DEFAULT '',
+		verify_output TEXT NOT NULL DEFAULT '',
+		restored_at   TEXT,
+		restore_error TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX backup_runs_application ON backup_runs(application, id);
+
+	-- One row: the name this installation marks its bucket with. It lives
+	-- here so that it comes back with a restored database.
+	CREATE TABLE backup_installation (
+		id TEXT NOT NULL
+	);`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

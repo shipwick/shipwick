@@ -71,9 +71,16 @@ type App struct {
 	Build *Build `json:"build,omitempty"`
 	// Static is a folder of files served by the proxy itself, with no container;
 	// such an application has no image, port or replicas.
-	Static  *Static `json:"static,omitempty"`
-	Restart Restart `json:"restart"`
-	Deploy  Deploy  `json:"deploy"`
+	Static *Static `json:"static,omitempty"`
+	// Path limits the application to one path prefix of its domain, so that
+	// several applications can share a hostname.
+	Path string `json:"path,omitempty"`
+	// Proxy is what the proxy does for this application beyond routing to it.
+	Proxy *Proxy `json:"proxy,omitempty"`
+	// Backups says when the application's volumes are backed up unasked.
+	Backups *Backups `json:"backups,omitempty"`
+	Restart Restart  `json:"restart"`
+	Deploy  Deploy   `json:"deploy"`
 }
 
 // Volume is a named Docker volume mounted into every replica. It belongs to
@@ -116,6 +123,10 @@ type Restart struct {
 
 type Deploy struct {
 	Strategy string `json:"strategy"`
+	// StopTimeout is how long a replica that is being replaced gets to finish
+	// what it has in hand, once it has left the proxy; zero means the agent's
+	// default.
+	StopTimeout Duration `json:"stop_timeout,omitempty"`
 }
 
 // Health check kinds, derived from which of Health's fields is set.
@@ -160,8 +171,10 @@ type Logging struct {
 }
 
 // Redacted returns a copy that is safe to expose through the API: environment
-// variable names are kept, their values are masked.
+// variable names are kept, their values are masked, and so are the passwords
+// of the proxy block.
 func (a App) Redacted() App {
+	a.Proxy = a.Proxy.redacted()
 	if len(a.Env) == 0 {
 		return a
 	}
@@ -219,4 +232,7 @@ type Build struct {
 // Static is a folder served by the proxy as it is: a built frontend.
 type Static struct {
 	Dir string `json:"dir"` // relative to deploy.yaml, on the developer's machine
+	// Fallback is the file, relative to Dir, answered for a path that names
+	// no file: index.html for a single-page application. Empty means 404.
+	Fallback string `json:"fallback,omitempty"`
 }

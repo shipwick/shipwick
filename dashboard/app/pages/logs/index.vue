@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Application, ApplicationDetail } from '~/types/api'
+import { hasNoLogs, logApplications } from '~/utils/logs'
 import { shippedLogDriver } from '~/utils/spec'
 import { applicationStatusDisplay } from '~/utils/status'
 
@@ -19,12 +20,10 @@ const application = computed({
   },
 })
 
-const options = computed(() => {
-  const list = apps.data.value ?? []
-  const names = list.map(a => a.name)
-  if (application.value && !names.includes(application.value)) names.push(application.value)
-  return names.sort()
-})
+// A static application has no containers and so no logs: it is not offered.
+const options = computed(() => logApplications(apps.data.value ?? [], application.value))
+/** One was named in the URL all the same (an old link, a typed address). */
+const staticSelected = computed(() => hasNoLogs(apps.data.value ?? [], application.value))
 
 const selected = computed(() => (apps.data.value ?? []).find(a => a.name === application.value) ?? null)
 
@@ -32,14 +31,14 @@ const selected = computed(() => (apps.data.value ?? []).find(a => a.name === app
 // to a remote driver, in which case the viewer warns that it shows Docker's copy.
 const detail = usePolling<ApplicationDetail | null>(
   signal => (application.value ? agent.get<ApplicationDetail>(`/applications/${encodeURIComponent(application.value)}`, { signal }) : Promise.resolve(null)),
-  { interval: 60_000, enabled: () => application.value !== '' },
+  { interval: 60_000, enabled: () => application.value !== '' && !staticSelected.value },
 )
 watch(application, () => void detail.reset())
 const shippedTo = computed(() => shippedLogDriver(detail.data.value?.spec))
 
-// With a single application there is nothing to choose.
-watch(() => apps.data.value, (list) => {
-  if (!application.value && list && list.length === 1 && list[0]) application.value = list[0].name
+// With a single application that has logs there is nothing to choose.
+watch(options, (names) => {
+  if (!application.value && names.length === 1 && names[0]) application.value = names[0]
 })
 </script>
 
@@ -55,14 +54,17 @@ watch(() => apps.data.value, (list) => {
         <ErrorState :error="apps.error.value" subject="applications" :retrying="apps.refreshing.value" @retry="apps.refresh()" />
       </div>
 
-      <div v-else-if="options.length === 0" class="rounded-sm border border-line">
-        <EmptyState title="No applications yet">
+      <div v-else-if="options.length === 0 && !staticSelected" class="rounded-sm border border-line">
+        <EmptyState v-if="(apps.data.value?.length ?? 0) === 0" title="No applications yet">
           Logs appear here once an application has been deployed.
+        </EmptyState>
+        <EmptyState v-else title="No application has logs">
+          Every application on this server is a folder served by the proxy. Logs are what containers write, and there are none.
         </EmptyState>
       </div>
 
       <template v-else>
-        <LogViewer v-if="application" :key="application" :application="application" height-class="h-[calc(100dvh-14rem)] min-h-64" :initial-tail="100" :shipped-to="shippedTo">
+        <LogViewer v-if="application && !staticSelected" :key="application" :application="application" height-class="h-[calc(100dvh-14rem)] min-h-64" :initial-tail="100" :shipped-to="shippedTo">
           <template #leading>
             <label class="flex items-center gap-1.5 text-xs text-fg-muted">
               <span class="sr-only">Application</span>
@@ -78,13 +80,17 @@ watch(() => apps.data.value, (list) => {
           <div class="flex flex-wrap items-center gap-3 border-b border-line bg-subtle px-3 py-2">
             <label class="flex items-center gap-2 text-xs text-fg-muted">
               Application
-              <select v-model="application" class="input mono !h-7 !w-auto min-w-44 !text-xs">
+              <select :value="staticSelected ? '' : application" class="input mono !h-7 !w-auto min-w-44 !text-xs" @change="application = ($event.target as HTMLSelectElement).value">
                 <option value="" disabled>Select…</option>
                 <option v-for="option in options" :key="option" :value="option">{{ option }}</option>
               </select>
             </label>
           </div>
-          <EmptyState title="Choose an application">
+          <EmptyState v-if="staticSelected" :title="`${application} has no logs`">
+            It is a folder served by the proxy: there is no container to write any. What was asked of it is under Traffic on
+            <NuxtLink :to="`/applications/${application}`" class="link">its page</NuxtLink>.
+          </EmptyState>
+          <EmptyState v-else title="Choose an application">
             Its replicas are tailed together and merged by time. Each replica keeps its own color.
           </EmptyState>
         </div>

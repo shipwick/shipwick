@@ -10,6 +10,15 @@ export type ClientErrorCode = 'NETWORK' | 'BAD_RESPONSE'
  */
 export const RATE_LIMITED_MESSAGE = 'Too many failed attempts from this address; try again in a minute.'
 
+/** The agent counts failures over a minute, so that is the longest a refusal lasts. */
+const RATE_LIMIT_WINDOW_MS = 60_000
+
+/** Retry-After as whole seconds; null when the header is absent or not a number of seconds. */
+export function parseRetryAfter(value: string | null | undefined): number | null {
+  const text = value?.trim() ?? ''
+  return /^\d+$/.test(text) ? Number(text) : null
+}
+
 /**
  * Every failure of a call to the agent, normalized: an error envelope from the
  * agent, one from the dashboard's proxy, or a failure to reach the dashboard.
@@ -18,13 +27,26 @@ export class AgentError extends Error {
   readonly status: number
   readonly code: ApiErrorCode | ClientErrorCode | string
   readonly details: Record<string, unknown>
+  /** Seconds from the response's Retry-After header; null when it carried none. */
+  readonly retryAfter: number | null
 
-  constructor(status: number, code: string, message: string, details: Record<string, unknown> = {}) {
+  constructor(status: number, code: string, message: string, details: Record<string, unknown> = {}, retryAfter: number | null = null) {
     super(message)
     this.name = 'AgentError'
     this.status = status
     this.code = code
     this.details = details
+    this.retryAfter = retryAfter
+  }
+
+  /**
+   * How long to leave the agent alone before asking again, in milliseconds:
+   * what Retry-After said, or a minute for a rate limit that came without one.
+   * Zero for every other failure, which is retried at the usual pace.
+   */
+  get retryAfterMs(): number {
+    if (this.retryAfter !== null) return this.retryAfter * 1000
+    return this.rateLimited ? RATE_LIMIT_WINDOW_MS : 0
   }
 
   /** The dashboard could not reach the agent at all (as opposed to the agent refusing something). */
@@ -75,6 +97,7 @@ export function toAgentError(error: unknown): AgentError {
 
 /** Reads an error envelope out of a non-2xx response, tolerating non-JSON bodies. */
 export async function errorFromResponse(response: Response): Promise<AgentError> {
+  const retryAfter = parseRetryAfter(response.headers.get('retry-after'))
   let text = ''
   try {
     text = await response.text()
@@ -91,11 +114,20 @@ export async function errorFromResponse(response: Response): Promise<AgentError>
         typeof code === 'string' ? code : 'BAD_RESPONSE',
         typeof message === 'string' && message !== '' ? message : `Request failed with status ${response.status}`,
         typeof details === 'object' && details !== null ? details as Record<string, unknown> : {},
+        retryAfter,
       )
     }
   }
   catch {
     // not JSON
   }
-  return new AgentError(response.status, 'BAD_RESPONSE', `Request failed with status ${response.status}`)
+  return new AgentError(response.status, 'BAD_RESPONSE', `Request failed with status ${response.status}`, {}, retryAfter)
+}
+
+/**
+ * When a poll may next be sent: after the usual interval, and not before the
+ * time a refusal asked to be left alone until.
+ */
+export function nextPollDelay(intervalMs: number, notBefore: number, now: number = Date.now()): number {
+  return Math.max(intervalMs, notBefore - now)
 }

@@ -1,8 +1,13 @@
 <script setup lang="ts">
+import { summarizeAlerts, worstAlertTone } from '~/utils/alerts'
+
 const route = useRoute()
 
 // Which server this is, and whether it answers: shown at the bottom of the sidebar on every page.
 const server = provideServerInfo()
+
+const alerts = computed(() => server.data.value?.alerts ?? [])
+const alertTone = computed(() => worstAlertTone(alerts.value))
 
 const drawer = ref<HTMLDialogElement | null>(null)
 const drawerOpen = ref(false)
@@ -50,6 +55,16 @@ watch(() => route.fullPath, closeDrawer)
       <NuxtLink to="/" class="flex items-center gap-2">
         <AppMark :size="16" compact />
         <span class="text-base font-semibold tracking-tight">Shipwick</span>
+      </NuxtLink>
+      <!-- The sidebar's alert mark is out of sight here: the same fact, in the bar. -->
+      <NuxtLink
+        v-if="alertTone"
+        to="/servers"
+        class="ml-auto mr-1 inline-flex h-7 items-center gap-1.5 rounded-sm border px-2 text-xs font-medium"
+        :class="alertTone === 'danger' ? 'border-danger-line bg-danger-bg text-danger' : 'border-warn-line bg-warn-bg text-warn'"
+      >
+        <UiIcon name="alert" :size="12" />
+        {{ summarizeAlerts(alerts) }}
       </NuxtLink>
     </header>
 

@@ -6,9 +6,9 @@ which — only after the whole CI suite passed on that commit — publishes:
 | What | Where |
 |---|---|
 | `shipwick_<os>_<arch>` for Linux, macOS (amd64, arm64) and Windows (amd64) | the GitHub release |
-| `compose.production.yml`, **both images pinned to this version** | the GitHub release |
+| `compose.production.yml`, **all three images pinned to this version** | the GitHub release |
 | `checksums.txt` (SHA-256 of the files above) | the GitHub release |
-| `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
+| `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard`, `ghcr.io/shipwick/caddy` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
 
 The installer takes everything from the release, never from a branch, and
 verifies each file against `checksums.txt`. Because the compose file is pinned,
@@ -35,6 +35,14 @@ a server runs the version it installed until the installer is run again —
 
 Image tags carry no `v`: the tag `v0.2.0` publishes `0.2.0`, `0.2` and `latest`.
 
+The proxy's image is built from [Dockerfile.caddy](../Dockerfile.caddy), which
+pins Caddy and its Cloudflare DNS module. It is tagged with Shipwick's version
+like the other two, also when its content did not change. To move to a newer
+Caddy, change `CADDY_VERSION` (and `CLOUDFLARE_DNS_VERSION` when the module
+has a release for it) there, build it — `docker build -f Dockerfile.caddy .`
+— check that `caddy list-modules` lists `dns.providers.cloudflare`, and deploy
+something through the development stack before releasing.
+
 ### Release candidates
 
 A tag with a suffix — `v0.2.0-rc.1` — is published as a GitHub *pre-release*,
@@ -52,7 +60,7 @@ upgrade path: those are only really tested on a real server.
 ## Dry run
 
 **Actions → Release → Run workflow** runs the whole pipeline without publishing
-anything: the checks, the binaries, both images for both platforms, the trip of
+anything: the checks, the binaries, every image for both platforms, the trip of
 the files from one job to the next, the notes. Nothing is pushed to the
 registry and no release is created.
 
@@ -75,10 +83,15 @@ Things the workflow cannot do for itself:
 
 - **Allow public packages in the organization**, or the next step is greyed
   out: Organization settings → Packages → Package creation → Public.
-- **Make the two packages public.** GHCR creates packages as private on the
+- **Make the packages public.** GHCR creates a package as private on its
   first push, and a server cannot pull a private image:
   github.com/orgs/shipwick/packages → each package → *Package settings* →
-  *Change visibility* → Public. Do this right after the first (pre-)release.
+  *Change visibility* → Public. Do this right after the first (pre-)release
+  that pushes a package — and again whenever a release adds one: `caddy`, the
+  proxy's image, is new in 0.5 and starts private like the first two did.
+  Until it is public, the installer of that release fails at "Could not
+  pull". Releasing a candidate first (`v0.5.0-rc.1`) creates the package
+  without moving anything users get by default.
 - **`get.shipwick.com`** must answer with `scripts/install.sh` from `main` —
   a redirect to
   `https://raw.githubusercontent.com/shipwick/shipwick/main/scripts/install.sh`

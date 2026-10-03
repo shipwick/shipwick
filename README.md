@@ -180,13 +180,15 @@ api is still running 2.3.0; the failed deployment did not affect it.
 ## What you get
 
 - **Rolling deployments** with health checks, at most one extra container at a time, and automatic rollback.
-- **HTTPS** for every domain, certificates included, plus aliases and `www` redirects.
+- **HTTPS** for every domain, certificates included, plus aliases and `www` redirects; behind Cloudflare's proxy, with wildcards, or with a certificate of your own.
+- **Routing per application**: several applications on one domain by `path`, response headers, basic authentication and redirects in `proxy`.
 - **Supervision**: crashed replicas are restarted with backoff; a container that disappears is recreated.
 - **Scheduled jobs** and one-off commands from the application's image: `jobs`, `shipwick run app -- rails db:migrate`.
-- **Volumes and backups**: `shipwick backup postgres`, `shipwick restore`.
-- **Secrets** kept out of files with `${NAME}`, encrypted at rest on the server.
+- **Volumes and backups**: on a schedule, encrypted, to an S3-compatible bucket, and verified by restoring them: `backups` in deploy.yaml, `shipwick backups verify`.
+- **Moving house**: `shipwick export` and `shipwick import` take every application, its secrets and its data to another server; a second server can be kept ready and promoted by hand.
+- **Secrets** kept out of files with `${NAME}`, encrypted at rest on the server under a key that can be rotated; **registry credentials** stored the same way.
 - **Tokens with roles**: a `deploy` token for CI, `read` for a teammate, `admin` for you.
-- **Notifications** to Slack, Discord or any webhook; **metrics** with a week of history.
+- **Notifications** and **alerts** to Slack, Discord or any webhook; **metrics** and **traffic** with a week of history, and `GET /metrics` for Prometheus.
 - **A dashboard**, a CLI and a REST API: anything one does, the others can.
 
 ## Learn more

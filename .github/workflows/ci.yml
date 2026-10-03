@@ -82,6 +82,10 @@ jobs:
         run: docker run --rm ghcr.io/shipwick/agent:ci version
       - name: Build the dashboard image
         run: docker build -t ghcr.io/shipwick/dashboard:ci dashboard/
+      - name: Build the proxy image
+        run: docker build -t ghcr.io/shipwick/caddy:ci -f Dockerfile.caddy .
+      - name: The proxy image has the Cloudflare module
+        run: docker run --rm ghcr.io/shipwick/caddy:ci caddy list-modules | grep -x dns.providers.cloudflare
       - name: Compose files are valid
         run: |
           docker compose config --quiet

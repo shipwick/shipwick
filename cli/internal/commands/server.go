@@ -71,11 +71,19 @@ func (c *cli) serverCommand() *cobra.Command {
 			if info.Token.Name != "" {
 				fields = append(fields, [2]string{"Token", fmt.Sprintf("%s (%s)", info.Token.Name, info.Token.Role)})
 			}
+			fields = append(fields, [2]string{"Dashboard", c.describeDashboard(info.DashboardURL)})
+			// Absent from an older agent, and where the agent cannot measure it.
+			if info.Disk != nil {
+				fields = append(fields, [2]string{"Disk", describeDisk(*info.Disk)})
+			}
 			c.ui.Fields(fields)
+			c.printAlerts(info.Alerts)
 			return nil
 		},
 	})
 	server.AddCommand(c.serverInstallCommand())
+	server.AddCommand(c.serverRotateKeyCommand())
+	server.AddCommand(c.serverBackupCommand())
 	return server
 }
 
@@ -98,8 +106,15 @@ func (c *cli) describeNotifications(n api.NotificationStatus) string {
 	return "none" + c.ui.Styled(ui.Dim, "  (set SHIPWICK_WEBHOOK_URL on the agent)")
 }
 
+func (c *cli) describeDashboard(url string) string {
+	if url != "" {
+		return url
+	}
+	return "no hostname" + c.ui.Styled(ui.Dim, "  (set SHIPWICK_DASHBOARD_DOMAIN on the agent)")
+}
+
 func (c *cli) loginCommand() *cobra.Command {
-	var tokenStdin bool
+	var tokenStdin, noCheck bool
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Save the agent URL and API token for later commands",
@@ -117,7 +132,11 @@ A second server gets a name of its own and becomes the current one:
 
   shipwick login --context staging --url https://staging.example.com
 
-Later commands take --context, or SHIPWICK_CONTEXT, to pick one.`,
+Later commands take --context, or SHIPWICK_CONTEXT, to pick one.
+
+--no-check saves the URL and the token as given, without a request to the
+agent. The installer uses it on the server, where the token is known to be
+right before the API's hostname has a DNS record or a certificate.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := cliconfig.Path(c.getenv)
@@ -167,6 +186,15 @@ Later commands take --context, or SHIPWICK_CONTEXT, to pick one.`,
 			if cl.SendsTokenInCleartext() {
 				c.ui.Warn("%s is unencrypted HTTP: the token can be read by anyone on the network path. Prefer HTTPS or an SSH tunnel.", cl.URL())
 			}
+			if noCheck {
+				saved.Set(name, cliconfig.Context{URL: cl.URL(), Token: token})
+				if err := cliconfig.Save(path, saved); err != nil {
+					return err
+				}
+				c.ui.Success("Saved %s as context %s in %s", cl.URL(), name, path)
+				c.ui.Println(c.ui.Styled(ui.Dim, "  not checked against the agent; try it with: shipwick server status"))
+				return nil
+			}
 			info, err := cl.Server(cmd.Context())
 			if err != nil {
 				if client.IsCode(err, api.CodeUnauthorized) {
@@ -185,6 +213,7 @@ Later commands take --context, or SHIPWICK_CONTEXT, to pick one.`,
 		},
 	}
 	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read the token from standard input")
+	cmd.Flags().BoolVar(&noCheck, "no-check", false, "save without asking the agent whether the token is right")
 	return cmd
 }
 

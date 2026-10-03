@@ -193,7 +193,7 @@ func TestAHostnameThatPointsElsewhereIsNotRouted(t *testing.T) {
 	}
 	// 104.21.5.6 is one of Cloudflare's: the record exists and is right, the
 	// proxy in front of it is what has to go.
-	want := "waiting for DNS: resolves to Cloudflare's proxy (104.21.5.6), not to this server: turn the proxy off for this record (DNS only), or wait for Cloudflare support in a later release."
+	want := "waiting for DNS: resolves to Cloudflare's proxy (104.21.5.6), not to this server: turn the proxy off for this record (DNS only), or set SHIPWICK_CLOUDFLARE_API_TOKEN on the agent to keep it on."
 	if steps := s.steps(d.ID); !strings.Contains(steps, want) {
 		t.Errorf("steps lack %q:\n%s", want, steps)
 	}
@@ -219,7 +219,7 @@ func TestANotReadyVerdictSaysWhichRecordToCreate(t *testing.T) {
 		{"another server", []string{"203.0.113.10"}, []string{"198.51.100.7"}, nil,
 			"resolves to 198.51.100.7, not to this server; change the A record: web.example.com → 203.0.113.10 (DNS only, not proxied)"},
 		{"Cloudflare, IPv4 and IPv6", []string{"203.0.113.10"}, []string{"104.21.5.6", "2606:4700:3030::6815:506"}, nil,
-			"resolves to Cloudflare's proxy (104.21.5.6, 2606:4700:3030::6815:506), not to this server: turn the proxy off for this record (DNS only), or wait for Cloudflare support in a later release"},
+			"resolves to Cloudflare's proxy (104.21.5.6, 2606:4700:3030::6815:506), not to this server: turn the proxy off for this record (DNS only), or set SHIPWICK_CLOUDFLARE_API_TOKEN on the agent to keep it on"},
 		{"Cloudflare and another server", []string{"203.0.113.10"}, []string{"104.21.5.6", "198.51.100.7"}, nil,
 			"resolves to 104.21.5.6, 198.51.100.7, not to this server; change the A record: web.example.com → 203.0.113.10 (DNS only, not proxied)"},
 	}

@@ -34,6 +34,9 @@ type UI struct {
 	// progress line, which needs cursor control.
 	color bool
 	tty   bool
+	// watched says a person reads this as it is written: a terminal, or one
+	// application's share of it (see Prefixed).
+	watched bool
 
 	// mu serialises writes: several deployments narrating at once (see
 	// Prefixed) must not interleave inside a line.
@@ -48,13 +51,37 @@ func New(out, err io.Writer, getenv func(string) string) *UI {
 	u := &UI{out: out, err: err}
 	if f, ok := out.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		u.tty = enableVirtualTerminal(f)
+		u.watched = true
 		u.color = u.tty && getenv("NO_COLOR") == "" && getenv("TERM") != "dumb"
 	}
 	return u
 }
 
+// Terminal creates a UI that writes to out and err as to a terminal, whatever
+// they are, without colors. It is how what only a terminal shows — the
+// progress line — is tested through a buffer.
+func Terminal(out, err io.Writer) *UI {
+	return &UI{out: out, err: err, tty: true, watched: true}
+}
+
 // IsTerminal reports whether output goes to an interactive terminal.
 func (u *UI) IsTerminal() bool { return u.tty }
+
+// Watched reports whether a person reads the output as it is written: it is
+// a terminal, or a Prefixed share of one. A pipeline's log is read afterwards
+// and wants everything; a person wants what matters now.
+func (u *UI) Watched() bool { return u.watched }
+
+// Width is how many columns a line may take before the terminal wraps it;
+// 80 when that cannot be known.
+func (u *UI) Width() int {
+	if f, ok := u.out.(*os.File); ok {
+		if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+			return w
+		}
+	}
+	return 80
+}
 
 func (u *UI) Styled(s Style, text string) string {
 	if !u.color || s == Plain {
@@ -97,6 +124,12 @@ func (u *UI) Warn(format string, args ...any) {
 	u.write(u.err, u.Styled(Yellow, "!")+" "+fmt.Sprintf(format, args...)+"\n")
 }
 
+// Note prints a remark about the output rather than part of it, dimmed, to
+// standard error: what is piped onwards stays what the command produced.
+func (u *UI) Note(format string, args ...any) {
+	u.write(u.err, u.Styled(Dim, fmt.Sprintf(format, args...))+"\n")
+}
+
 // Progress shows what is happening right now on a line that the next output
 // replaces. When output is not a terminal it prints nothing: logs should hold
 // results, not animation frames.
@@ -134,9 +167,10 @@ func (u *UI) Done() {
 // The progress line is off: several spinners cannot share one line.
 func (u *UI) Prefixed(prefix string) *UI {
 	return &UI{
-		out:   &prefixWriter{ui: u, w: u.out, prefix: prefix},
-		err:   &prefixWriter{ui: u, w: u.err, prefix: prefix},
-		color: u.color,
+		out:     &prefixWriter{ui: u, w: u.out, prefix: prefix},
+		err:     &prefixWriter{ui: u, w: u.err, prefix: prefix},
+		color:   u.color,
+		watched: u.watched,
 	}
 }
 

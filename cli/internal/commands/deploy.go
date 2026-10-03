@@ -72,6 +72,7 @@ order given, one after the other:
 	cmd.Flags().StringVar(&image, "image", "", "deploy this image instead of the one in the config")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "start the deployment and return immediately")
 	cmd.Flags().IntVar(&parallel, "parallel", DefaultParallel, "how many applications of a shipwick.yaml deploy at the same time")
+	cmd.Flags().BoolVar(&c.verbose, "verbose", false, "show everything docker build prints, instead of one progress line")
 	return cmd
 }
 
@@ -189,10 +190,13 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 		c.ui.Println(describeServing(detail))
 	}
 	if final.Spec.Domain != "" {
-		c.ui.Println("https://" + final.Spec.Domain)
+		c.ui.Println("https://" + final.Spec.Domain + final.Spec.Path)
 	}
 	if final.Sequence == 1 && !c.manyInFlight {
-		c.printNextSteps(name, final.Spec.Static != nil)
+		// An agent that cannot be asked, or does not say, costs the line
+		// about the dashboard and nothing else.
+		info, _ := cl.Server(ctx)
+		c.printNextSteps(name, final.Spec.Static != nil, info.DashboardURL)
 	}
 	return nil
 }
@@ -386,6 +390,9 @@ func describeSpec(app spec.App) [][2]string {
 	fields := [][2]string{{"Name", app.Name}}
 	if app.Static != nil {
 		fields = append(fields, [2]string{"Folder", app.Static.Dir + "/ — served by the proxy, no container"})
+		if app.Static.Fallback != "" {
+			fields = append(fields, [2]string{"Fallback", app.Static.Fallback + " for paths that name no file"})
+		}
 	} else {
 		fields = append(fields, describeImage(app)...)
 		fields = append(fields, [2]string{"Replicas", fmt.Sprint(app.Replicas)})
@@ -396,11 +403,17 @@ func describeSpec(app spec.App) [][2]string {
 	if app.Domain != "" {
 		fields = append(fields, [2]string{"Domain", app.Domain})
 	}
+	if app.Path != "" {
+		fields = append(fields, [2]string{"Path", app.Path})
+	}
 	if len(app.Aliases) > 0 {
 		fields = append(fields, [2]string{"Aliases", strings.Join(app.Aliases, ", ")})
 	}
 	if len(app.Redirects) > 0 {
 		fields = append(fields, [2]string{"Redirects", strings.Join(app.Redirects, ", ") + " → https://" + app.Domain})
+	}
+	if app.Proxy != nil {
+		fields = append(fields, [2]string{"Proxy", describeProxy(app)})
 	}
 	if h := app.Health; h != nil {
 		line := fmt.Sprintf("%s every %s (timeout %s, %d retries)", describeHealthCheck(*h), h.Interval, h.Timeout, h.Retries)
@@ -444,6 +457,9 @@ func describeSpec(app spec.App) [][2]string {
 	}
 	for _, j := range app.Jobs {
 		fields = append(fields, [2]string{"Job", fmt.Sprintf("%s at %s UTC: %s", j.Name, j.Schedule, strings.Join(j.Command, " "))})
+	}
+	if app.Backups != nil {
+		fields = append(fields, [2]string{"Backups", describeBackupPlan(*app.Backups)})
 	}
 	return fields
 }

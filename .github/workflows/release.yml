@@ -8,7 +8,7 @@ name: Release
 # images' "latest" tag and is not what the installer picks by default.
 #
 # Run by hand (Actions → Release → Run workflow), this is a dry run: everything
-# is built exactly as for a release — binaries, both images for both platforms,
+# is built exactly as for a release — binaries, every image for both platforms,
 # the notes — and nothing is pushed or published. Use it after changing this
 # file, the Dockerfiles or the release scripts.
 #
@@ -72,10 +72,19 @@ jobs:
         include:
           - image: agent
             context: .
+            dockerfile: Dockerfile
             title: Shipwick agent
           - image: dashboard
             context: dashboard
+            dockerfile: dashboard/Dockerfile
             title: Shipwick dashboard
+          # Caddy with the Cloudflare DNS provider. It carries the release's
+          # version like the other two, though its content changes only when
+          # Dockerfile.caddy does: one tag to pin, one upgrade to reason about.
+          - image: caddy
+            context: .
+            dockerfile: Dockerfile.caddy
+            title: Shipwick reverse proxy (Caddy)
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
@@ -100,6 +109,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ env.VERSION }}
           tags: ${{ steps.meta.outputs.tags }}

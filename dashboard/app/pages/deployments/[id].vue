@@ -2,8 +2,10 @@
 import type { Deployment, DeploymentDetail } from '~/types/api'
 import { deriveProgress } from '~/utils/deploymentProgress'
 import { durationBetween, formatAbsoluteUtc, formatBytes, formatCores, formatDuration } from '~/utils/format'
+import { describeBackupPlan } from '~/utils/backups'
 import { tidyDuration } from '~/utils/jobs'
-import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatHostname, formatPublish, hostnamesOf } from '~/utils/spec'
+import { deniedRegistry } from '~/utils/registries'
+import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatHostname, formatPathRedirect, formatPublish, hostnamesOf } from '~/utils/spec'
 import { deploymentStatusDisplay } from '~/utils/status'
 
 const route = useRoute()
@@ -39,6 +41,19 @@ const process = computed(() => {
   if (s.user) lines.push({ label: 'User', value: s.user })
   return lines
 })
+/** The proxy block as it was deployed, one line per thing it says. Accounts by name and path: there is no password to show. */
+const proxyLines = computed(() => {
+  const s = d.value?.spec
+  if (!s) return []
+  const lines: { label: string, value: string }[] = []
+  if (s.path) lines.push({ label: 'Path', value: s.proxy?.strip_prefix ? `${s.path} (removed before the application sees the request)` : s.path })
+  for (const [header, value] of Object.entries(s.proxy?.headers ?? {}).sort(([a], [b]) => a.localeCompare(b))) lines.push({ label: 'Header', value: `${header}: ${value}` })
+  for (const account of s.proxy?.basic_auth ?? []) lines.push({ label: 'Account', value: `${account.username} for ${account.path || s.path || 'every path'}` })
+  for (const redirect of s.proxy?.redirects ?? []) lines.push({ label: 'Redirect', value: formatPathRedirect(redirect) })
+  return lines
+})
+/** The registry a refused pull names: the way to the form that stores a credential for it. */
+const registry = computed(() => deniedRegistry(d.value?.error ?? ''))
 const logging = computed(() => describeLogging(d.value?.spec))
 const loggingOptions = computed(() => Object.entries(d.value?.spec.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
 /** A static deployment serves a folder: "42 files, 3.1 MB, served by the proxy" where a container deployment has an image. */
@@ -146,9 +161,18 @@ const crumbs = computed(() => [
             <DeploymentOrigin :deployment="d" :known="source ? [source] : []" />
             <span class="text-fg-subtle"> · its stored configuration was deployed again<template v-if="d.kind === 'redeploy' && source && source.image !== d.image">, with another image</template></span>
           </p>
+          <p v-else-if="d.kind === 'import' || d.kind === 'standby'" class="mt-1.5">
+            <span class="label mr-2">Origin</span>
+            <DeploymentOrigin :deployment="d" :known="[]" />
+            <span class="text-fg-subtle"> · its configuration came with an export of another server<template v-if="d.kind === 'standby'">; the application is deployed stopped and waits for a promotion</template></span>
+          </p>
           <p v-if="d.error" class="mt-3 flex items-start gap-2 rounded-sm border border-danger-line bg-danger-bg px-3 py-2 font-medium text-danger">
             <UiIcon name="x-circle" :size="14" class="mt-[3px]" />
             <span class="min-w-0 break-words">{{ d.error }}</span>
+          </p>
+          <p v-if="registry" class="mt-1.5 text-fg-muted">
+            If the image is private, the server needs a credential for <span class="mono text-fg">{{ registry }}</span>:
+            <NuxtLink :to="{ path: '/registries', query: { registry } }" class="link">log it in on the Registries page</NuxtLink>, then deploy again.
           </p>
         </div>
 
@@ -231,7 +255,7 @@ const crumbs = computed(() => [
                 Folder
               </dt>
               <dd class="mono mt-0.5">
-                {{ d.spec.static.dir }}/ <span class="font-sans text-fg-muted">— served by the proxy, no container</span>
+                {{ d.spec.static.dir }}/ <span class="font-sans text-fg-muted">— served by the proxy, no container<template v-if="d.spec.static.fallback">; paths that name no file get <span class="mono text-fg">{{ d.spec.static.fallback }}</span></template></span>
               </dd>
             </div>
             <template v-else>
@@ -272,6 +296,7 @@ const crumbs = computed(() => [
                 </dt>
                 <dd class="mono mt-0.5">
                   {{ d.spec.restart.policy }} · {{ d.spec.deploy.strategy }}
+                  <span v-if="d.spec.deploy.stop_timeout" class="block text-fg-muted">stop timeout {{ tidyDuration(d.spec.deploy.stop_timeout) }}</span>
                 </dd>
               </div>
               <div class="bg-bg px-4 py-2.5 sm:col-span-2">
@@ -302,6 +327,25 @@ const crumbs = computed(() => [
               </dt>
               <dd class="mono mt-0.5">
                 <div v-for="line in published" :key="line">{{ line }}</div>
+              </dd>
+            </div>
+            <div v-if="proxyLines.length > 0" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Proxy <span class="normal-case tracking-normal text-fg-faint">passwords are never returned by the agent</span>
+              </dt>
+              <dd class="mt-0.5 space-y-0.5">
+                <div v-for="line in proxyLines" :key="`${line.label}/${line.value}`" class="flex gap-2">
+                  <span class="w-20 shrink-0 text-fg-muted">{{ line.label }}</span>
+                  <span class="mono min-w-0 break-all">{{ line.value }}</span>
+                </div>
+              </dd>
+            </div>
+            <div v-if="d.spec.backups" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Backups
+              </dt>
+              <dd class="mt-0.5 break-words">
+                {{ describeBackupPlan(d.spec.backups) }}
               </dd>
             </div>
             <div v-if="d.spec.volumes?.length" class="bg-bg px-4 py-2.5 sm:col-span-2">

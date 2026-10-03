@@ -25,6 +25,8 @@ type Secret struct {
 // sealed like an env value, with the name as the additional data: a
 // ciphertext moved to another name does not decrypt there.
 func (s *Store) SetSecret(ctx context.Context, name, value string, now time.Time) error {
+	s.keyMu.RLock()
+	defer s.keyMu.RUnlock()
 	stored := value
 	if s.aead != nil {
 		var err error

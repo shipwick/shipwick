@@ -1,8 +1,12 @@
 package spec
 
 import (
+	"fmt"
 	"path"
+	"reflect"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // staticExclusiveMessage is what every container-only field gets when it is
@@ -12,10 +16,13 @@ const staticExclusiveMessage = "does not apply to a static application: the prox
 // validateStatic checks a static application: the folder, and that nothing
 // meant for a container is set next to it.
 func (r raw) validateStatic(verr *ValidationError, app App) *Static {
-	if r.Static == "" {
+	if r.Static.Dir == "" {
+		if r.Static.Fallback != "" {
+			verr.add("static.dir", "is required: the folder the fallback page is in", "dist")
+		}
 		return nil
 	}
-	dir, problem := cleanStaticDir(r.Static)
+	dir, problem := cleanStaticDir(r.Static.Dir)
 	if problem != "" {
 		verr.add("static", problem, "dist/, build/, out/ — a folder relative to deploy.yaml")
 	}
@@ -51,7 +58,27 @@ func (r raw) validateStatic(verr *ValidationError, app App) *Static {
 			verr.add(f.field, staticExclusiveMessage, "")
 		}
 	}
-	return &Static{Dir: dir}
+	return &Static{Dir: dir, Fallback: r.validateFallback(verr)}
+}
+
+// validateFallback checks the file answered for paths that name no file. The
+// proxy looks it up in the folder and its configuration names it, hence the
+// strict alphabet.
+func (r raw) validateFallback(verr *ValidationError) string {
+	f := strings.TrimSpace(r.Static.Fallback)
+	if f == "" {
+		return ""
+	}
+	const example = "index.html, 200.html, app/index.html — a file in the folder"
+	switch {
+	case strings.HasPrefix(f, "/"):
+		verr.add("static.fallback", fmt.Sprintf("invalid value %q: must be relative to the folder", f), example)
+	case len(f) > MaxPathBytes:
+		verr.add("static.fallback", fmt.Sprintf("invalid value: longer than %d characters", MaxPathBytes), example)
+	case validateURLPath("/"+f) != nil:
+		verr.add("static.fallback", fmt.Sprintf("invalid value %q: name a file inside the folder, with letters, digits, dots, dashes, underscores and tildes between the slashes", f), example)
+	}
+	return f
 }
 
 // cleanStaticDir normalizes the folder: forward slashes, no trailing slash,
@@ -78,3 +105,22 @@ func cleanStaticDir(s string) (dir, problem string) {
 // MaxStaticBytes bounds the folder of a static application, as the tar archive
 // the CLI sends and the agent keeps.
 const MaxStaticBytes = 512 << 20
+
+// staticRaw accepts `static: dist/` and `static: {dir: dist/, fallback: index.html}`.
+type staticRaw struct {
+	Dir      string `yaml:"dir"`
+	Fallback string `yaml:"fallback"`
+}
+
+func (s *staticRaw) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		return value.Decode(&s.Dir)
+	}
+	// A node is decoded without the strictness of the document's decoder; a
+	// misspelt key is reported here, in that decoder's words.
+	if unknown := unknownKeys(value, reflect.TypeOf(s)); len(unknown) > 0 {
+		return &yaml.TypeError{Errors: unknown}
+	}
+	type plain staticRaw
+	return value.Decode((*plain)(s))
+}

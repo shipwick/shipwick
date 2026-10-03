@@ -83,8 +83,12 @@ export function useAgent() {
   return {
     get: <T>(path: string, options?: AgentRequestOptions) => request<T>('GET', path, options),
     post: <T>(path: string, options?: AgentRequestOptions) => request<T>('POST', path, options),
-    /** For a JSON body that creates or replaces (a secret); archives are not uploaded from the browser. */
-    put: (path: string, options?: AgentRequestOptions) => request<void>('PUT', path, options),
+    /**
+     * For a JSON body that creates or replaces: a secret or a registry
+     * credential (204), a certificate (answered with what was stored).
+     * Archives are not uploaded from the browser.
+     */
+    put: <T = void>(path: string, options?: AgentRequestOptions) => request<T>('PUT', path, options),
     del: (path: string, options?: AgentRequestOptions) => request<void>('DELETE', path, options),
     /** For NDJSON: resolves with the raw response once headers arrive; errors are thrown as for any request. */
     stream: (path: string, options?: AgentRequestOptions) => send('GET', path, options),

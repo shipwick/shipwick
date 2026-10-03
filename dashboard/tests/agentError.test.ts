@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AgentError, RATE_LIMITED_MESSAGE, errorFromResponse } from '../app/utils/agentError'
+import { AgentError, RATE_LIMITED_MESSAGE, errorFromResponse, nextPollDelay, parseRetryAfter } from '../app/utils/agentError'
 
 function response(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -64,5 +64,61 @@ describe('AgentError.fields', () => {
     const error = new AgentError(400, 'INVALID_CONFIG', 'x', { fields: [{ message: 'no field' }, 'junk', { field: 'domain', message: 'taken' }] })
     expect(error.fields.map(f => f.field)).toEqual(['domain'])
     expect(new AgentError(500, 'INTERNAL_ERROR', 'x').fields).toEqual([])
+  })
+})
+
+describe('Retry-After', () => {
+  const limited = (retryAfter?: string) => new Response(
+    JSON.stringify({ error: { code: 'RATE_LIMITED', message: 'too many failed authentications from this address; try again in a minute', details: {} } }),
+    { status: 429, headers: { 'content-type': 'application/json', ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }) } },
+  )
+
+  it('is read from a 429 and is how long polling waits', async () => {
+    const error = await errorFromResponse(limited('37'))
+    expect(error.retryAfter).toBe(37)
+    expect(error.retryAfterMs).toBe(37_000)
+  })
+
+  it('is a minute for a rate limit that came without the header', async () => {
+    const error = await errorFromResponse(limited())
+    expect(error.retryAfter).toBeNull()
+    expect(error.retryAfterMs).toBe(60_000)
+  })
+
+  it('is read from a body that is not an envelope too', async () => {
+    const error = await errorFromResponse(new Response('slow down', { status: 429, headers: { 'retry-after': '5' } }))
+    expect(error.code).toBe('BAD_RESPONSE')
+    expect(error.retryAfterMs).toBe(5000)
+  })
+
+  it('asks for no extra wait after any other failure', async () => {
+    expect((await errorFromResponse(response(500, { error: { code: 'INTERNAL_ERROR', message: 'x', details: {} } }))).retryAfterMs).toBe(0)
+    expect(new AgentError(502, 'AGENT_UNREACHABLE', 'x').retryAfterMs).toBe(0)
+    expect(new AgentError(0, 'NETWORK', 'x').retryAfterMs).toBe(0)
+  })
+
+  it('takes whole seconds and nothing else', () => {
+    expect(parseRetryAfter('60')).toBe(60)
+    expect(parseRetryAfter(' 5 ')).toBe(5)
+    expect(parseRetryAfter('0')).toBe(0)
+    expect(parseRetryAfter(null)).toBeNull()
+    expect(parseRetryAfter('')).toBeNull()
+    expect(parseRetryAfter('soon')).toBeNull()
+    expect(parseRetryAfter('-3')).toBeNull()
+    expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:00 GMT')).toBeNull()
+  })
+})
+
+describe('nextPollDelay', () => {
+  const now = 1_000_000
+
+  it('is the usual interval when nothing asked to be left alone', () => {
+    expect(nextPollDelay(5000, 0, now)).toBe(5000)
+    expect(nextPollDelay(5000, now - 1, now)).toBe(5000)
+  })
+
+  it('waits out a refusal instead of polling on', () => {
+    expect(nextPollDelay(1000, now + 37_000, now)).toBe(37_000)
+    expect(nextPollDelay(5000, now + 2000, now)).toBe(5000)
   })
 })

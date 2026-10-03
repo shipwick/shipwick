@@ -78,13 +78,17 @@ type raw struct {
 		Driver  string            `yaml:"driver"`
 		Options map[string]string `yaml:"options"`
 	} `yaml:"logging"`
-	Build   buildRaw `yaml:"build"`
-	Static  string   `yaml:"static"`
+	Build   buildRaw  `yaml:"build"`
+	Static  staticRaw `yaml:"static"`
+	Path    string    `yaml:"path"`
+	Proxy   yaml.Node `yaml:"proxy"`
+	Backups yaml.Node `yaml:"backups"`
 	Restart struct {
 		Policy string `yaml:"policy"`
 	} `yaml:"restart"`
 	Deploy struct {
-		Strategy string `yaml:"strategy"`
+		Strategy    string `yaml:"strategy"`
+		StopTimeout string `yaml:"stop_timeout"`
 	} `yaml:"deploy"`
 }
 
@@ -217,7 +221,7 @@ func (r raw) validate() (App, error) {
 	}
 
 	if app.Image == "" {
-		if r.Static == "" && r.Build.Context == "" {
+		if r.Static.Dir == "" && r.Build.Context == "" && r.Build.Dockerfile == "" {
 			verr.add("image", "is required", "ghcr.io/company/my-api:1.4.2")
 		}
 	} else if err := ValidateImage(app.Image); err != nil {
@@ -232,10 +236,10 @@ func (r raw) validate() (App, error) {
 	}
 
 	if app.Domain != "" {
-		if err := ValidateDomain(app.Domain); err != nil {
-			verr.add("domain", err.Error(), "api.example.com")
+		if err := ValidateHostname(app.Domain); err != nil {
+			verr.add("domain", err.Error(), "api.example.com, *.example.com")
 		}
-		if r.Port == nil && r.Static == "" {
+		if r.Port == nil && r.Static.Dir == "" {
 			verr.add("port", "is required when domain is set", "the port your application listens on, e.g. 8080")
 		}
 	}
@@ -283,6 +287,15 @@ func (r raw) validate() (App, error) {
 			verr.add("deploy.strategy", fmt.Sprintf("invalid value %q", s), "rolling, recreate")
 		}
 	}
+	if v := r.Deploy.StopTimeout; v != "" {
+		if r.Static.Dir != "" {
+			verr.add("deploy.stop_timeout", staticExclusiveMessage, "")
+		} else if d, err := parseDuration(v, MinStopTimeout, MaxStopTimeout); err != nil {
+			verr.add("deploy.stop_timeout", err.Error(), "10s, 30s, 5m, ... (1s to 10m)")
+		} else {
+			app.Deploy.StopTimeout = Duration(d)
+		}
+	}
 
 	app.Aliases, app.Redirects = r.validateDomains(verr, app.Domain)
 	app.Entrypoint, app.Command, app.User = r.validateProcess(verr)
@@ -290,6 +303,9 @@ func (r raw) validate() (App, error) {
 	app.Logging = r.validateLogging(verr)
 	app.Build = r.validateBuild(verr)
 	app.Static = r.validateStatic(verr, app)
+	app.Path = r.validatePath(verr, app)
+	app.Proxy = r.validateProxy(verr, app)
+	app.Backups = r.validateBackups(verr, app)
 	app.Volumes = r.validateVolumes(verr)
 	if len(app.Volumes) > 0 {
 		// Two versions writing the same files at once is how data gets lost.

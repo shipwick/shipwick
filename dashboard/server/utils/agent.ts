@@ -3,6 +3,7 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Readable } from 'node:stream'
 import type { H3Event } from 'h3'
+import { HEADERS_TIMEOUT_MS } from './timeouts'
 
 /** Name of the httpOnly cookie that carries the agent token. */
 export const SESSION_COOKIE = 'shipwick_session'
@@ -12,9 +13,6 @@ export const CSRF_HEADER = 'x-shipwick-request'
 
 /** Everything the dashboard may reach on the agent lives under this prefix. */
 export const AGENT_API_PREFIX = '/api/v1/'
-
-/** How long the agent may take to answer with headers. Streams are not limited after that. */
-const HEADERS_TIMEOUT_MS = 60_000
 
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:9000'
 
@@ -106,7 +104,8 @@ export interface AgentRequestOptions {
   /**
    * How long the agent may take to answer with headers. For a streamed body
    * the clock starts once the last byte has been sent, so a slow upload is
-   * never mistaken for a silent agent. Default HEADERS_TIMEOUT_MS.
+   * never mistaken for a silent agent. Default HEADERS_TIMEOUT_MS; a stream
+   * is not limited once its headers are there.
    */
   headersTimeoutMs?: number
   /** Aborts the upstream request, e.g. when the browser went away. */

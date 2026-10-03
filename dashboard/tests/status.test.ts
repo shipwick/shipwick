@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { ApplicationStatus, DeploymentStatus } from '../app/types/api'
 import {
+  DRAINING_DISPLAY,
   applicationStatusDisplay,
   containerStateDisplay,
   deploymentStatusDisplay,
   eventLevelTone,
+  isDraining,
   needsAttention,
   replicaHealthDisplay,
   replicaSummary,
@@ -121,5 +123,26 @@ describe('attention and ordering', () => {
 describe('replica summary', () => {
   it('summarizes replicas like the CLI', () => {
     expect(replicaSummary({ desired: 2, healthy: 2 })).toBe('2/2 healthy')
+  })
+})
+
+describe('isDraining', () => {
+  const active = { id: 7 }
+
+  it('is a container of the previous deployment that outlived the deployment replacing it', () => {
+    const app = { deploying: false, active_deployment: active }
+    expect(isDraining({ deployment_id: 6 }, app)).toBe(true)
+    expect(isDraining({ deployment_id: 7 }, app)).toBe(false)
+    expect(DRAINING_DISPLAY).toEqual({ tone: 'muted', label: 'Stopping' })
+  })
+
+  it('is nothing while a deployment is in flight: two versions are both in service then', () => {
+    const app = { deploying: true, active_deployment: active }
+    expect(isDraining({ deployment_id: 6 }, app)).toBe(false)
+    expect(isDraining({ deployment_id: 8 }, app)).toBe(false)
+  })
+
+  it('is nothing for an application whose first deployment has not succeeded', () => {
+    expect(isDraining({ deployment_id: 1 }, { deploying: false, active_deployment: null })).toBe(false)
   })
 })

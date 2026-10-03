@@ -67,13 +67,15 @@ func (e *Engine) Application(ctx context.Context, name string) (api.ApplicationD
 	}
 
 	detail := api.ApplicationDetail{
-		Application: e.summarize(app, active, listed, inFlightID(inFlight)),
-		Containers:  make([]api.Container, 0, len(listed)),
+		Application:  e.summarize(app, active, listed, inFlightID(inFlight)),
+		Containers:   make([]api.Container, 0, len(listed)),
+		Certificates: []api.HostnameCertificate{},
 	}
 	if active != nil {
 		redacted := active.Spec.Redacted()
 		view := DeploymentView(*active)
 		detail.Spec, detail.ActiveDeployment = &redacted, &view
+		detail.Certificates = e.certificates(hostnamesOf(active.Spec))
 	}
 	restarts := map[string]int{}
 	if active != nil {
@@ -131,7 +133,7 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 	crashLoop := false
 	if active != nil {
 		out.Image, out.Version, out.Domain = active.Image, active.Version, active.Spec.Domain
-		out.Aliases, out.Redirects = active.Spec.Aliases, active.Spec.Redirects
+		out.Aliases, out.Redirects, out.Path = active.Spec.Aliases, active.Spec.Redirects, active.Spec.Path
 		out.Replicas.Desired = active.Spec.Replicas
 		if active.StaticDigest != "" {
 			// The proxy serves it; there is nothing to count, and nothing
@@ -397,5 +399,9 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		Containers:    running,
 		Proxy:         api.ProxyStatus(e.ProxyStatus()),
 		Notifications: e.Notifications(),
+		DashboardURL:  e.opts.DashboardURL,
+		Alerts:        e.Alerts(),
+		Disk:          e.Disk(),
+		Backups:       e.BackupStatus(ctx),
 	}, nil
 }

@@ -11,8 +11,12 @@
  * - POST/PUT/DELETE require the X-Shipwick-Request header (CSRF).
  * - A PUT body is streamed to the agent as it arrives, without a size limit of
  *   its own: a volume archive is gigabytes and the agent enforces 10 GB; a
- *   secret's value is a small JSON body and the agent enforces its limits too.
+ *   secret's value, a registry credential and a certificate are small JSON
+ *   bodies and the agent enforces its limits on those too.
  *   The dashboard uploads neither static folders nor images; that is the CLI's.
+ * - How long the agent gets to answer depends on what was asked: stopping or
+ *   deleting an application waits for its replicas to exit, which
+ *   deploy.stop_timeout allows to take minutes (server/utils/timeouts.ts).
  */
 
 import type { Readable } from 'node:stream'
@@ -24,15 +28,6 @@ const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-d
 
 /** The agent refuses JSON bodies over 64 KB; leave it a little room to say so itself. */
 const MAX_BODY_BYTES = 128 * 1024
-
-/**
- * How long the agent may take to answer a streamed upload once the last byte
- * has been sent: it extracts the archive into the volume before it answers.
- */
-const UPLOAD_ANSWER_TIMEOUT_MS = 10 * 60_000
-
-/** Path segments the agent uses are names, numbers and fixed words: nothing else gets through. */
-const SAFE_SEGMENT = /^[\w.~-]+$/
 
 export default defineEventHandler(async (event) => {
   try {
@@ -47,7 +42,8 @@ export default defineEventHandler(async (event) => {
       throw new AgentProxyError(401, 'UNAUTHORIZED', 'Not signed in')
     }
 
-    const path = AGENT_API_PREFIX + safePath(getRouterParam(event, 'path') ?? '')
+    const segments = safeSegments(getRouterParam(event, 'path') ?? '')
+    const path = AGENT_API_PREFIX + segments.map(encodeURIComponent).join('/')
     const queryStart = event.path.indexOf('?')
     const search = queryStart === -1 ? '' : event.path.slice(queryStart)
 
@@ -58,7 +54,7 @@ export default defineEventHandler(async (event) => {
     }
 
     let body: Buffer | Readable | undefined
-    let headersTimeoutMs: number | undefined
+    const headersTimeoutMs = answerTimeoutMs(method, segments)
     if (method === 'POST') {
       if (Number(getRequestHeader(event, 'content-length') ?? 0) > MAX_BODY_BYTES) throw bodyTooLarge()
       body = await readRawBody(event, false)
@@ -66,12 +62,11 @@ export default defineEventHandler(async (event) => {
       if (body && body.length === 0) body = undefined
     }
     else if (method === 'PUT') {
-      // Never buffered: a PUT is a volume archive or a secret's value. The agent
+      // Never buffered: a PUT is a volume archive or a small JSON body. The agent
       // wants the length to refuse an oversized upload before reading it.
       body = event.node.req
       const length = getRequestHeader(event, 'content-length')
       if (length) headers['content-length'] = length
-      headersTimeoutMs = UPLOAD_ANSWER_TIMEOUT_MS
     }
 
     // If the browser goes away (tab closed, log stream stopped), stop the upstream request too.
@@ -118,7 +113,8 @@ export default defineEventHandler(async (event) => {
   }
 })
 
-function safePath(raw: string): string {
+/** The path below /api/v1 as decoded segments, each checked; they are encoded again for the upstream URL. */
+function safeSegments(raw: string): string[] {
   const segments = raw.split('/').filter(s => s !== '')
   if (segments.length === 0) throw new AgentProxyError(404, 'NOT_FOUND', 'no such endpoint')
   return segments.map((segment) => {
@@ -129,11 +125,11 @@ function safePath(raw: string): string {
     catch {
       throw new AgentProxyError(400, 'INVALID_REQUEST', 'Malformed path')
     }
-    if (decoded === '.' || decoded === '..' || !SAFE_SEGMENT.test(decoded)) {
+    if (!isSafeSegment(decoded)) {
       throw new AgentProxyError(400, 'INVALID_REQUEST', 'Malformed path')
     }
-    return encodeURIComponent(decoded)
-  }).join('/')
+    return decoded
+  })
 }
 
 function bodyTooLarge(): AgentProxyError {

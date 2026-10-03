@@ -232,6 +232,11 @@ write_env() {
     if [ -n "$SHIPWICK_AGENT_DOMAIN" ] && [ "$SHIPWICK_AGENT_DOMAIN" = "$SHIPWICK_DASHBOARD_DOMAIN" ]; then
         die "The API and the dashboard need two different hostnames."
     fi
+    # The agent refuses to start with a token of another form; said here, it
+    # is one sentence instead of a stack that never becomes healthy.
+    case "${SHIPWICK_CLOUDFLARE_API_TOKEN:-}" in
+        *[!A-Za-z0-9_-]*) die "SHIPWICK_CLOUDFLARE_API_TOKEN is not a Cloudflare API token: letters, digits, - and _ only, without quotes." ;;
+    esac
 
     GENERATED_TOKEN="$(random_token)"
     [ "${#GENERATED_TOKEN}" -ge 32 ] || die "Could not generate a random token."
@@ -247,7 +252,7 @@ SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
       # Settings given for this run have to outlive it: the next run, an
       # upgrade, must not quietly move the proxy back to the default ports.
-      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET; do
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE; do
           eval "value=\${$name:-}"
           [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
       done
@@ -264,7 +269,7 @@ install_server() {
     if [ -n "$COMPOSE_SOURCE" ]; then
         cp "$COMPOSE_SOURCE" "$INSTALL_DIR/$COMPOSE_FILE"
     else
-        # The release's compose file pins both images to the release's version.
+        # The release's compose file pins the images to the release's version.
         # Verified in the work directory first: a bad download must not replace
         # the compose file of a running installation.
         fetch_release_asset compose.production.yml "$WORK_DIR/compose.yml" \
@@ -278,7 +283,7 @@ install_server() {
 
     if ! docker compose pull --quiet 2>/dev/null; then
         # Not fatal if every image the compose file names is here anyway: built
-        # locally (then only Caddy's needs pulling), or pulled earlier.
+        # locally, or pulled earlier.
         missing=""
         for image in $(docker compose config --images); do
             docker image inspect "$image" >/dev/null 2>&1 \
@@ -288,8 +293,8 @@ install_server() {
         if [ -n "$missing" ]; then
             die "Could not pull:$missing
   Check this server's connection to the registry and run the installer again.
-  To run images you built yourself, set SHIPWICK_AGENT_IMAGE and
-  SHIPWICK_DASHBOARD_IMAGE in $INSTALL_DIR/.env."
+  To run images you built yourself, set SHIPWICK_AGENT_IMAGE,
+  SHIPWICK_DASHBOARD_IMAGE and SHIPWICK_CADDY_IMAGE in $INSTALL_DIR/.env."
         fi
         warn "Could not pull images; using the ones already on this server."
     fi
@@ -312,17 +317,69 @@ install_server() {
 
     prune_old_images
     install_cli || true
+    sign_in_cli
     print_summary
 }
 
+# shipwick_here ARGS — the installed CLI, deaf to variables that point it at
+# some other agent: what is saved here must describe this server.
+shipwick_here() {
+    ( unset SHIPWICK_AGENT_URL SHIPWICK_AGENT_TOKEN SHIPWICK_CONTEXT
+      "$BIN_DIR/shipwick" "$@" )
+}
+
+# sign_in_cli saves this server as a context of the user running the
+# installer, so that `shipwick ps` works here as it does on a laptop. The
+# agent publishes no port: its hostname is the one address there is, and
+# without one nothing is saved.
+#
+# The CLI writes its own file. It does not ask the agent first (--no-check):
+# the token is the one the agent was just started with, and on a new server
+# the hostname may have neither a DNS record nor a certificate yet.
+sign_in_cli() {
+    SIGNED_IN=""
+    agent_domain="$(sed -n 's/^SHIPWICK_AGENT_DOMAIN=//p' "$INSTALL_DIR/.env" | tail -n 1)"
+    token="$(sed -n 's/^SHIPWICK_AGENT_TOKEN=//p' "$INSTALL_DIR/.env" | tail -n 1)"
+    if [ -z "$agent_domain" ] || [ -z "$token" ] || [ ! -x "$BIN_DIR/shipwick" ]; then
+        return 0
+    fi
+    url="https://$agent_domain"
+
+    # A CLI from before contexts fails here, and is left as it is.
+    saved="$(shipwick_here context ls 2>/dev/null)" || return 0
+    # Rows are "* name url" for the current context and "name url" for the others.
+    name="$(printf '%s\n' "$saved" | awk -v url="$url" '$NF == url { if ($1 == "*") print $2; else print $1; exit }')"
+    if [ -z "$name" ]; then
+        # Servers saved here by hand stay as they are, the current one too.
+        case "$saved" in
+            "No saved servers."*) name="default" ;;
+            *) SIGNED_IN="elsewhere"; return 0 ;;
+        esac
+    fi
+
+    # Saving makes a context the current one; an upgrade must not change
+    # which server the commands typed here talk to.
+    current="$(shipwick_here context current 2>/dev/null || true)"
+    # The token goes in on standard input, never as an argument.
+    printf '%s' "$token" | shipwick_here login --context "$name" --url "$url" --token-stdin --no-check >/dev/null 2>&1 \
+        || return 0
+    SIGNED_IN="shipwick"
+    if [ -n "$current" ] && [ "$current" != "$name" ]; then
+        shipwick_here context use "$current" >/dev/null 2>&1 || true
+        SIGNED_IN="shipwick --context $name"
+    fi
+    step "shipwick on this server is signed in"
+}
+
 # prune_old_images removes the Shipwick images of earlier releases. Every
-# upgrade leaves the previous agent and dashboard images behind, a few hundred
-# megabytes each; the running ones and anything else on the server are kept.
+# upgrade leaves the previous agent, dashboard and proxy images behind, up to
+# a few hundred megabytes each; the running ones and anything else on the
+# server are kept.
 prune_old_images() {
     keep="$(docker compose config --images 2>/dev/null)"
     removed=0
     # `docker images` takes one repository at a time.
-    for repo in ghcr.io/shipwick/agent ghcr.io/shipwick/dashboard; do
+    for repo in ghcr.io/shipwick/agent ghcr.io/shipwick/dashboard ghcr.io/shipwick/caddy; do
         for image in $(docker images --format '{{.Repository}}:{{.Tag}}' "$repo" 2>/dev/null); do
             case " $keep " in *" $image "*) continue ;; esac
             docker image rm "$image" >/dev/null 2>&1 && removed=$((removed + 1))
@@ -344,6 +401,13 @@ print_summary() {
     fi
     if [ -n "$agent_domain" ]; then
         info "From your laptop or CI:   shipwick login --url https://$agent_domain"
+        case "${SIGNED_IN:-}" in
+            "") ;;
+            elsewhere)
+                info "shipwick on this server has other servers saved and was left as it is. To add this one:"
+                info "                          shipwick login --context here --url https://$agent_domain" ;;
+            *) info "On this server:           $SIGNED_IN ps" ;;
+        esac
     else
         info "No API hostname was set, so the API is not exposed. Reach it through a tunnel:"
         info "  1. create $INSTALL_DIR/compose.override.yml:"
@@ -355,6 +419,14 @@ print_summary() {
     fi
     [ -z "$dashboard_domain" ] || info "Dashboard:                https://$dashboard_domain"
     info "Open ports 80 and 443 (and 443/udp) — and nothing else — in your firewall."
+    if grep -q '^SHIPWICK_CLOUDFLARE_API_TOKEN=.' "$INSTALL_DIR/.env"; then
+        info "Certificates are obtained through Cloudflare DNS: hostnames may be proxied by"
+        info "Cloudflare. Set the zone's SSL/TLS mode to Full (strict)."
+    else
+        info "DNS records must point straight at this server (at Cloudflare: DNS only). To keep"
+        info "Cloudflare's proxy on, add SHIPWICK_CLOUDFLARE_API_TOKEN to $INSTALL_DIR/.env"
+        info "and run:   cd $INSTALL_DIR && docker compose up -d"
+    fi
     info "Upgrade later by running this installer again."
     printf '\n'
 }
@@ -369,12 +441,24 @@ Shipwick installer
   install.sh          install or upgrade the server (agent, Caddy, dashboard) and the CLI
   install.sh --cli    install the CLI only
 
+With a hostname for the API, the CLI on the server is signed in to it for the
+user who runs the installer: the URL and the token are saved as a context, so
+"shipwick ps" works there too. A context saved there by hand is not touched.
+
 Environment:
   SHIPWICK_VERSION            release to install (default: latest)
   SHIPWICK_AGENT_DOMAIN       hostname for the API; asked for when run in a terminal
   SHIPWICK_DASHBOARD_DOMAIN   hostname for the dashboard; likewise
   SHIPWICK_WEBHOOK_URL        where the agent posts notifications (optional)
   SHIPWICK_WEBHOOK_SECRET     signs those requests (optional)
+  SHIPWICK_CLOUDFLARE_API_TOKEN
+                              a Cloudflare API token (Zone:Read, DNS:Edit): certificates
+                              through DNS, so hostnames can stay behind Cloudflare's
+                              proxy and can be wildcards (optional)
+  SHIPWICK_BACKUP_PASSPHRASE  encrypts the backups the agent takes, and lets it back up
+                              its own database and key (optional)
+  SHIPWICK_BACKUP_S3_ENDPOINT, _BUCKET, _ACCESS_KEY_ID, _SECRET_ACCESS_KEY, _REGION, _PREFIX
+                              an S3-compatible bucket the backups are also sent to (optional)
   SHIPWICK_INSTALL_DIR        default /opt/shipwick
   SHIPWICK_BIN_DIR            default /usr/local/bin
 EOF

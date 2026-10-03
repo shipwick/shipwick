@@ -24,8 +24,9 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 		// Take the application out of rotation before its processes get
 		// SIGTERM: visitors see a clean 503, not connections dying mid-request.
 		e.syncProxyBestEffort(ctx, app.Name)
+		grace := e.gracePeriodOf(ctx, *app.ActiveDeploymentID)
 		errs := parallel(replicas, func(r store.Replica) error {
-			return e.rt.StopContainer(ctx, r.ContainerID, e.opts.StopTimeout)
+			return e.rt.StopContainer(ctx, r.ContainerID, grace)
 		})
 		for i, err := range errs {
 			if err != nil {
@@ -101,14 +102,25 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	containers, err := e.rt.ListContainers(ctx, name)
+	listed, err := e.rt.ListContainers(ctx, name)
 	if err != nil {
 		return err
+	}
+	// A replica that the last deployment replaced may still be on its way
+	// out: it is waited for, not retired a second time.
+	var containers []docker.Container
+	for _, c := range listed {
+		if !e.draining(c.ID) {
+			containers = append(containers, c)
+		}
 	}
 	for i, err := range e.retireAll(ctx, containers) {
 		if err != nil {
 			return fmt.Errorf("remove container %s: %w", containers[i].Name, err)
 		}
+	}
+	if err := e.awaitDrains(ctx, name); err != nil {
+		return err
 	}
 	// Its images go too, unless another application keeps them. Listed
 	// before the records are deleted; the volumes stay, on purpose.
@@ -117,82 +129,96 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 	if err := e.store.DeleteApplication(ctx, app.ID); err != nil {
 		return err
 	}
+	e.traffic.forget(app.ID)
 	e.syncProxyBestEffort(ctx, name)
 	removed := e.pruneImages(ctx, images)
 	// Its history goes with it, so the log is the only record of who did this.
-	e.log.Info("application deleted", "app", name, "by", actorFrom(ctx), "containers", len(containers), "images", removed)
+	e.log.Info("application deleted", "app", name, "by", actorFrom(ctx), "containers", len(listed), "images", removed)
 	return nil
 }
 
 // Recover reconciles state left behind by a crash or restart of the agent.
 // Call it once at startup, before serving requests.
 //
-// Deployments found mid-flight can no longer complete: they are marked FAILED.
-// Containers that belong to a known application but not to its active
-// deployment are leftovers and are removed. Containers of applications the
-// database does not know are never touched — if the database is ever lost,
-// the agent must not tear down what is running.
+// Deployments found mid-flight are resumed (see resume.go): each takes its
+// application's lock here, before anything else can, and goes on in the
+// background from the state it was left in. One that cannot be resumed is
+// marked FAILED. Containers that belong to a known application but neither to
+// its active deployment nor to one that resumes are leftovers and are
+// removed, in the background as well: starting must not wait for anybody's
+// grace period. Containers of applications the database does not know are
+// never touched — if the database is ever lost, the agent must not tear down
+// what is running.
 func (e *Engine) Recover(ctx context.Context) error {
 	interrupted, err := e.store.ListDeployments(ctx, store.DeploymentFilter{Statuses: InFlightStatuses()})
 	if err != nil {
 		return err
 	}
-	for i := range interrupted {
-		d := &interrupted[i]
-		e.log.Warn("found interrupted deployment", "app", d.Application, "deployment", d.ID, "status", d.Status)
-		if err := e.transitionWithError(ctx, d, api.StatusFailed, "agent restarted during deployment"); err != nil {
-			return err
-		}
-	}
-	// Likewise the jobs: whoever was waiting on them is gone, and so are
-	// their containers below.
+	// The jobs first: whoever was waiting on them is gone, and so are their
+	// containers below. A deployment whose hook was among them finds it
+	// marked, and does not run it again.
 	if n, err := e.store.MarkJobRunsInterrupted(ctx, time.Now()); err != nil {
 		return err
 	} else if n > 0 {
 		e.log.Warn("found interrupted job runs", "runs", n)
 	}
 
-	apps, err := e.store.ListApplications(ctx)
-	if err != nil {
-		return err
+	inFlight := map[string]int{}
+	for _, d := range interrupted {
+		inFlight[d.Application]++
 	}
-	active := make(map[string]int64, len(apps)) // 0 = known app without an active deployment
-	for _, app := range apps {
-		active[app.Name] = 0
-		if app.ActiveDeploymentID != nil {
-			active[app.Name] = *app.ActiveDeploymentID
-		}
-	}
-
-	containers, err := e.rt.ListContainers(ctx, "")
-	if err != nil {
-		return err
-	}
-	var leftovers []docker.Container
-	for _, c := range containers {
-		if activeID, known := active[c.App]; known && (c.Job != "" || c.DeploymentID != activeID) {
-			e.log.Warn("removing leftover container", "container", c.Name, "app", c.App, "deployment", c.DeploymentID)
-			leftovers = append(leftovers, c)
+	var resumed []*rollout
+	resuming := map[int64]bool{}
+	for _, d := range interrupted {
+		e.log.Warn("found interrupted deployment", "app", d.Application, "deployment", d.ID, "status", d.Status)
+		ok, why := resumable(d, inFlight[d.Application])
+		if !ok {
+			if err := e.failInterrupted(ctx, &d, why); err != nil {
+				return err
+			}
 			continue
 		}
-		// What each replica answers to on the services network is known to
-		// Docker alone. A replica created before that network existed answers
-		// to nothing, and the first SyncProxy gives it its names — before the
-		// proxy is told to look for them.
-		if in, err := e.rt.InspectContainer(ctx, c.ID); err == nil && len(in.ServiceNames) > 0 {
-			e.mu.Lock()
-			e.names[c.ID] = in.ServiceNames
-			e.mu.Unlock()
+		// Nothing else runs yet, so the lock is free; it is held from here
+		// until the deployment has ended, as if it had never been let go.
+		if wait, err := e.tryLock(d.Application, false); wait != nil || err != nil {
+			return fmt.Errorf("resume deployment %d of %s: %w", d.ID, d.Application, ErrBusy)
 		}
-	}
-	for i, err := range e.retireAll(ctx, leftovers) {
-		if err != nil {
-			e.log.Error("could not remove leftover container", "container", leftovers[i].Name, "error", err)
+		r := e.newRollout(d)
+		r.resumed = true
+		if err := r.prepare(ctx); err != nil {
+			e.clearRouteOverride(d.Application)
+			e.unlock(d.Application)
+			if err := e.failInterrupted(ctx, r.d, err.Error()); err != nil {
+				return err
+			}
+			continue
 		}
+		resumed = append(resumed, r)
+		resuming[d.ID] = true
 	}
-	// Covers both the deployments failed above and any that were ACTIVE but
-	// interrupted while retiring their predecessor.
-	return e.store.CompleteAllDeployments(ctx, time.Now())
+
+	leftovers, err := e.recoverLeftovers(ctx, resuming)
+	if err != nil {
+		return err
+	}
+	for _, c := range leftovers {
+		e.retireInBackground(c, e.gracePeriodOf(ctx, c.DeploymentID), nil)
+	}
+	// Covers the deployments failed above and any that were settled — ACTIVE,
+	// or FAILED — but interrupted while cleaning up; reconciliation finishes
+	// that. The resumed ones complete when they are done.
+	ids := make([]int64, 0, len(resumed))
+	for _, r := range resumed {
+		ids = append(ids, r.d.ID)
+	}
+	if err := e.store.CompleteDeploymentsExcept(ctx, ids, time.Now()); err != nil {
+		return err
+	}
+	for _, r := range resumed {
+		e.log.Info("resuming deployment", "app", r.d.Application, "deployment", r.d.ID, "status", r.d.Status)
+		e.launch(r)
+	}
+	return nil
 }
 
 func (e *Engine) appEvent(ctx context.Context, app store.Application, message string) {

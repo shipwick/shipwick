@@ -86,6 +86,13 @@ func (s *Server) Handler() http.Handler {
 	s.imageRoutes(routes)
 	s.secretRoutes(routes)
 	s.staticRoutes(routes)
+	s.validateRoutes(routes)
+	s.backupRoutes(routes)
+	s.trafficRoutes(routes)
+	s.registryRoutes(routes)
+	s.certificateRoutes(routes)
+	s.prometheusRoutes(routes)
+	s.exportRoutes(routes)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, api.CodeEndpointNotFound, "no such endpoint: "+r.Method+" "+r.URL.Path, nil)
@@ -234,12 +241,15 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 	var missingSecrets *deploy.MissingSecretsError
 	var badUpload *deploy.InvalidUploadError
 	var volumeInUse *deploy.VolumeInUseError
+	var badCertificate *deploy.InvalidCertificateError
+	var wildcard *deploy.WildcardError
+	var unusableSecret *deploy.UnusableSecretError
 	switch {
 	case errors.As(err, &conflict):
 		// Shaped like a validation error, because to the user it is one: a
 		// line of their deploy.yaml needs to change.
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{
-			"fields": []spec.FieldError{{Field: conflict.Field, Message: "already served by " + conflict.Owner}},
+			"fields": []spec.FieldError{{Field: conflict.Field, Message: conflict.Message()}},
 		})
 	case errors.As(err, &portConflict):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{
@@ -271,6 +281,8 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 	case errors.As(err, &missingSecrets):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": missingSecrets.Fields()})
+	case errors.As(err, &unusableSecret):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": unusableSecret.Fields()})
 	case errors.Is(err, store.ErrTooManySecrets):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 	case errors.Is(err, deploy.ErrImageNotBuilt):
@@ -285,6 +297,16 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusNotFound, api.CodeNotFound, err.Error(), nil)
 	case errors.As(err, &volumeInUse):
 		writeError(w, http.StatusConflict, api.CodeVolumeInUse, volumeInUse.Error(), map[string]any{"application": volumeInUse.App})
+	case errors.Is(err, deploy.ErrIncompleteImage):
+		writeError(w, http.StatusConflict, api.CodeImageIncomplete, err.Error(), nil)
+	case errors.As(err, &badCertificate):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidCertificate, badCertificate.Reason, nil)
+	case errors.Is(err, store.ErrTooManyCertificates):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+	case errors.As(err, &wildcard):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": wildcard.Fields()})
+	case errors.Is(err, deploy.ErrTrafficUnavailable):
+		writeError(w, http.StatusConflict, api.CodeTrafficUnavailable, err.Error(), nil)
 	default:
 		// Callers are authenticated operators, so the cause is more useful
 		// to them than an opaque message. Errors never contain env values.

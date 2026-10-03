@@ -28,12 +28,12 @@ func renderDockerfile(p project) (string, error) {
 }
 
 // renderDockerignore writes the .dockerignore that goes with the Dockerfile.
-// Nuxt, Next and plain Node share one: their output folders differ, and
-// excluding every one of them costs nothing.
+// Nuxt, Next, SvelteKit and plain Node share one: their output folders
+// differ, and excluding every one of them costs nothing.
 func renderDockerignore(p project) (string, error) {
 	name := string(p.Kind)
 	switch p.Kind {
-	case kindNuxt, kindNext:
+	case kindNuxt, kindNext, kindSvelte:
 		name = string(kindNode)
 	}
 	var b bytes.Buffer

@@ -10,7 +10,7 @@ RUN {{.Node.Run}} build
 RUN {{.Node.Prune}}
 
 FROM node:24-alpine
-ENV NODE_ENV=production PORT={{.Port}}
+ENV NODE_ENV=production{{if .Node.Host}} HOST=0.0.0.0{{end}} PORT={{.Port}}
 WORKDIR /app
 COPY --from=build --chown=node:node /src ./
 {{else}}# Install the production dependencies only, and run as the unprivileged node user.

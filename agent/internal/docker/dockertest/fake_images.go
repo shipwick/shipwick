@@ -28,6 +28,9 @@ func (f *Fake) LoadImage(_ context.Context, archive io.Reader) ([]string, error)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.LoadErr != nil {
+		return nil, f.LoadErr
+	}
 	for _, ref := range refs {
 		f.local[ref] = true
 	}

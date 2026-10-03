@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Application } from '~/types/api'
+import { addressOf, applicationUrl } from '~/utils/spec'
 import { applicationStatusDisplay, sortBySeverity } from '~/utils/status'
 
 useHead({ title: 'Applications' })
@@ -15,7 +16,7 @@ const rows = computed(() => {
   const list = apps.data.value ?? []
   const filtered = needle === ''
     ? list
-    : list.filter(a => a.name.includes(needle) || a.domain.toLowerCase().includes(needle) || a.version.toLowerCase().includes(needle))
+    : list.filter(a => a.name.includes(needle) || addressOf(a.domain, a.path).toLowerCase().includes(needle) || a.version.toLowerCase().includes(needle))
   return sortBySeverity(filtered)
 })
 
@@ -107,13 +108,16 @@ function replicaTone(app: Application): string {
                   <span v-else>—</span>
                 </td>
                 <td data-label="Domain">
+                  <!-- With a path, several applications share one domain: the address is domain and path. -->
                   <a
-                    v-if="app.domain"
-                    :href="`https://${app.domain}`"
+                    v-if="applicationUrl(app)"
+                    :href="applicationUrl(app)!"
                     target="_blank"
                     rel="noopener noreferrer"
                     class="mono inline-flex items-center gap-1 text-fg-muted hover:text-fg hover:underline"
-                  >{{ app.domain }}<UiIcon name="external" :size="12" /></a>
+                  >{{ addressOf(app.domain, app.path) }}<UiIcon name="external" :size="12" /></a>
+                  <!-- A wildcard is a pattern, not an address to open. -->
+                  <span v-else-if="app.domain" class="mono text-fg-muted" title="Every name one label below is served alike">{{ addressOf(app.domain, app.path) }}</span>
                   <span v-else class="text-fg-faint">—</span>
                 </td>
                 <td data-label="Updated" class="right text-fg-muted">

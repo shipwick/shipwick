@@ -15,9 +15,9 @@ ones below it:
 
 | Role | May |
 |---|---|
-| `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics, jobs and their runs, volumes, the names of `/secrets` |
-| `deploy` | And change what runs: `deploy`, `redeploy`, `rollback`, `stop`, `start`, `run`, starting a job, sending an image or a static folder |
-| `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints, setting and removing `/secrets` |
+| `read` | See everything: `GET /server`, `/applications…`, `/deployments…`, logs, events, metrics, traffic and requests, jobs and their runs, volumes, the backups of an application, `/registries`, `/certificates`, `/standby`, `GET /metrics`, the names of `/secrets` |
+| `deploy` | And change what runs: `deploy`, `validate`, `redeploy`, `rollback`, `stop`, `start`, `run`, starting a job, sending an image or a static folder, taking and verifying a backup |
+| `admin` | And everything else: `DELETE /applications/:name`, the `/tokens` endpoints, setting and removing `/secrets`, `/registries` and `/certificates`, rotating the key, restoring, downloading and removing a backup, the backups of the agent's state, `/export`, `/import`, `/exports`, pulling to and promoting a standby |
 
 There are two kinds of token. The **root token** is the one the agent is
 configured with — `SHIPWICK_AGENT_TOKEN`, or the one generated on first start.
@@ -70,7 +70,10 @@ Failure — `details` is always an object:
 | HTTP | `code` | Meaning |
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Malformed path or query parameter; body/URL name mismatch; invalid JSON, an unknown field or an invalid `image` in a redeploy or rollback body; such a body larger than 4 KB; a missing or invalid `command` in a run body; an image archive that is not sent as `application/x-tar`, or that does not carry exactly one image tagged `shipwick.local/<name>:<tag>`; a deploy.yaml with `build` but no `image`, or a redeploy of such an application with an image from elsewhere; a static upload that is not `application/x-tar`, holds no files, or holds anything but files and directories; a static `deploy` without `?static=`, or `?static=` on a container application |
-| 400 | `INVALID_CONFIG` | deploy.yaml failed validation; `details.fields` lists **every** problem. Also returned when a hostname is already served by another application (as its domain, an alias or a redirect) or by the agent: one entry whose `field` names the offending line — `domain`, `aliases[0]`, `redirects[1]` — and whose `message` names the owner; and with field `publish[i].host` when a server port the configuration publishes is already published by another application, or is one the agent or the proxy listens on. By `redeploy` and `rollback` too, since a stored configuration's hostnames and ports may have been taken since. Also when an `env` value refers to a `${NAME}` that is not among the stored [secrets](#secrets): one entry per reference, `field` `env.<VARIABLE>`, `expected` the command that stores it |
+| 400 | `INVALID_CONFIG` | deploy.yaml failed validation; `details.fields` lists **every** problem. Also returned when a hostname is already served by another application (as its domain, an alias or a redirect) or by the agent: one entry whose `field` names the offending line — `domain`, `aliases[0]`, `redirects[1]` — and whose `message` names the owner; and with field `publish[i].host` when a server port the configuration publishes is already published by another application, or is one the agent or the proxy listens on. By `redeploy` and `rollback` too, since a stored configuration's hostnames and ports may have been taken since. Also when an `env` value refers to a `${NAME}` that is not among the stored [secrets](#secrets): one entry per reference, `field` `env.<VARIABLE>`, `expected` the command that stores it. See [Paths and the proxy block](#paths-and-the-proxy-block) for what `path` and `proxy` add |
+| 400 | `REGISTRY_LOGIN_FAILED` | A registry did not accept the credential of a `PUT /registries/:registry`, or could not be asked; `details: {registry, refused}`. Nothing was stored |
+| 400 | `INVALID_CONFIG` | Also for a wildcard hostname (`*.example.com` as `domain` or an alias) that no certificate can be had for: the agent has no DNS challenge configured and no supplied [certificate](#certificates) covers it. One entry on the field that names it; `expected` says both ways out |
+| 400 | `INVALID_CERTIFICATE` | The certificate or key in a `PUT /certificates/:hostname` cannot serve that hostname; `message` is a sentence that says why, see [Certificates](#certificates) |
 | 401 | `UNAUTHORIZED` | Missing, wrong or revoked token |
 | 403 | `FORBIDDEN` | The token's role does not cover this endpoint; `details: {role, required}` |
 | 404 | `NOT_FOUND` | Unknown application, deployment or token, including a rollback's `deployment_id` that does not exist; a `deploy` whose `?static=` digest names no upload the agent has |
@@ -82,7 +85,18 @@ Failure — `details` is always an object:
 | 409 | `APPLICATION_RUNNING` | A volume restore was asked of an application that is not stopped |
 | 409 | `JOB_ALREADY_RUNNING` | A run of this job has not finished yet; a job runs one at a time |
 | 409 | `STATIC_APPLICATION` | Logs, metrics, jobs or a one-off command were asked of an application the proxy serves from a folder; it has no containers |
+| 409 | `IMAGE_INCOMPLETE` | An image archive left out layers the server does not have; nothing was loaded. Send the whole archive |
 | 409 | `VOLUME_IN_USE` | The volume belongs to an application that still exists; `details: {application}`. Delete the application first, or replace the data with a restore |
+| 409 | `KEY_ROTATION_PENDING` | The encryption key was already rotated since the agent started, and the agent's environment still holds the old one; `details: {key_file}` |
+| 409 | `TRAFFIC_UNAVAILABLE` | Traffic or requests were asked of an agent that has no access log to read: no proxy, or one that is not the `caddy` container of its compose project |
+| 409 | `BACKUP_BUSY` | The backup is still being taken, verified, restored or removed; or a backup of the agent's state is already running |
+| 409 | `BACKUP_NOT_USABLE` | A verification, a restore or a download was asked of a backup that failed, so nothing was kept of it; or of one whose files do not decrypt with the agent's passphrase |
+| 409 | `NO_VOLUMES` | A backup was asked of an application without volumes |
+| 400 | `INVALID_EXPORT` | The body of an import is not an export, its passphrase does not match, or it breaks off |
+| 409 | `IMPORT_IN_PROGRESS` | An import is running; a server takes one at a time |
+| 409 | `EXPORT_IN_PROGRESS` | An export to where backups go is being written already |
+| 409 | `STANDBY_NOT_CONFIGURED` | An import from the bucket was asked of an agent that has no bucket to read exports from |
+| 409 | `BACKUPS_NOT_ENCRYPTED` | A backup of the agent's state was asked for and `SHIPWICK_BACKUP_PASSPHRASE` is not set; or an encrypted backup was asked for and the agent no longer has a passphrase |
 | 429 | `RATE_LIMITED` | A wrong token, after 20 authentications from this address failed within a minute; `Retry-After` says in how many seconds wrong tokens are answered `401` again. A valid token is never refused |
 | 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB; a volume archive larger than 10 GB; an image archive larger than 4 GB; a static folder larger than 512 MB |
 | 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down |
@@ -93,10 +107,11 @@ Failure — `details` is always an object:
 | Method | Path | Role | |
 |---|---|---|---|
 | `GET` | `/health` | — | Liveness. No token. `{status, version}` |
-| `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `proxy: {enabled, reachable, error, routes}`, `notifications: {webhook}` and `token: {name, role}` — the caller's own |
-| `GET` | `/applications` | read | Summaries of all applications |
-| `GET` | `/applications/:name` | read | Detail: status, active spec (env masked), containers |
+| `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `proxy: {enabled, reachable, error, routes, dns_challenge}` (`dns_challenge`: certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards), `notifications: {webhook}`, `backups: {destination, encrypted, state_last_at, state_error}` (see [Backups the agent takes](#backups-the-agent-takes)), `token: {name, role}` — the caller's own — `dashboard_url`: `https://<SHIPWICK_DASHBOARD_DOMAIN>`, or `""` when the dashboard has no hostname (an agent before 0.5 leaves the field out), and `disk` and `alerts`, see [Alerts and disk](#alerts-and-disk) |
+| `GET` | `/applications` | read | Summaries of all applications; each with `domain` and, when it serves only a part of it, `path` |
+| `GET` | `/applications/:name` | read | Detail: status, active spec (env values and basic-auth passwords masked), containers, and the [certificate](#certificate-status) of each hostname |
 | `POST` | `/applications/:name/deploy` | deploy | Start a deployment → `202`. A static application adds `?static=<digest>`, see [Static folders](#static-folders) |
+| `POST` | `/applications/:name/validate` | deploy | Ask whether a deployment of the document in the body would be accepted, without deploying it → `{valid}`, see [Validating before deploying](#validating-before-deploying) |
 | `POST` | `/applications/:name/redeploy` | deploy | Deploy the active configuration again; optional body `{"image": "…"}` → `202` |
 | `POST` | `/applications/:name/rollback` | deploy | Deploy the configuration of an earlier successful deployment; optional body `{"deployment_id": 12}`, default: the most recent one → `202` |
 | `POST` | `/applications/:name/stop` | deploy | Stop all replicas; the app stays stopped |
@@ -108,17 +123,25 @@ Failure — `details` is always an object:
 | `GET` | `/applications/:name/metrics` | read | Point-in-time CPU and memory of the application and each replica, see [Metrics](#metrics) |
 | `GET` | `/applications/:name/metrics/history?since=1h` | read | CPU and memory of each replica over the last `1h`, `24h` or `7d`, see [Metrics history](#metrics-history) |
 | `GET` | `/deployments?application=&limit=50` | read | History, newest first (max 500) |
-| `GET` | `/deployments/:id` | read | One deployment with spec (env masked) and events |
+| `GET` | `/deployments/:id` | read | One deployment with spec (env values and basic-auth passwords masked) and events |
 | `GET` | `/tokens` | admin | The stored tokens, without their values, see [Tokens](#tokens) |
 | `POST` | `/tokens` | admin | Create a token; the value is in this response and nowhere else → `201` |
 | `DELETE` | `/tokens/:name` | admin | Revoke a token → `204` |
 | `GET` | `/secrets` | read | The secrets stored on the server, names and dates only, see [Secrets](#secrets) |
 | `PUT` | `/secrets/:name` | admin | Store a secret, creating or replacing it; body `{"value": "…"}` → `204` |
 | `DELETE` | `/secrets/:name` | admin | Remove a secret → `204` |
+| `GET` | `/registries` | read | The registries the agent holds a credential for, without passwords, see [Registry credentials](#registry-credentials) |
+| `PUT` | `/registries/:registry` | admin | Check a credential against its registry and store it, creating or replacing; body `{"username": "…", "password": "…"}` → `204`; `400 REGISTRY_LOGIN_FAILED` when the registry refuses it |
+| `DELETE` | `/registries/:registry` | admin | Remove a registry's credential → `204` |
+| `POST` | `/server/rotate-key` | admin | Replace the key stored secrets are encrypted with and re-encrypt them, see [Key rotation](#key-rotation) |
+| `GET` | `/certificates` | read | The certificates supplied by the operator: what each says about itself, never the key or the PEM, see [Certificates](#certificates) |
+| `PUT` | `/certificates/:hostname` | admin | Store a certificate and its key under a hostname, creating or replacing it; body `{"certificate": "<PEM chain>", "key": "<PEM>"}` → `200` with the stored certificate |
+| `DELETE` | `/certificates/:hostname` | admin | Remove a certificate → `204` |
 | `GET` | `/applications/:name/volumes` | read | The volumes of the active deployment: `[{name, path}]` |
 | `GET` | `/applications/:name/volumes/:volume/archive` | admin | The volume's contents as a tar archive, see [Volume backups](#volume-backups) |
 | `PUT` | `/applications/:name/volumes/:volume/archive` | admin | Replace the volume's contents with the tar archive in the body → `204` |
 | `POST` | `/applications/:name/images` | deploy | Load an image archive (`docker save` format) for the application, see [Images built by the CLI](#images-built-by-the-cli) → `201` |
+| `POST` | `/applications/:name/images/missing` | deploy | Which layers of an image about to be sent the server lacks; body `{"layers": ["sha256:…"]}`, see [Images built by the CLI](#images-built-by-the-cli) |
 | `GET` | `/volumes` | read | Every volume Shipwick created, with its application and size, see [Volumes of deleted applications](#volumes-of-deleted-applications) |
 | `DELETE` | `/volumes/:name` | admin | Remove a volume whose application was deleted → `204`; `409 VOLUME_IN_USE` while the application exists |
 | `GET` | `/applications/:name/jobs` | read | The scheduled jobs of the active deployment, each with its last and next run, see [Jobs and one-off commands](#jobs-and-one-off-commands) |
@@ -127,12 +150,39 @@ Failure — `details` is always an object:
 | `POST` | `/applications/:name/jobs/:job/run` | deploy | Start a scheduled job now → `202` |
 | `POST` | `/applications/:name/run` | deploy | Run a one-off command; body `{"command": ["…"]}` → `202` |
 | `PUT` | `/applications/:name/static` | deploy | Upload the folder of a static application as a tar archive → `{digest, size_bytes, files}`, see [Static folders](#static-folders) |
+| `GET` | `/applications/:name/traffic?since=1h` | read | Requests, status classes, bytes and latency percentiles over the last `1h`, `24h` or `7d`, see [Traffic](#traffic) |
+| `GET` | `/applications/:name/requests?tail=50` | read | The most recent requests as the proxy logged them (max 200), see [Requests](#requests) |
+| `GET` | `/applications/:name/backups?limit=50` | read | The backups the agent took of the application, newest first (max 500), see [Backups the agent takes](#backups-the-agent-takes) |
+| `GET` | `/applications/:name/backups/:id` | read | One backup, with the output of its last verification |
+| `POST` | `/applications/:name/backups` | deploy | Take a backup now → `202` |
+| `POST` | `/applications/:name/backups/:id/verify` | deploy | Prove that the backup restores; `:id` may be `latest` → `202` |
+| `POST` | `/applications/:name/backups/:id/restore` | admin | Replace the application's volumes with the backup's; the application must be stopped → `202` |
+| `GET` | `/applications/:name/backups/:id/volumes/:volume/archive` | admin | One volume of the backup as a tar archive, decrypted |
+| `DELETE` | `/applications/:name/backups/:id` | admin | Remove the backup from every destination → `204` |
+| `GET` | `/server/backups?limit=50` | admin | The backups of the agent's own state, newest first |
+| `GET` | `/server/backups/:id` | admin | One of them |
+| `POST` | `/server/backups` | admin | Back up the agent's state now → `202` |
+| `POST` | `/export` | admin | Everything the server runs as one encrypted file; body `{"passphrase", "applications"?}`, see [Export, import and the standby](#export-import-and-the-standby) |
+| `POST` | `/import?stopped=false&overwrite=false` | admin | Take in an export sent as the body and deploy what it holds; answers when it is done |
+| `GET` | `/import` | admin | The import that is running, or ran last |
+| `GET` | `/exports?limit=50` | admin | The exports written to where backups go, newest first |
+| `GET` | `/exports/:id` | admin | One of them |
+| `POST` | `/exports` | admin | Write one there now → `202` |
+| `GET` | `/standby` | read | The applications that were imported stopped, the DNS records a promotion asks for, and how the scheduled import is doing |
+| `POST` | `/standby/pull` | admin | Import the newest export in the bucket now, stopped → `202` |
+| `POST` | `/standby/promote` | admin | Start the applications that were imported stopped, in order |
+
+`GET /metrics` is the one authenticated endpoint outside `/api/v1`, because
+that is where a scraper looks; it needs the `read` role and answers in the
+Prometheus text format, not in the envelope: see
+[Prometheus metrics](#prometheus-metrics).
 
 ### Deploying
 
 The body **is** the deploy.yaml document. JSON is accepted as well.
 
-`${NAME}` placeholders in `env` values are filled in by the agent from the
+`${NAME}` placeholders in `env` values, and in the passwords of
+`proxy.basic_auth`, are filled in by the agent from the
 [secrets](#secrets) stored on the server, before the deployment is recorded;
 the record holds the values, so a later change of a secret does not reach a
 redeploy or rollback of it. `$${NAME}` there is a literal `${NAME}`. A
@@ -186,6 +236,107 @@ step   Deployment successful
 On failure there is a `state` event `FAILED: <reason>` and, if a replica
 crashed, a `log` event holding its last 20 lines of output. A rollback adds
 `state` events `ROLLBACK`, `RESTORING`, `ROLLED_BACK` and steps narrating it.
+A deployment that ends `FAILED` or `ROLLED_BACK` removes the image it named
+unless something else needs it, and says so in a step.
+
+`completed_at` does not wait for the replicas that were replaced to exit.
+They are out of rotation and have been sent `SIGTERM`; each then has the
+application's `deploy.stop_timeout` (10s unless set) before it is killed, and
+is removed after that. One that had to be killed is reported in the
+application's [events](#events), at level `warn`. A deployment that starts
+while one is still stopping waits for it before it starts a replica, and says
+how long it waited.
+
+A deployment that is in flight when the agent stops — an upgrade restarts
+it — is neither failed nor completed: the agent resumes it when it starts, and
+its events then include the step `Resumed after the agent restarted`. To a
+client that polls, the agent is unreachable for a moment and the deployment
+then goes on; keep polling. One that cannot be resumed ends `FAILED` with an
+`error` that begins `agent restarted during deployment`, or that says its
+pre-deploy command was interrupted.
+
+### Validating before deploying
+
+`POST /applications/:name/validate` takes the same body as `deploy` and
+answers what `deploy` would answer, without deploying: nothing is recorded,
+pulled or started, and the application is not locked — while a deployment
+runs, `validate` still answers, where `deploy` would answer
+`409 DEPLOYMENT_IN_PROGRESS`.
+
+```bash
+curl -X POST http://localhost:9000/api/v1/applications/my-api/validate \
+  -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" \
+  --data-binary @deploy.yaml
+```
+
+```json
+{ "data": { "valid": true } }
+```
+
+A document that would be refused gets the error `deploy` would give, status
+and body alike: `400 INVALID_CONFIG` with `details.fields` for a field that
+does not validate, a hostname or a published port that something else holds,
+or a `${NAME}` in `env` that is not among the stored secrets;
+`400 INVALID_REQUEST` when the document names another application than the
+URL.
+
+It is meant to be asked before an image is built or a folder uploaded, so it
+does not ask for either: a document with `build` and no `image` is valid here
+(`deploy` refuses it), and a static application needs no `?static=`. An agent
+that predates the endpoint answers `404 ENDPOINT_NOT_FOUND`; deploy without
+asking then.
+
+### Paths and the proxy block
+
+`path` and `proxy` in the deploy.yaml are part of the stored configuration,
+and come back in every `spec`:
+
+```json
+{
+  "domain": "example.com",
+  "path": "/api",
+  "proxy": {
+    "strip_prefix": true,
+    "headers": { "X-Frame-Options": "DENY" },
+    "basic_auth": [
+      { "path": "/api/admin", "username": "admin", "password": "********" }
+    ],
+    "redirects": [
+      { "from": "/api/old", "to": "/api/new", "status": 308 }
+    ]
+  },
+  "static": { "dir": "dist", "fallback": "index.html" }
+}
+```
+
+Each of `path`, `proxy` and its four members is left out when it is not set,
+and so is `static.fallback`; `basic_auth[].path` is left out for an account
+of the whole application; `redirects[].status` is always present, `308` when
+the document named none. `path: /` is stored as no path.
+
+**A password is always `********`** in a response, like an `env` value. In
+the request it is the password, or a `${NAME}` that the agent fills in from
+the stored [secrets](#secrets) exactly as it does for `env`; `$${NAME}` is a
+literal `${NAME}`. The record holds the value, encrypted. A name that is not
+stored is refused with `field` `proxy.basic_auth[i].password` and the same
+message and `expected` as for an `env` value; a stored value that cannot be a
+password — shorter than 8 characters, longer than 72 bytes — is refused under
+the same field, `with ${NAME} filled in from the server's secrets, the
+password is too short: at least 8 characters`, without repeating it.
+
+Applications may share a hostname when their paths differ. `400
+INVALID_CONFIG` when they do not: `field` is `path` when this application
+names one — `example.com/api is already served by application "api";
+applications share a domain under different paths` — and `domain` or
+`aliases[i]` when it names none and another application has the rest of the
+hostname. A hostname in another application's `redirects`, and the agent's
+and the dashboard's own, cannot be shared under any path. Paths are compared
+without regard to case.
+
+The application views carry `path` next to `domain`, left out when there is
+none; the address of an application is `https://<domain><path>`. The step
+event of a deployment with a path reads `Routed https://example.com/api to 2
+replicas`.
 
 ### Redeploy and rollback
 
@@ -273,6 +424,225 @@ curl -X PUT -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" -H "Content-Type: a
 Listing volumes needs the `read` role; both archive endpoints need `admin`: a
 backup carries the application's data, a restore replaces it.
 
+### Backups the agent takes
+
+Where the endpoints above hand an archive to the caller, these are about the
+backups the agent takes and keeps itself: on the schedule under `backups` in
+deploy.yaml, or on request. A *backup* is one run:
+
+```json
+{ "id": 12, "trigger": "schedule", "status": "succeeded",
+  "started_at": "2026-03-01T03:00:00Z", "completed_at": "2026-03-01T03:00:41Z",
+  "volumes": [{ "volume": "data", "size_bytes": 2254857830 }],
+  "destinations": ["local", "s3"], "encrypted": true, "error": "",
+  "activity": "", "verified_at": "2026-03-01T09:12:00Z", "verify_error": "",
+  "restored_at": null, "restore_error": "" }
+```
+
+`trigger` is `schedule` or `manual`. `status` is `running`, `succeeded` or
+`failed`; a failed backup has `error` set, empty `volumes` and `destinations`,
+and no files anywhere. `size_bytes` is the tar archive's size, before
+encryption. `destinations` lists where it went, of `local` (the agent's backup
+directory) and `s3`; `encrypted` says whether it was written with the agent's
+passphrase. `activity` is `verify` or `restore` while one of them is in
+progress and `""` otherwise. `verified_at` is when the backup last proved to
+restore and `verify_error` why its last verification failed; one of them at
+most is set, and the same goes for `restored_at` and `restore_error`.
+`GET …/backups/:id` adds `verify_output`: the last 200 lines (64 KB) the
+verification's container wrote.
+
+`POST /applications/:name/backups` answers `202` with the backup (`status:
+"running"`) and a `Location` to poll until `completed_at` is set. It works
+without a `backups` block in deploy.yaml; with one, its `before` command runs
+first and `stop` is honoured. The application is held until the archives are
+written: other operations get `409 DEPLOYMENT_IN_PROGRESS`, as during a
+deployment, and wait up to 30 seconds instead when the backup was started by
+the schedule. `409 NO_VOLUMES` if the application has none.
+
+`POST …/backups/:id/verify` restores the backup into scratch volumes, starts
+one container of the application's current image on them and holds it to the
+application's health check, as a deployment holds a new replica; without a
+health check, to staying up for the stabilization window. `:id` may be
+`latest`: the newest successful backup, `404` if there is none. The answer is
+`202` with the backup, `activity: "verify"`; poll until `activity` is empty,
+then read `verified_at` or `verify_error`. The container and the volumes are
+removed either way.
+
+`POST …/backups/:id/restore` replaces the application's volumes with the
+backup's archives, one after the other. As with `PUT …/archive`, the
+application must be stopped (`409 APPLICATION_RUNNING`) and stays stopped, and
+each restored volume adds the same application event. `202` with `activity:
+"restore"`; poll until it is empty, then read `restored_at` or
+`restore_error`. A backup holding a volume the active deployment no longer
+mounts is `404`.
+
+`GET …/backups/:id/volumes/:volume/archive` streams the archive like
+`GET …/volumes/:volume/archive` does, decrypted, with `Content-Length` set to
+its size and `Content-Disposition: attachment;
+filename="<app>-<volume>-backup-<id>.tar"`. A backup that does not decrypt is
+`409 BACKUP_NOT_USABLE` when that shows in its first chunk, and a connection
+cut short of `Content-Length` when it shows later.
+
+`verify`, `restore` and the archive refuse a backup that failed with `409
+BACKUP_NOT_USABLE`; they and `DELETE` refuse one that is still running, or
+being verified or restored, with `409 BACKUP_BUSY`. `DELETE` removes the
+backup's files from the directory and the bucket, then its record. A failed backup adds an event of `type: "backup"` to
+the application's feed and is sent to the webhook as `backup.failed`; a
+verification adds an event either way.
+
+**The agent's own state** — its database and the key that encrypts the secrets
+in it — is backed up daily under the same shape, with `volumes` naming the two
+files (`shipwick.db`, `encryption.key`). `POST /server/backups` takes one now:
+`202`, poll `GET /server/backups/:id` until `completed_at` is set. It is `409
+BACKUPS_NOT_ENCRYPTED` without `SHIPWICK_BACKUP_PASSPHRASE`: the key is never
+written unencrypted. There is no endpoint that restores the state; that is
+done with the agent stopped (handbook, *Restoring the agent's state*).
+
+`GET /server` summarizes it:
+
+```json
+"backups": { "destination": "s3", "encrypted": true,
+             "state_last_at": "2026-03-01T03:17:04Z", "state_error": "" }
+```
+
+`destination` is `s3` when a bucket is configured, `local` when backups stay
+in the agent's directory, and `none` for an agent started without anywhere to
+keep them. `state_last_at` is the last successful backup of the agent's state,
+`null` if there has been none. `state_error` is why there is none — no
+passphrase — or why the last attempt failed, and empty when the last attempt
+succeeded. Agents older than this feature send no `backups` object.
+
+### Export, import and the standby
+
+An export is everything the server would need to be built again elsewhere:
+every application's active configuration with its values in clear, the stored
+secrets, registry credentials and certificates, the images that exist only on
+the server, the folders of static applications and an archive of every volume.
+It exists only encrypted, in the format backups use
+([architecture.md](architecture.md#moving-a-server-and-standing-by) has its
+layout). Everything here takes `admin`, except `GET /standby`.
+
+**`POST /export`** streams one:
+
+```json
+{ "passphrase": "at least twelve characters", "applications": ["db", "api"] }
+```
+
+`applications` is optional and limits the export to those; an unknown name is
+`404 NOT_FOUND`. The answer is `200` with `Content-Type:
+application/octet-stream` and `Content-Disposition: attachment;
+filename="shipwick-export-<time>.swexport"`, sent chunked: the length is not
+known beforehand. What fails before the first byte is an ordinary error — an
+application that is being deployed when the export begins is `409
+DEPLOYMENT_IN_PROGRESS`, with its name in the message. What fails later ends the body without the file's last
+chunk, so that it does not decrypt, and says why in the trailer
+`X-Shipwick-Export-Error`. A client should read what it received to its end
+with the passphrase before calling it an export. Nothing is written on the
+server, and the passphrase is not kept.
+
+**`POST /import?stopped=false&overwrite=false`** takes an export as the body
+(`Content-Type: application/octet-stream`) and its passphrase in the header
+`X-Shipwick-Passphrase`, base64-encoded. The agent imports the file as it
+arrives — nothing of it is stored — and answers when every application in it
+has been dealt with, which takes as long as their deployments; a client must
+not time the request out. `stopped=true` deploys every application without
+starting it and then replaces only applications that are stopped;
+`overwrite=true` replaces what exists under the same name, applications with
+their volumes. The answer is `200` with the import, also when applications in
+it failed:
+
+```json
+{
+  "status": "failed",
+  "source": "upload",
+  "stopped": false,
+  "overwrite": false,
+  "started_at": "2026-03-01T04:10:00Z",
+  "completed_at": "2026-03-01T04:11:32Z",
+  "exported_at": "2026-03-01T04:00:00Z",
+  "secrets": 2,
+  "registries": 1,
+  "certificates": 0,
+  "applications": [
+    { "name": "postgres", "status": "imported", "version": "17", "deployment_id": 1,
+      "volumes": ["data"], "message": "" },
+    { "name": "my-api", "status": "skipped", "version": "1.4.2", "deployment_id": null,
+      "volumes": [], "message": "it exists on this server and was left as it is; import with --overwrite to replace it and its volumes" }
+  ],
+  "warnings": ["DB_PASSWORD: a secret by that name exists on this server and was kept; --overwrite replaces it"],
+  "error": ""
+}
+```
+
+`status` is `running`, `succeeded` or `failed` — failed when an application
+failed or the import could not go on, which `error` then explains. An
+application's `status` is `pending`, `importing`, `imported`, `skipped` (it
+exists, or runs, and was left alone) or `failed`; `message` says why and what
+to do. `volumes` are the volumes that were filled before the application
+first started. A deployment made by an import has the `kind` `import`, or
+`standby` when it was deployed stopped for a standby.
+
+`400 INVALID_EXPORT`: the body is not an export, the passphrase does not
+match, or the file breaks off; what had been imported until then stays, and
+`GET /import` shows it. `409 IMPORT_IN_PROGRESS`: a server takes one import
+at a time.
+
+**`GET /import`** is the import that is running, or ran last, in the same
+shape: poll it from a second connection to follow an upload. It is kept in
+memory; `404 NOT_FOUND` when the agent has run none since it started.
+
+**Exports on the server.** `POST /exports` writes an export of the whole
+server to where backups go, encrypted with the agent's
+`SHIPWICK_BACKUP_PASSPHRASE` (`409 BACKUPS_NOT_ENCRYPTED` without one, `409
+EXPORT_IN_PROGRESS` while one is being written): `202` with a `Location`, and
+a record shaped like a [backup](#backups-the-agent-takes) whose one "volume"
+is `export.tar`. Poll `GET /exports/:id` until `completed_at` is set;
+`GET /exports?limit=50` lists them, newest first. `SHIPWICK_EXPORT_SCHEDULE`
+does the same on a schedule, with the trigger `schedule`.
+
+**The standby.** `GET /standby` (`read`) says what the server holds for the
+day it has to take over:
+
+```json
+{
+  "applications": [
+    { "name": "postgres", "version": "17", "hostnames": [], "imported_at": "2026-03-01T04:15:02Z" },
+    { "name": "my-api", "version": "1.4.2", "hostnames": ["api.example.com"], "imported_at": "2026-03-01T04:15:09Z" }
+  ],
+  "records": [{ "hostname": "api.example.com", "type": "A", "value": "203.0.113.77" }],
+  "pull": { "schedule": "15 * * * *", "last_at": "2026-03-01T04:15:11Z", "last_export": 42, "last_error": "" }
+}
+```
+
+`applications` were imported stopped and are still stopped, in the order a
+promotion starts them. `records` are the DNS records a promotion will ask
+for; `value` is empty when the agent does not know its own address. `pull` is
+`null` unless `SHIPWICK_STANDBY_SCHEDULE` is set; `last_export` is the id of
+the export imported last, `0` if none.
+
+`POST /standby/pull` imports the newest export in the bucket now, stopped
+and overwriting: `202` with the import as it begins and `Location:
+/api/v1/import` to poll. `409 STANDBY_NOT_CONFIGURED` without a bucket to read
+from, `404 NOT_FOUND` when the bucket holds no export.
+
+`POST /standby/promote` starts those applications in order and waits for
+each to be ready, so it answers after as long as their startup budgets
+together:
+
+```json
+{
+  "applications": [
+    { "name": "postgres", "status": "running", "message": "" },
+    { "name": "my-api", "status": "started", "message": "started, and not ready yet: …" }
+  ],
+  "records": [{ "hostname": "api.example.com", "type": "A", "value": "203.0.113.77" }]
+}
+```
+
+`status` is `running` (ready), `started` (not ready within its startup
+budget; the supervisor has it) or `failed` (it could not be started). With
+nothing to promote both lists are empty.
+
 ### Images built by the CLI
 
 An application with `build:` in its deploy.yaml has its image built where
@@ -295,6 +665,34 @@ three things, and any client may do the same:
 
 3. `POST /applications/:name/deploy` with `image` set to that reference. A
    `build` document without an `image` is `400 INVALID_REQUEST`.
+
+Between 1 and 2 a client may ask what it need not send.
+`POST /applications/:name/images/missing` takes the image's layers as diff
+IDs, base layer first — `RootFS.Layers` of `docker image inspect` — 1 to 256
+of them, each `sha256:<64 hex characters>`:
+
+```json
+{"layers": ["sha256:74d9…f711", "sha256:ba32…b114", "sha256:2e1f…4057"]}
+```
+
+and answers with those the server's Docker does not have, in the same order;
+an empty list when it has them all. It reads the daemon and changes nothing.
+
+```json
+{"data": {"missing": ["sha256:2e1f…4057"]}}
+```
+
+A layer is on the server when an image there starts with the same diff IDs up
+to and including it, so the answer is always the end of the list. The archive
+sent in step 2 may then leave out the files of the other layers
+(`blobs/sha256/<digest>`, as `manifest.json` in the archive lists them, in the
+same order as the diff IDs) and nothing else: the manifests and the image's
+configuration always travel. The answer is advice. If the archive leaves out a
+layer the daemon cannot produce — the image that held it was pruned in the
+meantime, or the client left out more than it was told — the upload is `409
+IMAGE_INCOMPLETE`, nothing stays loaded, and the whole archive is to be sent.
+An agent before 0.5 answers the question with `404 ENDPOINT_NOT_FOUND`; send
+the whole archive.
 
 `shipwick.local` is a host that does not exist: the agent never pulls such an
 image, and a deployment whose local image is not on the server — pruned, or a
@@ -334,12 +732,19 @@ characters, and it carries `static: {digest, size_bytes, files}`. Its events
 read `Received 42 files (3.1 MB)`, `Copied 42 files into the proxy`, `Found
 index.html`, `Routed https://example.com to the uploaded files`. A folder
 without an `index.html` fails the deployment: `FAILED: the folder has no
-index.html…`. A digest the agent has no upload for is `404 NOT_FOUND` before
+index.html…`. With `static: {dir, fallback}` the agent looks for that file
+too — `Found 200.html, the fallback page`, or `FAILED: the folder has no
+200.html, which static.fallback names…` — and the proxy answers every path
+that names no file with it, status 200. A digest the agent has no upload for is `404 NOT_FOUND` before
 anything is recorded; a static deploy.yaml without `?static=` is `400
 INVALID_REQUEST`.
 
 Redeploy and rollback need no upload: the proxy keeps the folder of the
 serving version and of the one before it, and both re-route to a kept folder.
+A deployment that runs containers, for an application that was a folder,
+keeps the folder it replaced — the default rollback target — and removes the
+others (`Removed 1 folder of older versions`); the container deployment after
+it removes that one too.
 A rollback to a version whose folder is gone fails with `the files of <version>
 are no longer on the server: deploy the folder again`.
 
@@ -474,8 +879,9 @@ The root token is not listed: it is configured on the agent, not stored.
 
 ### Secrets
 
-A secret is a value for `${NAME}` in the `env` values of a deploy.yaml, kept
-on the server so that no client has to hold it.
+A secret is a value for `${NAME}` in the `env` values of a deploy.yaml and in
+the passwords of its `proxy.basic_auth`, kept on the server so that no client
+has to hold it.
 
 ```bash
 curl -X PUT …/secrets/DATABASE_PASSWORD -d '{"value": "hunter2"}'
@@ -508,6 +914,165 @@ with; the next `deploy` whose `env` refers to the name is refused:
                "field": "env.DATABASE_URL",
                "message": "refers to ${DATABASE_PASSWORD}, which is not set where shipwick runs and not stored on the server",
                "expected": "shipwick secret set DATABASE_PASSWORD" } ] } } }
+```
+
+### Registry credentials
+
+A credential the agent sends when it pulls an image from a private registry.
+
+```bash
+curl -X PUT …/registries/ghcr.io -d '{"username": "octocat", "password": "ghp_…"}'
+```
+
+`204 No Content`, whether the credential was created or replaced. `:registry`
+is a hostname with an optional port, as image references name it —
+`ghcr.io`, `registry.example.com:5000` — compared in lower case;
+`index.docker.io` and `registry-1.docker.io` are `docker.io`. A scheme or a
+path is `400 INVALID_REQUEST`. The username is at most 255 characters without
+a colon or control characters; the password at most 16 KB, not empty, without
+NUL bytes; unknown fields are rejected. At most 50 registries are stored; the
+51st is `400 INVALID_REQUEST`.
+
+Before anything is stored the agent has the Docker daemon check the
+credential against the registry (the Engine API's login, which keeps
+nothing). A registry that says no, or that cannot be reached within 30
+seconds, is `400`:
+
+```json
+{ "error": { "code": "REGISTRY_LOGIN_FAILED",
+             "message": "ghcr.io refused the login: denied: denied",
+             "details": { "registry": "ghcr.io", "refused": true } } }
+```
+
+`message` ends with the registry's own answer. `refused` is `false` when the
+registry could not be asked — a name that does not resolve, a registry that
+is down — and the message then says why.
+
+The password is written encrypted (AES-256-GCM, bound to the registry's
+name) and is never returned, logged or repeated in an error.
+`GET /registries` lists what is stored, by name:
+
+```json
+{ "data": [
+  { "registry": "ghcr.io", "username": "octocat",
+    "created_at": "2026-03-01T10:00:00Z", "updated_at": "2026-03-01T10:42:00Z" }
+] }
+```
+
+`DELETE /registries/ghcr.io` → `204`; `404 NOT_FOUND` when no credential is
+stored for it.
+
+Every pull — a deployment, a rollback, a job, a replica whose image is gone —
+looks the credential up by the image's registry. Without one, the Docker
+configuration file on the server is consulted, as before. A pull the registry
+refuses for authentication fails the deployment with an `error` that names
+the command: `pull access denied for ghcr.io/company/api: run shipwick
+registry login ghcr.io (or check the image name)`.
+
+### Key rotation
+
+```bash
+curl -X POST …/server/rotate-key
+```
+
+The agent generates a new encryption key, re-encrypts every stored `env`
+value, secret and registry password under it in one transaction, and uses it
+from then on. No application is touched. `200`:
+
+```json
+{ "data": { "values": 3, "deployments": 12,
+            "key_source": "file", "key_file": "/var/lib/shipwick/encryption.key" } }
+```
+
+`values` counts the re-encrypted secrets, registry passwords and certificate
+keys,
+`deployments` the deployment records whose `env` was re-encrypted.
+`key_source` is `file` when the agent keeps the key in its data directory;
+it has then replaced `key_file`, and the key is not in the response.
+
+With the key in `SHIPWICK_ENCRYPTION_KEY`, `key_source` is `environment`: the
+agent cannot change its own environment, so the response carries the new key
+— this once — for the operator to put there, and `key_file` is a copy the
+agent keeps in its data directory until it has been started with the new key:
+
+```json
+{ "data": { "values": 3, "deployments": 12, "key_source": "environment",
+            "key": "5f0c…64 hexadecimal characters",
+            "key_file": "/var/lib/shipwick/encryption.key.new" } }
+```
+
+The agent keeps working with the new key. Started again with the old one in
+its environment, it refuses to start and says where the new key is. Until it
+has been restarted with the new key, another rotation is
+`409 KEY_ROTATION_PENDING` with `details: {key_file}`.
+
+The rotation is recorded in the agent's log with the name of the token that
+asked for it. It is not an application event, and the key is never logged.
+
+### Certificates
+
+A certificate of the operator's own, for hostnames whose certificate does not
+come from the proxy's authority. It belongs to the server: every hostname it
+covers, of any application, is served with it, is not asked of any authority
+and does not wait for DNS.
+
+```bash
+curl -X PUT …/certificates/example.com \
+  -d '{"certificate": "-----BEGIN CERTIFICATE-----\n…", "key": "-----BEGIN PRIVATE KEY-----\n…"}'
+```
+
+`:hostname` is a hostname as in deploy.yaml, lower-cased; a wildcard
+certificate is stored under the wildcard, `/certificates/*.example.com`.
+`certificate` is the chain in PEM, the hostname's own certificate first;
+`key` its private key in PEM, without a passphrase. Each is at most 64 KB,
+the body at most 513 KB; unknown fields are rejected. At most 50 certificates
+are stored; the 51st is `400 INVALID_REQUEST`.
+
+The agent checks before it stores, and answers `400 INVALID_CERTIFICATE` with
+the reason as `message`: the chain is not PEM or holds something other than
+certificates; a certificate in it cannot be read; the key is not PEM, is
+protected by a passphrase, or does not belong to the first certificate; the
+certificate has no DNS names, does not cover the hostname (`the certificate
+does not cover example.org: it is for example.com, *.example.com`), has
+expired (`the certificate expired on 2026-09-01`) or is not valid yet. A
+wildcard name covers exactly one label, and a wildcard hostname is covered
+only by the same wildcard. Whether the chain leads to an authority browsers
+trust is not checked: a private authority's certificate is a use of this.
+
+The answer to a `PUT`, and each entry of `GET /certificates` (in hostname
+order):
+
+```json
+{ "data": {
+  "hostname": "example.com",
+  "subjects": ["example.com", "*.example.com"],
+  "issuer": "Corp Issuing CA",
+  "not_before": "2026-09-01T00:00:00Z",
+  "not_after": "2027-09-01T00:00:00Z",
+  "created_at": "2026-10-03T10:00:00Z",
+  "updated_at": "2026-10-03T10:00:00Z"
+} }
+```
+
+`subjects` are the DNS names of the chain's first certificate, `issuer` its
+issuer's common name (the organization, when it has none). The key is written
+encrypted (AES-256-GCM, the hostname as additional data) and is never
+returned, logged or repeated in an error; the PEM is not returned either.
+The proxy is updated before the request is answered. An expired certificate
+stays listed, and served, until it is replaced or removed.
+
+`DELETE /certificates/example.com` → `204`; `404 NOT_FOUND` for a hostname
+nothing is stored under. The hostnames the certificate covered go back to
+certificates the proxy obtains, and to waiting for DNS. A deployed wildcard
+hostname that loses its certificate this way is no longer served while the
+agent has no DNS challenge; a new deployment that names one is refused:
+
+```json
+{ "error": { "code": "INVALID_CONFIG", "message": "invalid deploy.yaml",
+             "details": { "fields": [ {
+               "field": "domain",
+               "message": "a certificate for a wildcard is issued only through a DNS record, and the agent is not set up for that",
+               "expected": "SHIPWICK_CLOUDFLARE_API_TOKEN on the agent, or a certificate of your own: shipwick cert set '*.example.com' --cert fullchain.pem --key privkey.pem" } ] } } }
 ```
 
 ### Metrics
@@ -573,6 +1138,199 @@ with; the next `deploy` whose `env` refers to the name is refused:
 - Units are those of [Metrics](#metrics). An application with no active
   deployment answers `409 NOT_DEPLOYED`; one that was just deployed answers
   with empty series until the first minute has passed.
+
+### Alerts and disk
+
+`GET /server` carries the conditions that hold right now, and the disk two of
+them are about:
+
+```json
+{
+  "data": {
+    "…": "…",
+    "disk": { "total_bytes": 42949672960, "used_bytes": 37580963840 },
+    "alerts": [
+      { "kind": "disk", "severity": "warning", "application": "", "replica": 0,
+        "message": "The server's disk is 87% full (5 GB of 40 GB free). See what takes the space with: docker system df",
+        "since": "2026-03-01T09:41:30Z" },
+      { "kind": "memory", "severity": "warning", "application": "my-api", "replica": 1,
+        "message": "my-api replica 1 is at 93% of its memory limit (240 MB of 256 MB). At the limit it is killed and restarted; raise resources.memory in deploy.yaml, or watch it with: shipwick status my-api",
+        "since": "2026-03-01T09:58:00Z" }
+    ]
+  }
+}
+```
+
+- `kind` is `memory`, `disk`, `restarts` or `unhealthy`; `severity` is
+  `warning` or `critical` (only `disk` and `unhealthy` become critical).
+  `memory` and `restarts` name an `application` and a `replica`; `unhealthy`
+  an application, with `replica` 0; `disk` neither.
+- Only active alerts are listed, oldest first; `[]` when there are none.
+  `since` is when the alert was raised, and stays when a warning turns
+  critical. They are kept in memory: an agent that restarts raises again
+  what still holds.
+- `disk` is the filesystem that holds the agent's data directory.
+  `used_bytes / total_bytes` is the percentage `df` shows: `total_bytes` leaves
+  out the blocks reserved for root. It is `null` where the agent cannot
+  measure it — a development build off Linux.
+- An alert about an application is also in its events, with type `alert`:
+  level `warn` or `error` when raised, `info` when cleared.
+- An agent older than 0.5 sends neither field.
+
+The webhook gets two more events, `alert.raised` and `alert.cleared`. Their
+JSON form has one more field, absent from the other events:
+
+```json
+{
+  "event": "alert.raised",
+  "application": "my-api",
+  "deployment_id": null,
+  "version": "",
+  "message": "my-api replica 1 is at 93% of its memory limit (240 MB of 256 MB). …",
+  "at": "2026-03-01T09:58:00Z",
+  "server": "vps-1",
+  "alert": { "kind": "memory", "severity": "warning", "replica": 1 }
+}
+```
+
+`application` is empty for a `disk` alert. `alert.raised` is sent again when a
+warning turns critical; `alert.cleared` carries the severity the alert had.
+
+### Prometheus metrics
+
+`GET /metrics` — not under `/api/v1` — with `Authorization: Bearer <token>`,
+role `read`. The answer is `text/plain; version=0.0.4`, the Prometheus text
+exposition format; errors (`401`, `403`, `429`) are the JSON envelope as
+everywhere else.
+
+| Series | Type | |
+|---|---|---|
+| `shipwick_agent_info{version}` | gauge | Always 1 |
+| `shipwick_application_status{application, status}` | gauge | 1 for the current status, in lower case: `healthy`, `degraded`, `down`, `crash_loop`, `stopped`, `deploying`, `failed` |
+| `shipwick_application_replicas{application, state}` | gauge | `state` is `desired`, `running` or `healthy` |
+| `shipwick_replica_cpu_ratio{application, replica}` | gauge | CPU in cores, from the last sample: 1 is one core kept busy |
+| `shipwick_replica_memory_bytes{application, replica}` | gauge | Working set, from the last sample |
+| `shipwick_replica_memory_limit_bytes{application, replica}` | gauge | Absent for a replica without a limit |
+| `shipwick_replica_restarts_total{application, replica}` | counter | Restarts by the supervisor; starts again at 0 with each deployment |
+| `shipwick_deployments_total{application, status}` | counter | Finished deployments; `status` is `succeeded`, `failed` or `rolled_back` |
+| `shipwick_deployment_last_duration_seconds{application}` | gauge | From start to completion of the most recently completed deployment |
+| `shipwick_disk_bytes{state}` | gauge | `state` is `total` or `used`, as `disk` above; absent where it cannot be measured |
+| `shipwick_alerts{kind, severity}` | gauge | Number of active alerts; every combination is present, 0 when none |
+
+- Every family has its `# HELP` and `# TYPE` lines, families come in the
+  order above and series sorted by application and label: two scrapes of the
+  same state are the same bytes.
+- A scrape reads the database in one transaction and never asks Docker.
+  Status and the running and healthy counts are as the supervisor saw them at
+  its last pass, a second ago at most; during a deployment they are those
+  from before it began. CPU and memory are the last 30-second sample of each
+  replica; a replica without a sample in the last 75 seconds — stopped, or
+  started less than a minute ago — has no CPU and memory series.
+- In the first second after the agent starts, an application the supervisor
+  has not looked at yet has only its `desired` replicas and no status.
+- `rate(shipwick_deployments_total{status="failed"}[1d])` behaves: the three
+  outcomes only ever grow, and are present from an application's first
+  deployment. Deleting an application removes its series.
+
+### Traffic
+
+`GET /applications/:name/traffic?since=1h`
+
+What the proxy's access log says about the application's requests.
+
+```json
+{
+  "data": {
+    "application": "my-api", "since": "2026-03-01T09:00:00Z", "step_seconds": 60,
+    "totals": {
+      "requests": 12480, "status_2xx": 12300, "status_3xx": 40, "status_4xx": 120, "status_5xx": 20,
+      "bytes": 123456789, "p50_ms": 12.4, "p95_ms": 48, "p99_ms": 210.5
+    },
+    "points": [
+      { "t": "2026-03-01T09:00:00Z",
+        "requests": 208, "status_2xx": 205, "status_3xx": 1, "status_4xx": 2, "status_5xx": 0,
+        "bytes": 2057600, "p50_ms": 11.9, "p95_ms": 45.2, "p99_ms": 180 }
+    ]
+  }
+}
+```
+
+- `since` is `1h` (the default), `24h` or `7d`; anything else is
+  `400 INVALID_REQUEST`. The agent picks the step: `60`, `300` and `3600`
+  seconds respectively, so a series is at most a few hundred points. The
+  window starts on a step boundary, so `since` is up to one step earlier than
+  asked.
+- A request belongs to the application whose `domain`, alias or redirect it
+  was sent to; where several applications share a hostname by `path`, to the
+  one with the longest path the request is under. Requests the proxy answered
+  by itself count too: a redirect's `308`, the `503` of a stopped
+  application, the files of a static one. Requests for the agent's and the
+  dashboard's own hostnames are not recorded.
+- `bytes` are response bodies as sent, after compression. Statuses outside
+  200–599 are in `requests` only.
+- The percentiles are estimated from a histogram of the proxy's durations —
+  from the first byte of the request to the last of the response — with
+  bounds at 1, 2.5, 5, 10, 25, 50, 100, 250, 500 ms and 1, 2.5, 5, 10, 30 s,
+  and are as exact as a bucket is wide; a request slower than 30 s reads
+  `30000`. They are `0` when there were no requests.
+- `t` is the start of the step. A step without a request has no point: the
+  series is sparse, and a missing point is zero. The current minute is
+  included; minutes that have ended are kept for seven days.
+- An application without a domain, or one nobody has asked anything of,
+  answers zero totals and no points. `409 TRAFFIC_UNAVAILABLE` when there is
+  no access log to read: the agent has no proxy, or the proxy is not the
+  `caddy` container of the agent's compose project.
+
+### Requests
+
+`GET /applications/:name/requests?tail=50`
+
+```json
+{
+  "data": [
+    { "time": "2026-03-01T10:00:00.412365Z", "method": "GET", "path": "/api/users",
+      "status": 200, "duration_ms": 12.431, "bytes": 2048, "client": "203.0.113.7" }
+  ]
+}
+```
+
+The application's most recent requests, oldest first; `tail` is at most
+`200`, which is all the agent keeps per application — in memory, so the list
+starts empty after an agent restart. `path` carries no query string and
+nothing of the request's or the response's headers is kept: the proxy does
+not write them to its log in the first place. `client` is the address the
+proxy saw. Attribution and `409 TRAFFIC_UNAVAILABLE` are as for
+[Traffic](#traffic).
+
+### Certificate status
+
+The application detail carries the certificate the proxy presents for each
+hostname the application answers to — its domain, aliases and redirects:
+
+```json
+"certificates": [
+  { "hostname": "api.example.com", "status": "ok", "issuer": "Let's Encrypt E7",
+    "not_after": "2026-05-20T08:00:00Z", "message": "" },
+  { "hostname": "www.example.com", "status": "waiting_for_dns", "issuer": "", "not_after": null,
+    "message": "does not resolve yet; add an A record: www.example.com → 203.0.113.10 (DNS only, not proxied)" }
+]
+```
+
+| `status` | Meaning |
+|---|---|
+| `ok` | The proxy presents a certificate for this name with more than 14 days left |
+| `expiring` | 14 days or less left, or already expired; `message` says how long (`expires in 9 days, on 2026-03-10`). The proxy renews with a third of the lifetime to go, so this means renewal is failing |
+| `obtaining` | The proxy serves the hostname but has no certificate for it yet: the handshake fails, or presents one for another name |
+| `waiting_for_dns` | The hostname does not point at this server and is not handed to the proxy; `message` is the DNS gate's reason, with the record to create |
+| `unknown` | Not looked at yet, the proxy did not answer, or the agent has no proxy; `message` says which |
+
+`issuer` and `not_after` are set once a certificate has been seen, `message`
+for every status but `ok`. The agent looks once a minute per hostname — every
+ten seconds while it is `obtaining` — by connecting to the proxy with the
+hostname as the server name; it reports the certificate and does not verify
+its chain. A certificate that lives less than 56 days is `expiring` in the
+last quarter of its lifetime rather than the last 14 days. The list is empty
+for an application without a domain.
 
 ### Jobs and one-off commands
 

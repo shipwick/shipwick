@@ -9,6 +9,7 @@
 #        SHIPWICK_AGENT_DOMAIN=agent.example.com
 #        SHIPWICK_DASHBOARD_DOMAIN=dashboard.example.com
 #        SHIPWICK_WEBHOOK_URL=https://hooks.slack.com/services/...   (optional)
+#        SHIPWICK_CLOUDFLARE_API_TOKEN=...                           (optional)
 #
 #   4. docker compose -f compose.production.yml up -d
 #
@@ -16,6 +17,9 @@
 # and in a browser:               https://dashboard.example.com
 #
 # Certificates are obtained and renewed by Caddy on its own (Let's Encrypt).
+# With SHIPWICK_CLOUDFLARE_API_TOKEN it does so through Cloudflare DNS, and the
+# hostnames may stay behind Cloudflare's proxy (docs/handbook.md, "Behind
+# Cloudflare").
 #
 # Installed by scripts/install.sh, this file is /opt/shipwick/compose.yml and is
 # replaced on every upgrade. Keep your own changes in a compose.override.yml
@@ -26,9 +30,9 @@ name: shipwick
 
 services:
   agent:
-    # In a release, both images are pinned to the release's version. To run
-    # images built from source instead, set SHIPWICK_AGENT_IMAGE and
-    # SHIPWICK_DASHBOARD_IMAGE in .env.
+    # In a release, the three images are pinned to the release's version. To
+    # run images built from source instead, set SHIPWICK_AGENT_IMAGE,
+    # SHIPWICK_DASHBOARD_IMAGE and SHIPWICK_CADDY_IMAGE in .env.
     image: ${SHIPWICK_AGENT_IMAGE:-ghcr.io/shipwick/agent:latest}
     environment:
       SHIPWICK_AGENT_TOKEN: ${SHIPWICK_AGENT_TOKEN:?set SHIPWICK_AGENT_TOKEN in .env}
@@ -41,6 +45,27 @@ services:
       # outcomes and applications going down or recovering (see README).
       SHIPWICK_WEBHOOK_URL: ${SHIPWICK_WEBHOOK_URL:-}
       SHIPWICK_WEBHOOK_SECRET: ${SHIPWICK_WEBHOOK_SECRET:-}
+      # Optional: backups encrypted, and sent to an S3-compatible bucket as well
+      SHIPWICK_BACKUP_DIR: ${SHIPWICK_BACKUP_DIR:-}
+      SHIPWICK_BACKUP_PASSPHRASE: ${SHIPWICK_BACKUP_PASSPHRASE:-}
+      SHIPWICK_BACKUP_S3_ENDPOINT: ${SHIPWICK_BACKUP_S3_ENDPOINT:-}
+      SHIPWICK_BACKUP_S3_BUCKET: ${SHIPWICK_BACKUP_S3_BUCKET:-}
+      SHIPWICK_BACKUP_S3_ACCESS_KEY_ID: ${SHIPWICK_BACKUP_S3_ACCESS_KEY_ID:-}
+      SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY: ${SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY:-}
+      SHIPWICK_BACKUP_S3_REGION: ${SHIPWICK_BACKUP_S3_REGION:-}
+      SHIPWICK_BACKUP_S3_PREFIX: ${SHIPWICK_BACKUP_S3_PREFIX:-}
+      # Optional: an export of the whole server on a schedule, or this server as a standby
+      SHIPWICK_EXPORT_SCHEDULE: ${SHIPWICK_EXPORT_SCHEDULE:-}
+      SHIPWICK_EXPORT_KEEP: ${SHIPWICK_EXPORT_KEEP:-}
+      SHIPWICK_STANDBY_SCHEDULE: ${SHIPWICK_STANDBY_SCHEDULE:-}
+      # Optional: a Cloudflare API token (Zone:Read and DNS:Edit on the zone).
+      # Certificates are then obtained through a DNS record, so hostnames can
+      # stay behind Cloudflare's proxy and can be wildcards.
+      SHIPWICK_CLOUDFLARE_API_TOKEN: ${SHIPWICK_CLOUDFLARE_API_TOKEN:-}
+      # Optional: the encryption key from here instead of the key file in the data directory
+      SHIPWICK_ENCRYPTION_KEY: ${SHIPWICK_ENCRYPTION_KEY:-}
+      SHIPWICK_ALERT_MEMORY_PERCENT: ${SHIPWICK_ALERT_MEMORY_PERCENT:-}
+      SHIPWICK_ALERT_DISK_PERCENT: ${SHIPWICK_ALERT_DISK_PERCENT:-}
       SHIPWICK_LOG_FORMAT: json
     # No published port on purpose: the API is plain HTTP, and the only ways in
     # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a
@@ -57,7 +82,9 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2-alpine
+    # Caddy with the Cloudflare DNS provider and nothing else added
+    # (Dockerfile.caddy): the official image has no DNS providers.
+    image: ${SHIPWICK_CADDY_IMAGE:-ghcr.io/shipwick/caddy:latest}
     command: caddy run --config /etc/caddy/bootstrap.json --resume
     configs:
       - source: caddy-bootstrap
@@ -70,6 +97,8 @@ services:
       - "${SHIPWICK_HTTPS_PORT:-443}:443/udp"
     volumes:
       - caddy-data:/data # certificates — back this volume up, never delete it casually
+      # The configuration the agent loaded last, for --resume. With
+      # SHIPWICK_CLOUDFLARE_API_TOKEN set it contains that token.
       - caddy-config:/config
       # The folders of static applications: the agent puts them here and Caddy
       # serves them itself, with no container in between.

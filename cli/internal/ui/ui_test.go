@@ -55,6 +55,37 @@ func TestStyledAndProgressOnATerminal(t *testing.T) {
 	}
 }
 
+func TestNoteGoesToStandardErrorAndClearsTheProgressLine(t *testing.T) {
+	var out, errOut bytes.Buffer
+	u := Terminal(&out, &errOut)
+	if !u.IsTerminal() || !u.Watched() {
+		t.Fatal("Terminal must behave as a terminal")
+	}
+	u.Progress("Waiting")
+	u.Note("Following %s", "my-api")
+	if got := errOut.String(); got != "Following my-api\n" {
+		t.Errorf("stderr = %q", got)
+	}
+	if got := out.String(); got != "… Waiting\r\x1b[K" {
+		t.Errorf("stdout = %q", got)
+	}
+}
+
+func TestAPrefixedShareOfATerminalIsWatchedButHasNoProgressLine(t *testing.T) {
+	var out bytes.Buffer
+	p := Terminal(&out, &out).Prefixed("api  ")
+	if p.IsTerminal() || !p.Watched() {
+		t.Errorf("IsTerminal = %v, Watched = %v", p.IsTerminal(), p.Watched())
+	}
+	piped, _, _ := newTestUI()
+	if piped.Watched() || piped.Prefixed("api  ").Watched() {
+		t.Error("nobody watches a pipe")
+	}
+	if piped.Width() != 80 {
+		t.Errorf("Width = %d, want 80 when it cannot be known", piped.Width())
+	}
+}
+
 func TestTableAlignment(t *testing.T) {
 	u, out, _ := newTestUI()
 	u.Table([]string{"NAME", "STATUS", ""}, [][]Cell{

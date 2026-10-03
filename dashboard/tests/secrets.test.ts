@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_VALUE_BYTES, replaces, secretNameProblem, secretRemovalConsequence, secretValueProblem } from '../app/utils/secrets'
+import { MAX_VALUE_BYTES, missingSecrets, replaces, secretNameProblem, secretRemovalConsequence, secretValueProblem } from '../app/utils/secrets'
 
 describe('secretNameProblem', () => {
   it('accepts environment variable names', () => {
@@ -53,5 +53,36 @@ describe('secretRemovalConsequence', () => {
     expect(text).toContain('Deployments already made keep their value')
     expect(text).toContain('${DATABASE_PASSWORD}')
     expect(text).toContain('refused')
+  })
+})
+
+describe('missingSecrets', () => {
+  it('names the secrets a refused deployment refers to, from the command the agent suggests', () => {
+    expect(missingSecrets([
+      { field: 'env.DATABASE_URL', expected: 'shipwick secret set POSTGRES_PASSWORD' },
+      { field: 'env.STRIPE', expected: 'shipwick secret set STRIPE_KEY' },
+    ])).toEqual(['POSTGRES_PASSWORD', 'STRIPE_KEY'])
+  })
+
+  it('covers a basic-auth password the same way', () => {
+    expect(missingSecrets([{ field: 'proxy.basic_auth[0].password', expected: 'shipwick secret set ADMIN_PASSWORD' }])).toEqual(['ADMIN_PASSWORD'])
+  })
+
+  it('names a secret once however often it is referred to', () => {
+    expect(missingSecrets([
+      { field: 'env.A', expected: 'shipwick secret set TOKEN' },
+      { field: 'env.B', expected: 'shipwick secret set TOKEN' },
+    ])).toEqual(['TOKEN'])
+  })
+
+  it('offers nothing for any other problem', () => {
+    expect(missingSecrets([
+      { field: 'domain' },
+      { field: 'resources.memory', expected: '128mb, 512mb, 1gb, ...' },
+      { field: 'env.X', expected: 'shipwick secret set' },
+      { field: 'env.Y', expected: 'shipwick secret set 1BAD' },
+      { field: 'env.Z', expected: 'run shipwick secret set NAME first' },
+    ])).toEqual([])
+    expect(missingSecrets([])).toEqual([])
   })
 })

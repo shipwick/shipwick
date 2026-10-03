@@ -162,6 +162,59 @@ internet access and makes no request to any third party.
   size (`-1` reads `unknown`), `in use` or `application deleted`. Remove is
   offered for `orphan` rows only, to admins, confirming with the size;
   `409 VOLUME_IN_USE` is shown with the agent's message.
+- **Traffic** on the application page: `GET …/traffic?since=1h|24h|7d` every
+  30 seconds, drawn as requests per step with the 5xx among them and the p95
+  of the durations, above the window's totals. The series is sparse and a
+  missing step is a zero; only the latency has gaps. `409 TRAFFIC_UNAVAILABLE`
+  is said once in place of the panel's content, and on `ENDPOINT_NOT_FOUND`
+  the panel is not there. Recent requests are `GET …/requests?tail=200` every
+  three seconds, only while their table is open. A static application has
+  traffic like any other.
+- **Certificates.** `certificates` of the application detail puts a badge on
+  every hostname that is not `ok`, with the agent's message; issuer and expiry
+  are the hostname's tooltip. The **Certificates** page (`/certificates`)
+  lists `GET /certificates`, marks the last 30 days and what has expired, and
+  lets an admin store one (`PUT`, two PEM fields; the key is cleared from the
+  page when the request is sent) or remove one.
+- **Registries** (`/registries`, every role) lists `GET /registries`; an admin
+  logs in (`PUT`, a password field that is cleared when the request is sent)
+  and out. `REGISTRY_LOGIN_FAILED` is explained from `details.refused`.
+- **Backups.** An application with volumes has a Backups panel: the listing,
+  a summary line in the words of `shipwick status`, *Back up now* and *Verify*
+  (deploy), and a dialog per backup with the verification's output, a download
+  per volume, *Restore* (only while the application is stopped, confirmed by
+  typing its name) and *Remove* (admin). A backup is polled until
+  `completed_at`, a verification or a restore until `activity` is empty.
+- **The server page** shows the disk, the active alerts, where backups go and
+  how the agent's own state is backed up (with *Back up state now*), exports
+  and the standby (below), and *Rotate encryption key*: with the key in the
+  agent's environment the new one is shown once, with the line to put into
+  `/opt/shipwick/.env`. Alerts are also a mark on the Servers entry of the
+  navigation, a list on the overview and on the page of the application they
+  are about.
+- **Export and standby.** *Export to backups* (`POST /exports`) and the list of
+  exports; the export file itself is downloaded with `shipwick export`, which
+  asks for its passphrase. A server that holds applications imported stopped,
+  or fetches exports on a schedule, shows a Standby panel: what waits, the
+  scheduled fetch, *Import newest now* (`POST /standby/pull`, followed with
+  `GET /import`) and *Promote*, confirmed by typing `promote`, which answers
+  with each application's state and the DNS records to change. A running
+  import is a banner; the last one is listed with every application's outcome.
+- **Paths.** An application's address is `domain` + `path` wherever it is
+  written or linked; a wildcard domain is text, not a link. The `proxy` block
+  is shown read-only, accounts by username and path.
+- **A replaced replica that is still stopping** — listed after the deployment
+  completed, with the previous deployment's id — reads *Stopping* and is not
+  counted as a replica.
+- **`429`** carries `Retry-After`, and polling waits that long (a minute
+  without the header) before it asks again.
+- **A deployment refused for a missing secret** (`INVALID_CONFIG` whose
+  `expected` is `shipwick secret set NAME`) links to the Secrets page with the
+  name filled in; one whose error is the agent's `pull access denied …` links
+  to the Registries page.
+- **The server-side proxy** gives the agent 60 seconds to answer, except
+  where it waits itself: stopping and deleting an application (replicas get
+  their `deploy.stop_timeout`), promoting a standby, and archives.
 - **`429 RATE_LIMITED`** (too many failed authentications from the dashboard
   server's address) reads "Too many failed attempts from this address; try
   again in a minute", on the login page and wherever an error is shown, and is
@@ -261,6 +314,12 @@ of both versions. Magic image tags exercise the unhappy paths:
 | `…:rollback` | replica 1 is replaced, replica 2 crashes → `FAILED` → `ROLLBACK` → `RESTORING` → `ROLLED_BACK`, `error` keeps the cause. Needs 2+ replicas (`my-api`, `web`); with one replica it behaves like `:fail` |
 | `…:local` | the pull fails but a local copy exists: a `warn` step |
 | `…:hookfail` | the pre-deploy command exits 1 → `FAILED` with its output as a `log` event and a failed hook run; no replica was touched (needs an application with `pre_deploy`: `my-api`) |
+| `…:restart` | the agent goes away for six seconds while replica 1 is checked (connections are dropped, as when it restarts), then records `Resumed after the agent restarted` and finishes the deployment |
+| `…:sigterm` | the replica replaced last ignores SIGTERM: it stays listed for its whole `stop_timeout` after the deployment completed and is killed, with the `warn` event |
+
+After every successful deployment the replica replaced last stays listed for a
+few seconds, with the previous deployment's id, as it does while the real
+agent gives it its `stop_timeout`.
 
 A run started from the dashboard succeeds unless its command mentions `fail`
 (exit 1, plus a `job` event) or `timeout` (timed out). The mock's scheduler
@@ -274,7 +333,30 @@ the real agent, so the log viewer's reconnect can be seen.
 | `MOCK_ROLE=read\|deploy\|admin` | The role of `MOCK_TOKEN` (default `admin`, signed in as `root`); endpoints above it answer `403 FORBIDDEN` with `{role, required}`, exactly as the agent's role table. Use it to see the dashboard as a read-only or deploy-only token |
 | `MOCK_WEBHOOK=1` | `server.notifications.webhook` is true |
 | `MOCK_NO_PROXY=1` | `server.proxy.enabled` is false, and deploying an application with a domain records the "No reverse proxy is configured, so … is not being served" `warn` step |
+| `MOCK_NO_TRAFFIC=1` | Traffic and requests answer `409 TRAFFIC_UNAVAILABLE` (`MOCK_NO_PROXY=1` does too) |
+| `MOCK_ALERTS=none\|warning\|critical` | The alerts of `GET /server`: none, two warnings (the default), or those plus a critical `disk` and a critical `unhealthy` alert with the disk at 97% |
+| `MOCK_KEY_ENV=1` | The encryption key is "in the environment": `POST /server/rotate-key` answers the new key once, then `409 KEY_ROTATION_PENDING` |
+| `MOCK_NO_PASSPHRASE=1` | Backups are not encrypted and the agent's state is not backed up: `POST /server/backups` and `POST /exports` answer `409 BACKUPS_NOT_ENCRYPTED` |
+| `MOCK_NO_BUCKET=1` | Backups stay on the server's disk (`destination: local`) |
+| `MOCK_VERIFY_FAILS=1` | A backup verification ends with `verify_error` and the container's output |
+| `MOCK_DNS_CHALLENGE=1` | `server.proxy.dns_challenge` is true and wildcard hostnames deploy without a supplied certificate |
+| `MOCK_STANDBY=1` | The server is a standby: `postgres`, `shop` and `docs` were imported stopped (kind `standby`) and wait for `POST /standby/promote`; `POST /standby/pull` imports over a few seconds, to be followed with `GET /import` |
+| `MOCK_OLD_AGENT=1` | Answers like an agent before 0.5: the endpoints it added are `404 ENDPOINT_NOT_FOUND` and the fields it added are absent |
 | `MOCK_PORT`, `MOCK_HOST`, `MOCK_TOKEN` | `9100`, `127.0.0.1`, `mock-token-0123456789abcdef` |
+
+What 0.5 added is served with the agent's shapes and refusals: `path`, `proxy`
+(passwords masked), `backups`, `deploy.stop_timeout` and `static.fallback` in
+specs, with hostname conflicts by hostname and path; `POST …/validate`;
+`certificates` on every application detail, one hostname in each state;
+traffic (`GET …/traffic?since=`, sparse and the same on every refresh, and
+`GET …/requests?tail=`); registries (a registry named `refused.*` refuses the
+login, one under `.invalid` cannot be asked); supplied certificates (the PEM
+is looked at, not parsed); the ten backup endpoints (a backup is `running` on
+the first poll and done a few seconds later; a verification and a restore are
+followed through `activity`); exports, the import and the standby. `my-api`
+has a `proxy` block and `stop_timeout: 30s`, `docs` serves `/docs` of the
+domain `web` serves the rest of, `postgres` has a `backups` block and a week
+of backups, `landing` has a fallback page.
 
 ### Scripts
 

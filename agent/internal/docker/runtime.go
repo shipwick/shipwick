@@ -244,22 +244,38 @@ func (r *Runtime) AttachSelf(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// PullImage pulls image, authenticating with credentials from the Docker CLI
-// config when the registry has an entry there.
-func (r *Runtime) PullImage(ctx context.Context, image string) error {
-	auth, err := registryAuth(r.configPath, image)
+// PullImage pulls image, authenticating with cred when one is given and
+// otherwise with what the Docker CLI config holds for the registry, if
+// anything. A pull refused for authentication wraps ErrPullDenied.
+func (r *Runtime) PullImage(ctx context.Context, image string, cred *RegistryAuth) error {
+	var (
+		auth string
+		err  error
+	)
+	if cred != nil {
+		auth, err = cred.encode()
+	} else {
+		auth, err = registryAuth(r.configPath, image)
+	}
 	if err != nil {
 		return err
 	}
 	resp, err := r.cli.ImagePull(ctx, image, client.ImagePullOptions{RegistryAuth: auth})
 	if err != nil {
-		return fmt.Errorf("pull %s: %w", image, err)
+		return pullError(ctx, image, err)
 	}
 	defer resp.Close()
 	if err := resp.Wait(ctx); err != nil {
-		return fmt.Errorf("pull %s: %w", image, err)
+		return pullError(ctx, image, err)
 	}
 	return nil
+}
+
+func pullError(ctx context.Context, image string, err error) error {
+	if ctx.Err() == nil && pullDenied(err) {
+		return fmt.Errorf("pull %s: %w (%v)", image, ErrPullDenied, err)
+	}
+	return fmt.Errorf("pull %s: %w", image, err)
 }
 
 func (r *Runtime) ImageExists(ctx context.Context, image string) (bool, error) {

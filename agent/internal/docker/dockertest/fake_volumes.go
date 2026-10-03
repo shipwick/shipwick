@@ -16,7 +16,7 @@ func (f *Fake) ListVolumes(ctx context.Context) ([]docker.Volume, error) {
 	out := make([]docker.Volume, 0, len(f.volumes))
 	for name, files := range f.volumes {
 		app, volume, err := docker.ParseVolumeName(name)
-		if err != nil {
+		if err != nil || docker.IsScratchVolume(volume) {
 			continue
 		}
 		var size int64

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import type { Deployment } from '~/types/api'
-import { deploymentOrigin } from '~/utils/deployments'
+import { deploymentOrigin, importLabel } from '~/utils/deployments'
 
 /**
  * "rollback to #3 1.4.0" / "redeploy of #6": where a deployment's
- * configuration came from, linked to that deployment. Renders nothing for a
- * plain deploy.
+ * configuration came from, linked to that deployment; "imported" for one that
+ * came with an export. Renders nothing for a plain deploy.
  */
 const props = defineProps<{
   deployment: Pick<Deployment, 'kind' | 'source_deployment_id'>
@@ -14,10 +14,17 @@ const props = defineProps<{
 }>()
 
 const origin = computed(() => deploymentOrigin(props.deployment, props.known))
+/** An import has no source deployment on this server: its configuration came with an export. */
+const imported = computed(() => importLabel(props.deployment.kind))
 </script>
 
 <template>
-  <span v-if="origin" class="whitespace-nowrap text-fg-muted">
+  <span
+    v-if="imported"
+    class="whitespace-nowrap text-fg-muted"
+    :title="props.deployment.kind === 'standby' ? 'Deployed stopped from an export of another server; a promotion starts it' : 'Deployed from an export of another server'"
+  >{{ imported }}</span>
+  <span v-else-if="origin" class="whitespace-nowrap text-fg-muted">
     <template v-if="origin.source">
       {{ origin.phrase }}
       <NuxtLink :to="`/deployments/${origin.source.id}`" class="mono link">#{{ origin.source.sequence }}</NuxtLink>

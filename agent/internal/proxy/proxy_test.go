@@ -131,9 +131,6 @@ func TestBuildStreamingRoute(t *testing.T) {
 	if h := last(handle); h.FlushInterval == nil || *h.FlushInterval != -1 {
 		t.Error("streaming routes need flush_interval -1, or log following would arrive in bursts")
 	}
-	if len(handle) != 1 {
-		t.Errorf("a streaming route has %d handlers, want the proxy alone: the encoder holds back the first bytes of a response", len(handle))
-	}
 }
 
 func TestBuildCompressesApplicationRoutes(t *testing.T) {

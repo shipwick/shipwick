@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,7 +58,9 @@ func (s *Server) handleGetApplication(w http.ResponseWriter, r *http.Request, na
 }
 
 func (s *Server) handleDeleteApplication(w http.ResponseWriter, r *http.Request, name string) {
-	if err := s.engine.Delete(r.Context(), name); err != nil {
+	err := s.engine.Delete(r.Context(), name)
+	afterGracePeriod(w)
+	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
@@ -70,34 +71,10 @@ func (s *Server) handleDeleteApplication(w http.ResponseWriter, r *http.Request,
 // (YAML, or JSON, which YAML subsumes). The agent re-validates everything:
 // the CLI's validation is a convenience, not a trust boundary.
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, name string) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, spec.MaxConfigBytes))
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, api.CodeInvalidRequest,
-				fmt.Sprintf("request body exceeds %d KB", spec.MaxConfigBytes/1024), nil)
-			return
-		}
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "could not read request body", nil)
+	app, ok := s.readConfig(w, r, name)
+	if !ok {
 		return
 	}
-
-	app, err := spec.Parse(body)
-	if err != nil {
-		var verr *spec.ValidationError
-		if errors.As(err, &verr) {
-			writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": verr.Fields})
-			return
-		}
-		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, err.Error(), nil)
-		return
-	}
-	if app.Name != name {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest,
-			fmt.Sprintf("the config describes application %q but the URL names %q", app.Name, name), nil)
-		return
-	}
-
 	d, ok := s.startDeploy(w, r, app)
 	if !ok {
 		return
@@ -106,7 +83,9 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, name strin
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request, name string) {
-	if err := s.engine.Stop(r.Context(), name); err != nil {
+	err := s.engine.Stop(r.Context(), name)
+	afterGracePeriod(w)
+	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}

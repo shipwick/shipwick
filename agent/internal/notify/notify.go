@@ -1,6 +1,7 @@
 // Package notify tells the outside world what happened to an application: a
-// deployment succeeded or failed, an application went down or came back. The
-// one channel is a webhook; the engine only knows the Notifier interface.
+// deployment succeeded or failed, an application went down or came back, an
+// alert was raised or cleared. The one channel is a webhook; the engine only
+// knows the Notifier interface.
 package notify
 
 import (
@@ -33,6 +34,11 @@ const (
 	ApplicationDown      = "application.down"
 	ApplicationRecovered = "application.recovered"
 	JobFailed            = "job.failed"
+	// An alert is a condition rather than an occurrence: raised once when it
+	// becomes true, cleared once when it no longer is.
+	AlertRaised         = "alert.raised"
+	AlertCleared        = "alert.cleared"
+	CertificateExpiring = "certificate.expiring"
 )
 
 // Event is one thing worth telling. Message is a complete sentence for a
@@ -46,6 +52,16 @@ type Event struct {
 	Message      string
 	At           time.Time
 	Server       string // hostname of the server the agent runs on
+	// Alert says which condition an alert.* event is about; nil for the rest.
+	Alert *Alert
+}
+
+// Alert identifies the condition behind an alert.* event. Application is in
+// the event; Replica is 0 when the condition is not about one replica.
+type Alert struct {
+	Kind     string `json:"kind"`     // memory | disk | restarts | unhealthy
+	Severity string `json:"severity"` // warning | critical
+	Replica  int    `json:"replica"`
 }
 
 // Notifier delivers events. Notify must return at once: it is called from
@@ -318,6 +334,8 @@ type Payload struct {
 	Message      string    `json:"message"`
 	At           time.Time `json:"at"`
 	Server       string    `json:"server"`
+	// Alert is present on alert.raised and alert.cleared only.
+	Alert *Alert `json:"alert,omitempty"`
 }
 
 func newPayload(e Event) Payload {
@@ -328,6 +346,7 @@ func newPayload(e Event) Payload {
 		Message:     e.Message,
 		At:          e.At.UTC().Truncate(time.Second),
 		Server:      e.Server,
+		Alert:       e.Alert,
 	}
 	if e.DeploymentID != 0 {
 		p.DeploymentID = &e.DeploymentID

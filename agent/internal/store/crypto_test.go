@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shipwick/shipwick/agent/internal/config"
+	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 func TestSealRoundTripsAndBindsTheVariableName(t *testing.T) {
@@ -228,4 +229,54 @@ func TestOpenRefusesAFileDatabaseWithoutAKey(t *testing.T) {
 		t.Fatalf("an in-memory database may go without a key: %v", err)
 	}
 	s.Close()
+}
+
+func TestBasicAuthPasswordsAreStoredEncryptedAndReadBackClear(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	app := testApp("api", "nginx:1")
+	app.Proxy = &spec.Proxy{
+		Headers: map[string]string{"X-Frame-Options": "DENY"},
+		BasicAuth: []spec.BasicAuth{
+			{Path: "/admin", Username: "admin", Password: "correct horse"},
+			{Username: "everyone", Password: "battery staple"},
+		},
+	}
+	d, err := s.CreateDeployment(ctx, app, time.Now())
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if app.Proxy.BasicAuth[0].Password != "correct horse" || d.Spec.Proxy.BasicAuth[1].Password != "battery staple" {
+		t.Error("the caller's spec must keep its clear passwords: the engine hashes them for the proxy")
+	}
+
+	raw := rawSpec(t, s, d.ID)
+	if strings.Contains(raw, "correct horse") || strings.Contains(raw, "battery staple") {
+		t.Errorf("stored spec holds a plaintext password: %s", raw)
+	}
+	if strings.Count(raw, `"password":"enc1:`) != 2 || !strings.Contains(raw, `"username":"admin"`) || !strings.Contains(raw, `"X-Frame-Options":"DENY"`) {
+		t.Errorf("only the passwords are encrypted; the rest of the block stays readable: %s", raw)
+	}
+
+	got, err := s.GetDeployment(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("GetDeployment: %v", err)
+	}
+	if got.Spec.Proxy.BasicAuth[0].Password != "correct horse" || got.Spec.Proxy.BasicAuth[1].Password != "battery staple" {
+		t.Errorf("passwords did not round trip: %+v", got.Spec.Proxy.BasicAuth)
+	}
+
+	// Sealed under its position: a ciphertext moved to the other account
+	// does not open there.
+	var stored spec.App
+	json.Unmarshal([]byte(raw), &stored)
+	stored.Proxy.BasicAuth[0].Password, stored.Proxy.BasicAuth[1].Password = stored.Proxy.BasicAuth[1].Password, stored.Proxy.BasicAuth[0].Password
+	swapped, _ := json.Marshal(stored)
+	if _, err := s.db.ExecContext(ctx, `UPDATE deployments SET spec = ? WHERE id = ?`, string(swapped), d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetDeployment(ctx, d.ID); err == nil {
+		t.Error("a password moved to another account must be refused")
+	}
 }

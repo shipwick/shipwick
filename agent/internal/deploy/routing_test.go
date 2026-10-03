@@ -32,6 +32,7 @@ type fakeProxy struct {
 	seen   []map[string]string // per Sync: domain → who served it at that moment
 	err    error
 	onSync func(routes []proxy.Route)
+	certs  []proxy.Certificate // what SetCertificates was last given
 }
 
 func (p *fakeProxy) Sync(_ context.Context, routes []proxy.Route) error {
@@ -53,6 +54,12 @@ func (p *fakeProxy) Sync(_ context.Context, routes []proxy.Route) error {
 }
 
 func (p *fakeProxy) Status() proxy.Status { return proxy.Status{Enabled: true, Reachable: true} }
+
+func (p *fakeProxy) SetCertificates(certs []proxy.Certificate) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.certs = certs
+}
 
 func (p *fakeProxy) failWith(err error) {
 	p.mu.Lock()

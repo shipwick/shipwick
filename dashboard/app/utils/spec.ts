@@ -76,28 +76,72 @@ export type HostnameKind = 'domain' | 'alias' | 'redirect'
 export interface Hostname {
   host: string
   kind: HostnameKind
+  /**
+   * What the application serves there, as it is written and linked:
+   * `example.com/api` for an application with a `path`, the bare hostname
+   * otherwise. A redirect is a whole hostname, whatever the path.
+   */
+  address: string
+  /** `https://` + address; null for a wildcard, which is a pattern and not an address. */
+  url: string | null
   /** For a redirect: where it sends the browser (the domain). */
   target: string | null
 }
 
+/** `*.example.com`: every name one label below, served alike. Not something a browser can open. */
+export function isWildcard(hostname: string): boolean {
+  return hostname.startsWith('*.')
+}
+
+/** "example.com/api": a hostname with the part of it an application serves; the bare hostname without a path. */
+export function addressOf(hostname: string, path: string | null | undefined): string {
+  return `${hostname}${path ?? ''}`
+}
+
+/** Where an application answers, as a link; null without a domain and for a wildcard domain. */
+export function applicationUrl(app: Pick<Application, 'domain' | 'path'>): string | null {
+  if (!app.domain || isWildcard(app.domain)) return null
+  return `https://${addressOf(app.domain, app.path)}`
+}
+
+type Routed = Pick<Application, 'domain' | 'aliases' | 'redirects' | 'path'> | Pick<AppSpec, 'domain' | 'aliases' | 'redirects' | 'path'>
+
 /**
  * Every hostname an application answers on, the domain first, then its
- * aliases (served alike) and its redirects (308 to the domain). Empty when
- * the application has no domain.
+ * aliases (served alike) and its redirects (308 to the domain). The domain
+ * and the aliases carry the application's `path`; a redirect hostname is
+ * taken whole and sends the browser to the same path on the domain. Empty
+ * when the application has no domain.
  */
-export function hostnamesOf(app: Pick<Application, 'domain' | 'aliases' | 'redirects'> | Pick<AppSpec, 'domain' | 'aliases' | 'redirects'>): Hostname[] {
+export function hostnamesOf(app: Routed): Hostname[] {
   const domain = app.domain ?? ''
   if (domain === '') return []
+  const served = (host: string, kind: HostnameKind): Hostname => {
+    const address = addressOf(host, app.path)
+    return { host, kind, address, url: isWildcard(host) ? null : `https://${address}`, target: null }
+  }
   return [
-    { host: domain, kind: 'domain', target: null },
-    ...(app.aliases ?? []).map<Hostname>(host => ({ host, kind: 'alias', target: null })),
-    ...(app.redirects ?? []).map<Hostname>(host => ({ host, kind: 'redirect', target: domain })),
+    served(domain, 'domain'),
+    ...(app.aliases ?? []).map(host => served(host, 'alias')),
+    ...(app.redirects ?? []).map<Hostname>(host => ({ host, kind: 'redirect', address: host, url: `https://${host}`, target: domain })),
   ]
 }
 
-/** "www.example.com → example.com" for a redirect, the bare hostname otherwise. */
+/** "www.example.com → example.com" for a redirect, the address otherwise. */
 export function formatHostname(entry: Hostname): string {
-  return entry.target ? `${entry.host} → ${entry.target}` : entry.host
+  return entry.target ? `${entry.host} → ${entry.target}` : entry.address
+}
+
+/** "GET /old → /new (308)": one of the proxy block's redirects. */
+export function formatPathRedirect(redirect: { from: string, to: string, status: number }): string {
+  return `${redirect.from} → ${redirect.to} (${redirect.status})`
+}
+
+/** Whether a proxy block says anything: an empty one is the same as none. */
+export function hasProxySettings(spec: Pick<AppSpec, 'proxy'> | null | undefined): boolean {
+  const p = spec?.proxy
+  if (!p) return false
+  return Boolean(p.strip_prefix) || Object.keys(p.headers ?? {}).length > 0 || (p.basic_auth?.length ?? 0) > 0 || (p.redirects?.length ?? 0) > 0
 }
 
 /** Docker keeps a local copy of the logs only for these drivers; any other ships them elsewhere. */

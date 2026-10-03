@@ -4,12 +4,14 @@ import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
 import { LIVE_METRICS_SAMPLES } from '~/composables/useLiveMetrics'
 import { formatBytes, formatCores, formatMemoryUsage, formatPercent, splitImage } from '~/utils/format'
+import { alertsFor } from '~/utils/alerts'
+import { describeBackupPlan } from '~/utils/backups'
+import { describeIssued, hostnameCertificateDisplay } from '~/utils/certificates'
 import { rollbackCandidates } from '~/utils/deployments'
-import { METRICS_RANGES } from '~/utils/metricsHistory'
 import { roleHint } from '~/utils/roles'
 import { tidyDuration } from '~/utils/jobs'
-import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatPublish, hostnamesOf, shippedLogDriver } from '~/utils/spec'
-import { applicationStatusDisplay, containerStateDisplay, replicaHealthDisplay } from '~/utils/status'
+import { addressOf, describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatPathRedirect, formatPublish, hasProxySettings, hostnamesOf, shippedLogDriver } from '~/utils/spec'
+import { DRAINING_DISPLAY, applicationStatusDisplay, containerStateDisplay, isDraining, replicaHealthDisplay } from '~/utils/status'
 
 const route = useRoute()
 const router = useRouter()
@@ -178,6 +180,15 @@ const containers = computed(() => [...(app.data.value?.containers ?? [])].sort((
 const mixedVersions = computed(() => new Set((app.data.value?.containers ?? []).map(c => c.deployment_id)).size > 1)
 const sequenceById = computed(() => new Map((deployments.data.value ?? []).map(d => [d.id, d.sequence])))
 
+/**
+ * A deployment is complete once the new replicas serve; a container it
+ * replaced may still be using up its stop_timeout. It is listed, but as what
+ * it is: on its way out, not one more replica.
+ */
+const draining = (c: Container) => (app.data.value ? isDraining(c, app.data.value) : false)
+const replicaCount = computed(() => (app.data.value?.containers ?? []).filter(c => !draining(c)).length)
+const drainingCount = computed(() => (app.data.value?.containers ?? []).length - replicaCount.value)
+
 // A domain is only served if the agent has a reverse proxy, and can reach it.
 const server = useServerInfo()
 const proxyProblem = computed(() => {
@@ -191,6 +202,31 @@ const proxyProblem = computed(() => {
 // Every hostname the application answers on. Redirects are answered by the
 // proxy itself, so they keep working while the application is stopped.
 const hostnames = computed(() => (app.data.value ? hostnamesOf(app.data.value) : []))
+/** What the stop dialog names: the address visitors use, path included. */
+const address = computed(() => (app.data.value?.domain ? addressOf(app.data.value.domain, app.data.value.path) : ''))
+
+// The certificate the proxy presents for each hostname. Only what is not in
+// order gets a badge; issuer and expiry are on the hostname's tooltip.
+const certificateOf = computed(() => new Map((app.data.value?.certificates ?? []).map(c => [c.hostname, c])))
+function certificateBadge(host: string) {
+  const certificate = certificateOf.value.get(host)
+  return certificate ? hostnameCertificateDisplay(certificate) : null
+}
+function certificateTitle(host: string): string | undefined {
+  const certificate = certificateOf.value.get(host)
+  const issued = certificate ? describeIssued(certificate) : ''
+  return issued ? `Certificate: ${issued}` : undefined
+}
+
+/** The alerts the agent holds about this application; the server page has them all. */
+const alerts = computed(() => alertsFor(server.data.value?.alerts, name.value))
+
+const proxyBlock = computed(() => (hasProxySettings(spec.value) ? spec.value!.proxy! : null))
+/** What a whole-application account protects: the application's path, or everything. */
+const addressPath = computed(() => spec.value?.path || 'every path')
+const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+const backupPlan = computed(() => (spec.value?.backups ? describeBackupPlan(spec.value.backups) : ''))
+const stopTimeout = computed(() => (spec.value?.deploy.stop_timeout ? tidyDuration(spec.value.deploy.stop_timeout) : ''))
 
 const healthCheck = computed(() => describeHealth(spec.value?.health))
 const published = computed(() => (spec.value?.publish ?? []).map(formatPublish))
@@ -278,6 +314,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </NuxtLink>
         </p>
         <InlineError v-if="dialog === null" :error="actionError" />
+        <AlertList v-if="alerts.length > 0" :alerts="alerts" :link-application="false" />
 
         <!-- Summary: identity on the left, live numbers on the right -->
         <div class="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
@@ -325,15 +362,23 @@ const volumes = computed(() => spec.value?.volumes ?? [])
                 <template v-if="hostnames.length > 0">
                   <div v-for="entry in hostnames" :key="entry.host" class="flex flex-wrap items-center gap-x-2">
                     <a
-                      :href="`https://${entry.host}`"
+                      v-if="entry.url"
+                      :href="entry.url"
                       target="_blank"
                       rel="noopener noreferrer"
-                      class="mono link inline-flex items-center gap-1"
+                      class="mono link inline-flex min-w-0 items-center gap-1 break-all"
                       :class="entry.kind === 'redirect' ? 'text-fg-muted' : ''"
-                    >{{ entry.host }}<UiIcon name="external" :size="12" /></a>
+                      :title="certificateTitle(entry.host)"
+                    >{{ entry.address }}<UiIcon name="external" :size="12" /></a>
+                    <!-- A wildcard is a pattern, not an address: there is nothing to open. -->
+                    <span v-else class="mono break-all" :title="certificateTitle(entry.host) ?? 'Every name one label below is served alike'">{{ entry.address }}</span>
                     <span v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :title="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</span>
                     <span v-else-if="entry.kind === 'alias'" class="text-xs text-fg-subtle">alias</span>
                     <span v-if="entry.kind === 'domain' && proxyProblem" class="text-xs text-warn">{{ proxyProblem }}</span>
+                    <template v-if="certificateBadge(entry.host)">
+                      <StatusBadge v-bind="certificateBadge(entry.host)!" :raw="certificateOf.get(entry.host)?.status" />
+                      <span class="basis-full pb-1 text-xs text-fg-muted">{{ certificateOf.get(entry.host)?.message }}</span>
+                    </template>
                   </div>
                 </template>
                 <span v-else class="text-fg-muted">Not routed</span>
@@ -409,19 +454,7 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         <!-- The sampled history: per replica, average CPU and peak memory per step, refreshed every 30s -->
         <UiPanel v-if="!isStatic" title="History" :meta="history.history.value ? `every ${history.history.value.step}` : null">
           <template #actions>
-            <div role="group" aria-label="Range" class="inline-flex overflow-hidden rounded-sm border border-line-strong">
-              <button
-                v-for="r in METRICS_RANGES"
-                :key="r"
-                type="button"
-                class="mono h-6 border-l border-line-strong px-2 text-xs first:border-l-0"
-                :class="history.range.value === r ? 'bg-active font-medium text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg'"
-                :aria-pressed="history.range.value === r"
-                @click="history.range.value = r"
-              >
-                {{ r }}
-              </button>
-            </div>
+            <RangeSwitch v-model="history.range.value" />
           </template>
           <EmptyState v-if="!hasActive || history.unavailable.value" title="Nothing is deployed">
             The history starts with the first successful deployment.
@@ -446,7 +479,10 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </div>
         </UiPanel>
 
-        <UiPanel v-if="!isStatic" title="Replicas" :meta="app.data.value.containers.length">
+        <!-- What the proxy saw of it. A static application has traffic too: the proxy answers for it. -->
+        <TrafficPanel :application="name" :routed="Boolean(app.data.value.domain)" :enabled="hasActive && !gone" />
+
+        <UiPanel v-if="!isStatic" title="Replicas" :meta="drainingCount > 0 ? `${replicaCount} · ${drainingCount} stopping` : replicaCount">
           <EmptyState v-if="app.data.value.containers.length === 0" title="No containers">
             Nothing is running for this application.
           </EmptyState>
@@ -473,9 +509,9 @@ const volumes = computed(() => spec.value?.volumes ?? [])
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="c in containers" :key="c.id">
+                <tr v-for="c in containers" :key="c.id" :class="draining(c) ? 'text-fg-muted' : ''">
                   <td data-primary class="mono">
-                    {{ c.replica }}<span class="ml-2 text-fg-muted sm:hidden">{{ c.name }}</span>
+                    <span :class="draining(c) ? 'line-through decoration-fg-faint' : ''">{{ c.replica }}</span><span class="ml-2 text-fg-muted sm:hidden">{{ c.name }}</span>
                   </td>
                   <td class="mono max-sm:!hidden" :title="`${c.id.slice(0, 12)} · ${c.ip || 'no address'}`">
                     {{ c.name }}
@@ -484,10 +520,16 @@ const volumes = computed(() => spec.value?.volumes ?? [])
                     </span>
                   </td>
                   <td data-label="State">
-                    <StatusBadge v-bind="containerStateDisplay(c)" :raw="c.state" />
+                    <StatusBadge
+                      v-if="draining(c)"
+                      v-bind="DRAINING_DISPLAY"
+                      raw="Replaced by the last deployment. It was sent SIGTERM and has its stop_timeout to exit; it is no longer a replica."
+                    />
+                    <StatusBadge v-else v-bind="containerStateDisplay(c)" :raw="c.state" />
                   </td>
                   <td data-label="Health">
-                    <StatusBadge v-bind="replicaHealthDisplay(c.health)" :raw="c.health || 'no health check configured'" />
+                    <span v-if="draining(c)" class="text-fg-faint">—</span>
+                    <StatusBadge v-else v-bind="replicaHealthDisplay(c.health)" :raw="c.health || 'no health check configured'" />
                   </td>
                   <td data-label="Restarts" class="mono" :class="c.crash_loop ? 'text-danger' : c.restarts > 0 ? 'text-warn' : 'text-fg-muted'">
                     <span>{{ c.restarts }}<span v-if="c.crash_loop" class="font-sans"> (crash loop)</span></span>
@@ -516,6 +558,17 @@ const volumes = computed(() => spec.value?.volumes ?? [])
               </dt>
               <dd class="mono mt-0.5">
                 {{ spec.static.dir }}/ <span class="font-sans text-fg-muted">— served by the proxy, no container. Relative to deploy.yaml on the machine that deploys.</span>
+              </dd>
+            </div>
+            <div class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Fallback page
+              </dt>
+              <dd class="mono mt-0.5">
+                <template v-if="spec.static.fallback">
+                  {{ spec.static.fallback }} <span class="font-sans text-fg-muted">— answered with 200 for a path that names no file, so a single-page application can route it.</span>
+                </template>
+                <span v-else class="font-sans text-fg-muted">None: a path that names no file is a 404.</span>
               </dd>
             </div>
           </dl>
@@ -566,6 +619,15 @@ const volumes = computed(() => spec.value?.volumes ?? [])
               </dt>
               <dd class="mono mt-0.5">
                 {{ spec.deploy.strategy }}
+                <span v-if="stopTimeout" class="text-fg-muted" title="deploy.stop_timeout: how long a replica gets after SIGTERM before it is killed, wherever one is stopped">· stop timeout {{ stopTimeout }}</span>
+              </dd>
+            </div>
+            <div v-if="backupPlan" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Backups
+              </dt>
+              <dd class="mt-0.5 break-words" title="The backups block of deploy.yaml; the Backups panel below lists what was taken">
+                {{ backupPlan }}
               </dd>
             </div>
             <div v-if="process.length > 0" class="bg-bg px-4 py-2.5">
@@ -617,6 +679,60 @@ const volumes = computed(() => spec.value?.volumes ?? [])
           </dl>
         </UiPanel>
 
+        <!-- The proxy block of deploy.yaml, read-only. Passwords are masked by the agent and are not shown at all. -->
+        <UiPanel v-if="spec && (proxyBlock || spec.path)" title="Proxy">
+          <!-- An odd cell at the end takes the whole row, so the grid's hairline color never shows as an empty cell. -->
+          <dl class="grid gap-px bg-line sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2">
+            <div v-if="spec.path" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Path
+              </dt>
+              <dd class="mt-0.5">
+                <span class="mono">{{ spec.path }}</span>
+                <span class="text-fg-muted">
+                  — {{ proxyBlock?.strip_prefix ? 'removed before a request reaches the application, which sees / where the visitor asked for' : 'passed on as it is; the application sees' }}
+                  <span class="mono">{{ spec.path }}</span>. Other applications may serve the rest of the domain.
+                </span>
+              </dd>
+            </div>
+            <div v-if="proxyHeaders.length > 0" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Response headers
+              </dt>
+              <dd class="mono mt-0.5 space-y-0.5">
+                <div v-for="[header, value] in proxyHeaders" :key="header" class="break-all">
+                  <span class="text-fg-muted">{{ header }}:</span> {{ value }}
+                </div>
+              </dd>
+            </div>
+            <div v-if="proxyBlock?.basic_auth?.length" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Password protection
+              </dt>
+              <dd class="mt-0.5 space-y-0.5">
+                <div v-for="(account, index) in proxyBlock.basic_auth" :key="index" class="flex flex-wrap items-baseline gap-x-2">
+                  <span class="mono break-all">{{ account.path || addressPath }}</span>
+                  <span class="text-fg-muted">asks for the password of</span>
+                  <span class="mono break-all">{{ account.username }}</span>
+                </div>
+                <p class="text-xs text-fg-subtle">
+                  Passwords are stored encrypted and never returned.
+                </p>
+              </dd>
+            </div>
+            <div v-if="proxyBlock?.redirects?.length" class="bg-bg px-4 py-2.5">
+              <dt class="label">
+                Redirects
+              </dt>
+              <dd class="mono mt-0.5 space-y-0.5">
+                <div v-for="redirect in proxyBlock.redirects" :key="redirect.from" class="break-all">
+                  {{ formatPathRedirect(redirect) }}
+                </div>
+              </dd>
+            </div>
+          </dl>
+        </UiPanel>
+
         <JobsSection
           v-if="spec && hasActive && !gone && !isStatic"
           :application="name"
@@ -636,6 +752,17 @@ const volumes = computed(() => spec.value?.volumes ?? [])
             @restore="openRestore"
           />
         </UiPanel>
+
+        <BackupsPanel
+          v-if="spec && volumes.length > 0 && hasActive && !gone"
+          :application="name"
+          :spec="spec"
+          :may-deploy="mayDeploy"
+          :admin="mayAdmin"
+          :stopped="stopped && app.data.value.replicas.running === 0"
+          :busy="busy"
+          @changed="refreshAll"
+        />
 
         <UiPanel title="Deployments">
           <template #actions>
@@ -713,14 +840,17 @@ const volumes = computed(() => spec.value?.volumes ?? [])
         @confirm="setRunning(false)"
       >
         <template v-if="isStatic">
-          <span class="mono text-fg">{{ app.data.value.domain }}</span> answers 503 instead of the files<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>.
+          <span class="mono text-fg">{{ address }}</span> answers 503 instead of the files<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>.
         </template>
         <template v-else>
           All replicas are stopped<template v-if="app.data.value.domain">
-            and <span class="mono text-fg">{{ app.data.value.domain }}</span> stops answering<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>
+            and <span class="mono text-fg">{{ address }}</span> stops answering<template v-if="app.data.value.redirects?.length"> (its redirects keep working)</template>
           </template>.
         </template>
         The application stays stopped, across agent restarts too, until you start it again. Nothing is deleted.
+        <template v-if="stopTimeout && !isStatic">
+          Each replica gets {{ stopTimeout }} to finish what it is doing, so this can take that long to answer.
+        </template>
       </ConfirmDialog>
       <DeleteDialog :open="dialog === 'delete'" :name="name" @close="closeDialog" @deleted="router.replace('/applications')" />
       <RestoreDialog

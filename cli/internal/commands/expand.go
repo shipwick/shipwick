@@ -18,8 +18,9 @@ import (
 // from --env-file. Only the ${NAME} form is recognized (spec.Placeholder) — a
 // bare $NAME is left alone, and $${NAME} yields a literal ${NAME}.
 //
-// Env values are the exception in two ways, because the agent fills them in
-// too, from the secrets stored on the server (`shipwick secret set`): a name
+// Env values, and the passwords of proxy.basic_auth with them, are the
+// exception in two ways, because the agent fills them in too, from the
+// secrets stored on the server (`shipwick secret set`): a name
 // that is set nowhere here is left in place for the server rather than being
 // an error, and $${NAME} is left as it is, for the agent to turn into ${NAME}
 // — done here, the agent would take the result for a placeholder. Anywhere
@@ -33,7 +34,7 @@ import (
 // carries names only, never values.
 type placeholders struct {
 	substituted []string // filled in here, from the environment or --env-file
-	deferred    []string // env values left for the agent to fill in from its secrets
+	deferred    []string // secret values left for the agent to fill in from its secrets
 }
 
 // note is the parenthesis after "Validated deploy.yaml".
@@ -69,7 +70,7 @@ func expand(data []byte, lookup func(string) (string, bool)) ([]byte, placeholde
 	if len(x.missing) > 0 {
 		sort.Strings(x.missing)
 		missing := unique(x.missing)
-		return nil, placeholders{}, fmt.Errorf("refers to %s, which %s not set\n\nSet %s in the environment, or in a file given with --env-file. Only values under env can be left to the secrets on the server.",
+		return nil, placeholders{}, fmt.Errorf("refers to %s, which %s not set\n\nSet %s in the environment, or in a file given with --env-file. Only values under env and the passwords of proxy.basic_auth can be left to the secrets on the server.",
 			quoteAll(missing), pluralIs(len(missing)), pluralIt(len(missing)))
 	}
 	if !x.changed {
@@ -90,9 +91,10 @@ type expander struct {
 	placeholders
 }
 
-// walkRoot walks the top-level mapping, where the env block is told apart:
-// its values are the ones the agent fills in from its secrets. In a
-// shipwick.yaml every entry of apps is such a mapping.
+// walkRoot walks the top-level mapping, where the env block and the proxy
+// block are told apart: env values and basic-auth passwords are the ones the
+// agent fills in from its secrets. In a shipwick.yaml every entry of apps is
+// such a mapping.
 func (x *expander) walkRoot(n *yaml.Node) {
 	if n.Kind != yaml.MappingNode {
 		x.walk(n, false)
@@ -106,7 +108,36 @@ func (x *expander) walkRoot(n *yaml.Node) {
 			}
 			continue
 		}
+		if key == "proxy" {
+			x.walkProxy(value)
+			continue
+		}
 		x.walk(value, key == "env")
+	}
+}
+
+// walkProxy walks the proxy block, whose one secret is the password of a
+// basic_auth entry.
+func (x *expander) walkProxy(n *yaml.Node) {
+	if n.Kind != yaml.MappingNode {
+		x.walk(n, false)
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key, value := n.Content[i].Value, n.Content[i+1]
+		if key != "basic_auth" || value.Kind != yaml.SequenceNode {
+			x.walk(value, false)
+			continue
+		}
+		for _, entry := range value.Content {
+			if entry.Kind != yaml.MappingNode {
+				x.walk(entry, false)
+				continue
+			}
+			for j := 0; j+1 < len(entry.Content); j += 2 {
+				x.walk(entry.Content[j+1], entry.Content[j].Value == "password")
+			}
+		}
 	}
 }
 
@@ -214,8 +245,8 @@ func (c *cli) lookup(files map[string]string) func(string) (string, bool) {
 }
 
 // loadConfig reads a deploy.yaml, substitutes its placeholders and validates
-// it. data is what is sent to the agent: complete but for the env values the
-// server fills in from its secrets.
+// it. data is what is sent to the agent: complete but for the secret values
+// the server fills in from what it has stored.
 func (c *cli) loadConfig(path string, envFiles []string, image string) (data []byte, app spec.App, vars placeholders, err error) {
 	data, err = readFile(path)
 	if err != nil {
@@ -236,8 +267,8 @@ func (c *cli) loadConfig(path string, envFiles []string, image string) (data []b
 	return data, app, vars, err
 }
 
-// printDeferred says, under a validation summary, which env values the
-// server will fill in. It cannot say whether the server has them: that is
+// printDeferred says, under a validation summary, which values the server
+// will fill in. It cannot say whether the server has them: that is
 // the deployment's first check.
 func (c *cli) printDeferred(vars placeholders) {
 	if len(vars.deferred) == 0 {

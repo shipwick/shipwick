@@ -18,7 +18,9 @@ const mayAdmin = computed(() => access.can('admin'))
 
 // --- set ------------------------------------------------------------------------
 
-const name = ref('')
+// A deployment refused for a secret that is not stored links here with its name.
+const route = useRoute()
+const name = ref(typeof route.query.name === 'string' ? route.query.name : '')
 const value = ref('')
 const setting = ref(false)
 const setError = shallowRef<AgentError | null>(null)

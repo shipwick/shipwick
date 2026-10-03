@@ -101,6 +101,7 @@ func (e *Engine) StartSupervisor() {
 		}
 	}()
 	e.startSampler()
+	e.startProxyWatch()
 }
 
 // tick performs one supervision pass. Time is a parameter so that tests can
@@ -128,6 +129,7 @@ func (s *supervisor) tick(ctx context.Context, now time.Time) {
 	}
 	s.forgetGone(ctx, active)
 	s.forgetDown(apps)
+	s.forgetAlerts(apps, now)
 
 	// Routing follows readiness: a replica that just died or turned unhealthy
 	// leaves the rotation here, one that recovered rejoins it. Syncing is a
@@ -224,8 +226,13 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 		if c.Job != "" {
 			continue
 		}
+		if s.e.draining(c.ID) {
+			continue // replaced by the last deployment and on its way out: see drain.go
+		}
 		if c.DeploymentID != d.ID {
-			if err := s.e.retireContainer(ctx, c.ID); err == nil {
+			// In the background: its grace period is its application's
+			// business, and a tick must not sit it out with the lock held.
+			if s.e.retireInBackground(c, s.e.gracePeriodOf(ctx, c.DeploymentID), nil) {
 				s.event(ctx, app, api.LevelWarn, "Removed leftover container %s", c.Name)
 			}
 		}
@@ -255,6 +262,7 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 	if len(missing) > 0 {
 		s.recreateReplicas(ctx, now, app, d, missing)
 	}
+	s.noteAlerts(ctx, now, app, d, replicas, byID)
 	s.noteAvailability(ctx, app, d, replicas, byID)
 }
 
@@ -399,7 +407,7 @@ func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app st
 	}
 	if restartUnhealthy {
 		s.restart(ctx, now, app, r, func() error {
-			return s.e.restartNameless(ctx, r.ContainerID)
+			return s.e.restartNameless(ctx, r.ContainerID, s.e.gracePeriod(d.Spec))
 		})
 	}
 }
@@ -543,6 +551,7 @@ func (s *supervisor) restart(ctx context.Context, now time.Time, app store.Appli
 		s.event(ctx, app, api.LevelError, "Replica %d could not be restarted (attempt %d): %v", r.Index, attempt, err)
 	} else {
 		s.event(ctx, app, api.LevelInfo, "Replica %d restarted (attempt %d)", r.Index, attempt)
+		s.e.alerts.noteRestart(r.ContainerID, now)
 		if err := s.e.store.IncrementReplicaRestarts(context.WithoutCancel(ctx), r.ContainerID); err != nil {
 			s.e.log.Warn("could not count restart", "container", r.ContainerName, "error", err)
 		}

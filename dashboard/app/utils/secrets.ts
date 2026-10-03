@@ -33,6 +33,25 @@ export function replaces(name: string, stored: readonly Pick<Secret, 'name'>[]):
   return name !== '' && stored.some(s => s.name === name)
 }
 
+const SECRET_COMMAND = /^shipwick secret set ([A-Za-z_][A-Za-z0-9_]*)$/
+
+/**
+ * The secrets a refused deployment is missing, by name and without repeats.
+ * The agent answers INVALID_CONFIG with one entry per reference — field
+ * `env.<VARIABLE>` or `proxy.basic_auth[i].password` — whose `expected` is
+ * the command that stores the secret; the name is read from there, so a
+ * stored secret that is merely unusable (too short a password) is offered
+ * for replacement the same way.
+ */
+export function missingSecrets(fields: readonly { field: string, expected?: string }[]): string[] {
+  const names: string[] = []
+  for (const f of fields) {
+    const name = SECRET_COMMAND.exec(f.expected ?? '')?.[1]
+    if (name && !names.includes(name)) names.push(name)
+  }
+  return names
+}
+
 /** What removing a secret does, for the confirmation. */
 export function secretRemovalConsequence(name: string): string {
   return `Deployments already made keep their value. The next deploy whose env refers to \${${name}} is refused until the secret is stored again.`

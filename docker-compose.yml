@@ -34,6 +34,26 @@ services:
       # Optional: a webhook told about deployment outcomes
       SHIPWICK_WEBHOOK_URL: ${SHIPWICK_WEBHOOK_URL:-}
       SHIPWICK_WEBHOOK_SECRET: ${SHIPWICK_WEBHOOK_SECRET:-}
+      # Optional: backups encrypted, and sent to an S3-compatible bucket as well
+      SHIPWICK_BACKUP_DIR: ${SHIPWICK_BACKUP_DIR:-}
+      SHIPWICK_BACKUP_PASSPHRASE: ${SHIPWICK_BACKUP_PASSPHRASE:-}
+      SHIPWICK_BACKUP_S3_ENDPOINT: ${SHIPWICK_BACKUP_S3_ENDPOINT:-}
+      SHIPWICK_BACKUP_S3_BUCKET: ${SHIPWICK_BACKUP_S3_BUCKET:-}
+      SHIPWICK_BACKUP_S3_ACCESS_KEY_ID: ${SHIPWICK_BACKUP_S3_ACCESS_KEY_ID:-}
+      SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY: ${SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY:-}
+      SHIPWICK_BACKUP_S3_REGION: ${SHIPWICK_BACKUP_S3_REGION:-}
+      SHIPWICK_BACKUP_S3_PREFIX: ${SHIPWICK_BACKUP_S3_PREFIX:-}
+      # Optional: an export of the whole server on a schedule, or this server as a standby
+      SHIPWICK_EXPORT_SCHEDULE: ${SHIPWICK_EXPORT_SCHEDULE:-}
+      SHIPWICK_EXPORT_KEEP: ${SHIPWICK_EXPORT_KEEP:-}
+      SHIPWICK_STANDBY_SCHEDULE: ${SHIPWICK_STANDBY_SCHEDULE:-}
+      # Optional: a Cloudflare API token, for certificates through the DNS
+      # challenge (hostnames behind Cloudflare's proxy, wildcards)
+      SHIPWICK_CLOUDFLARE_API_TOKEN: ${SHIPWICK_CLOUDFLARE_API_TOKEN:-}
+      # Optional: the encryption key from here instead of the key file in the data directory
+      SHIPWICK_ENCRYPTION_KEY: ${SHIPWICK_ENCRYPTION_KEY:-}
+      SHIPWICK_ALERT_MEMORY_PERCENT: ${SHIPWICK_ALERT_MEMORY_PERCENT:-}
+      SHIPWICK_ALERT_DISK_PERCENT: ${SHIPWICK_ALERT_DISK_PERCENT:-}
     ports:
       # Loopback only: the API is plain HTTP and must not face the network.
       - "127.0.0.1:9000:9000"
@@ -48,7 +68,10 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2-alpine
+    # Caddy with the Cloudflare DNS provider: see Dockerfile.caddy.
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
     # --resume: after a restart, come back with the last configuration the
     # agent loaded rather than the empty bootstrap one. (The agent would
     # notice and reload within seconds either way.)

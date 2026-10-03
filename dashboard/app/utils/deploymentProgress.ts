@@ -49,12 +49,18 @@ export interface DeploymentProgress {
   completedAt: string | null
   /** Set while polling is failing; the last known state stays on screen. */
   pollError: string | null
+  /**
+   * The polls fail because the agent is not there: unreachable, or shutting
+   * down for a restart. A deployment in flight is not failed by that; the
+   * agent resumes it when it is back, so the phase stays what it was.
+   */
+  agentAway: boolean
 }
 
 export type ProgressAction
   = | { type: 'started', deployment: Deployment }
     | { type: 'polled', detail: DeploymentDetail }
-    | { type: 'poll_failed', message: string }
+    | { type: 'poll_failed', message: string, unreachable?: boolean }
     | { type: 'dismissed' }
 
 const ACTIVITY: Record<DeploymentStatus, string> = {
@@ -94,7 +100,7 @@ export function progressReducer(state: DeploymentProgress | null, action: Progre
     }
 
     case 'poll_failed':
-      return state ? { ...state, pollError: action.message } : state
+      return state ? { ...state, pollError: action.message, agentAway: action.unreachable === true } : state
 
     case 'dismissed':
       return null
@@ -132,6 +138,7 @@ function fromDeployment(d: Deployment, events: readonly AgentEvent[], previous: 
     startedAt: d.started_at,
     completedAt: d.completed_at,
     pollError: null,
+    agentAway: false,
   }
 }
 

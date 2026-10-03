@@ -79,12 +79,40 @@ func TestAPIErrorsAreDecoded(t *testing.T) {
 
 func TestNonJSONErrorFromAProxy(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		fmt.Fprint(w, "<html>502 Bad Gateway</html>")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, "<html>403 Forbidden</html>")
 	})
 	_, err := c.Applications(context.Background())
 	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Status != 502 || !strings.Contains(apiErr.Message, "502") {
+	if !errors.As(err, &apiErr) || apiErr.Status != 403 || !strings.Contains(apiErr.Message, "403") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// The proxy answers 502, 503 or 504 of its own while the agent restarts.
+// That is the agent being away, which a client waiting for a deployment
+// rides out — not an answer of the agent's.
+func TestAProxyAnsweringForAnAgentThatIsAwayIsUnreachable(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) })
+		_, err := c.Deployment(context.Background(), 7)
+		var unreachable *UnreachableError
+		if !errors.As(err, &unreachable) || unreachable.ProxyStatus != status || !strings.HasPrefix(unreachable.URL, "http://127.0.0.1") {
+			t.Errorf("HTTP %d: err = %#v", status, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "/api/v1") {
+			t.Errorf("HTTP %d: the message should name the agent, not the request: %v", status, err)
+		}
+	}
+
+	// The agent's own 503, in its envelope, stays what it says.
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"code":"INTERNAL","message":"shutting down","details":{}}}`)
+	})
+	_, err := c.Applications(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Message != "shutting down" {
 		t.Errorf("err = %v", err)
 	}
 }

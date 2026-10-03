@@ -17,6 +17,8 @@ import (
 	"github.com/shipwick/shipwick/cli/internal/client"
 	"github.com/shipwick/shipwick/cli/internal/ui"
 	"github.com/shipwick/shipwick/pkg/api"
+	"github.com/shipwick/shipwick/pkg/cloudflare"
+	"github.com/shipwick/shipwick/pkg/spec"
 	"github.com/shipwick/shipwick/pkg/version"
 )
 
@@ -26,8 +28,9 @@ func (c *cli) doctorCommand() *cobra.Command {
 		Short: "Check the setup end to end and say what to fix",
 		Long: `Check the setup end to end: the versions of this shipwick and of the agent,
 whether the agent answers and accepts the token, Docker and the proxy on the
-server, ports 80 and 443, and for every application with a domain whether DNS
-points at the server and https://<domain>/ answers.
+server, its active alerts, whether its own state is backed up, certificates of
+your own that run out, ports 80 and 443, and for every application with a
+domain whether DNS points at the server and https://<domain>/ answers.
 
 Each line says what to do about it. The command exits non-zero when something
 is broken (✗), not for things merely worth a look (!).`,
@@ -42,6 +45,31 @@ is broken (✗), not for things merely worth a look (!).`,
 type report struct {
 	c               *cli
 	problems, hints int
+	// dnsChallenge is what the agent said about its certificates: obtained
+	// through a DNS record, so a hostname behind Cloudflare's proxy is in
+	// order and "DNS only" is no longer advice to give.
+	dnsChallenge bool
+}
+
+// dnsOnly ends the advice to create a record: unproxied, unless certificates
+// do not depend on that.
+func (r *report) dnsOnly() string {
+	if r.dnsChallenge {
+		return ""
+	}
+	return ", DNS only (not proxied)"
+}
+
+// behindCloudflare reports a hostname that resolves to Cloudflare's proxy, in
+// the agent's words: fine when certificates come through DNS, and otherwise
+// the one case where the record is right and a switch is what to change.
+func (r *report) behindCloudflare(hostname string, addrs []string) {
+	if r.dnsChallenge {
+		r.ok("%s → Cloudflare's proxy (%s)", hostname, strings.Join(addrs, ", "))
+		return
+	}
+	r.problem("%s resolves to Cloudflare's proxy (%s), not to the server: turn the proxy off for this record (DNS only), or set SHIPWICK_CLOUDFLARE_API_TOKEN on the agent to keep it on",
+		hostname, strings.Join(addrs, ", "))
 }
 
 func (r *report) ok(format string, args ...any) { r.c.ui.Success(format, args...) }
@@ -54,6 +82,21 @@ func (r *report) hint(format string, args ...any) {
 func (r *report) problem(format string, args ...any) {
 	r.problems++
 	r.c.ui.Failure(format, args...)
+}
+
+// suppliedCertificates reports the certificates the operator supplied that
+// are near their end or past it. Nothing renews those but the operator, and
+// an expired one keeps being served.
+func (r *report) suppliedCertificates(certificates []api.Certificate, now time.Time) {
+	for _, cert := range certificates {
+		replace := fmt.Sprintf("shipwick cert set %s --cert <file> --key <file>", shellQuote(cert.Hostname))
+		switch left := cert.NotAfter.Sub(now); {
+		case left <= 0:
+			r.problem("The certificate you supplied for %s expired on %s, and browsers refuse it. Replace it with: %s", cert.Hostname, cert.NotAfter.UTC().Format("2006-01-02"), replace)
+		case left < expiresSoon:
+			r.hint("The certificate you supplied for %s expires on %s. Replace it before then with: %s", cert.Hostname, cert.NotAfter.UTC().Format("2006-01-02"), replace)
+		}
+	}
 }
 
 // finish sums up and turns problems into a non-zero exit; the lines above
@@ -138,6 +181,13 @@ func (c *cli) doctor(ctx context.Context) error {
 	default:
 		r.ok("Proxy serving %s", plural(p.Routes, "domain"))
 	}
+	r.alerts(info.Alerts)
+	r.dnsChallenge = info.Proxy.DNSChallenge
+	// An agent from before supplied certificates has none to report.
+	if supplied, err := cl.Certificates(ctx); err == nil {
+		r.suppliedCertificates(supplied, c.now())
+	}
+	r.checkStateBackup(info.Backups, c.now())
 
 	serverAddrs := c.serverAddresses(ctx, r, local, cl.URL())
 	for _, port := range []int{80, 443} {
@@ -163,9 +213,15 @@ func (c *cli) doctor(ctx context.Context) error {
 		}
 		hostnames := append(append([]string{app.Domain}, app.Aliases...), app.Redirects...)
 		for _, h := range hostnames {
+			if spec.IsWildcard(h) {
+				r.ok("%s is a wildcard: it has no single record or address to check", h)
+				continue
+			}
 			c.checkDNS(ctx, r, local, h, serverAddrs)
 		}
-		c.checkHTTPS(ctx, r, local, app)
+		if !spec.IsWildcard(app.Domain) {
+			c.checkHTTPS(ctx, r, local, app)
+		}
 	}
 	return r.finish()
 }
@@ -189,7 +245,16 @@ func (c *cli) serverAddresses(ctx context.Context, r *report, local localOptions
 	}
 	addrs, err := local.lookupHost(ctx, host)
 	if err != nil || len(addrs) == 0 {
-		r.problem("%s, the agent's hostname, does not resolve, yet the agent answered: DNS may be set only on this machine. Create an A record for it, DNS only (not proxied)", host)
+		r.problem("%s, the agent's hostname, does not resolve, yet the agent answered: DNS may be set only on this machine. Create an A record for it%s", host, r.dnsOnly())
+		return nil
+	}
+	if cloudflare.Proxied(addrs) {
+		// The addresses are Cloudflare's, not the server's: nothing can be
+		// dialled or compared through them.
+		r.behindCloudflare(host, addrs)
+		if r.dnsChallenge {
+			r.hint("The server's own address is not known behind Cloudflare's proxy: ports 80 and 443 and the records' targets are not checked")
+		}
 		return nil
 	}
 	r.ok("%s → %s", host, strings.Join(addrs, ", "))
@@ -202,14 +267,16 @@ func (c *cli) checkDNS(ctx context.Context, r *report, local localOptions, hostn
 	switch {
 	case errors.As(err, &dnsErr) && dnsErr.IsNotFound, err == nil && len(addrs) == 0:
 		if len(serverAddrs) > 0 {
-			r.problem("%s does not resolve. Create an A record %s → %s, DNS only (not proxied)", hostname, hostname, serverAddrs[0])
+			r.problem("%s does not resolve. Create an A record %s → %s%s", hostname, hostname, serverAddrs[0], r.dnsOnly())
 		} else {
-			r.problem("%s does not resolve. Create an A record for it pointing at the server, DNS only (not proxied)", hostname)
+			r.problem("%s does not resolve. Create an A record for it pointing at the server%s", hostname, r.dnsOnly())
 		}
 	case err != nil:
 		r.hint("%s could not be looked up: %s", hostname, cause(err))
+	case cloudflare.Proxied(addrs) && !overlap(addrs, serverAddrs):
+		r.behindCloudflare(hostname, addrs)
 	case len(serverAddrs) > 0 && !overlap(addrs, serverAddrs):
-		r.problem("%s → %s, which is not the server (%s). Point the record at the server; if it is proxied through a CDN, turn the proxy off (DNS only)",
+		r.problem("%s → %s, which is not the server (%s). Point the record at the server",
 			hostname, strings.Join(addrs, ", "), strings.Join(serverAddrs, ", "))
 	default:
 		r.ok("%s → %s", hostname, strings.Join(addrs, ", "))
@@ -217,7 +284,7 @@ func (c *cli) checkDNS(ctx context.Context, r *report, local localOptions, hostn
 }
 
 func (c *cli) checkHTTPS(ctx context.Context, r *report, local localOptions, app api.Application) {
-	address := "https://" + app.Domain + "/"
+	address := "https://" + app.Domain + app.Path + "/"
 	// A redirect is an answer too; what it points at is the application's
 	// business.
 	noFollow := *local.http

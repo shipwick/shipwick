@@ -149,6 +149,28 @@ describe('progressReducer', () => {
     expect(state?.pollError).toBeNull()
   })
 
+  it('does not fail a deployment because the agent went away: it is resumed, and so is the watching', () => {
+    let state = progressReducer(null, { type: 'polled', detail: detail({ status: 'HEALTH_CHECKING' }, [event('step', 'Started 1 container')]) })
+    state = progressReducer(state, { type: 'poll_failed', message: 'Cannot reach the Shipwick agent at http://agent:9000', unreachable: true })
+    expect(state?.phase).toBe('running')
+    expect(state?.agentAway).toBe(true)
+    expect(state?.error).toBe('')
+    expect(state?.steps).toHaveLength(1)
+    // The agent is back and says where it picked the deployment up.
+    state = progressReducer(state, { type: 'polled', detail: detail({ status: 'HEALTH_CHECKING' }, [event('step', 'Resumed after the agent restarted')]) })
+    expect(state?.agentAway).toBe(false)
+    expect(state?.pollError).toBeNull()
+    expect(state?.steps.map(s => s.message)).toEqual(['Started 1 container', 'Resumed after the agent restarted'])
+    expect(state?.steps.every(s => s.kind === 'done')).toBe(true)
+  })
+
+  it('tells any other failed poll from an agent that is away', () => {
+    let state = progressReducer(null, { type: 'started', deployment: base })
+    state = progressReducer(state, { type: 'poll_failed', message: 'Request failed with status 500' })
+    expect(state?.agentAway).toBe(false)
+    expect(state?.phase).toBe('running')
+  })
+
   it('poll_failed without a deployment is a no-op, dismissed clears', () => {
     expect(progressReducer(null, { type: 'poll_failed', message: 'x' })).toBeNull()
     const state = progressReducer(null, { type: 'started', deployment: base })

@@ -349,6 +349,7 @@ func TestSupervisorSweepsLeftoverContainers(t *testing.T) {
 	// A cleanup that was interrupted: a container of a long-gone deployment.
 	stale, _, _ := s.rt.CreateContainer(ctx, docker.ContainerSpec{App: "web", DeploymentID: d.ID + 100, Sequence: 99, Replica: 1, Image: "web:0.9"})
 	s.advance(time.Second)
+	s.engine.Wait() // it is retired in the background
 
 	for _, c := range s.rt.Containers() {
 		if c.ID == stale {

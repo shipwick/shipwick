@@ -72,3 +72,15 @@ func decodeEncryptionKey(s string) ([]byte, error) {
 	}
 	return key, nil
 }
+
+// ParseEncryptionKey decodes a key from the form the key file and the
+// environment variable hold it in.
+func ParseEncryptionKey(s string) ([]byte, error) {
+	return decodeEncryptionKey(s)
+}
+
+// FormatEncryptionKey is the reverse: what to write to the key file, or to
+// put in the environment variable.
+func FormatEncryptionKey(key []byte) string {
+	return hex.EncodeToString(key)
+}

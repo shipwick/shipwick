@@ -50,6 +50,7 @@ func (e *Engine) startSampler() {
 				return
 			case now := <-ticker.C:
 				e.sample(e.baseCtx, now)
+				e.checkAlerts(e.baseCtx, now)
 			}
 		}
 	}()

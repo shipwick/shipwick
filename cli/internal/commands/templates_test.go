@@ -37,6 +37,12 @@ func sampleProjects() map[string]project {
 			Python: pythonProject{Version: "3.12", Requirements: true, Command: `["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`}},
 		"python pyproject": {Kind: kindPython, Port: 8000, HealthPath: "/health",
 			Python: pythonProject{Version: "3.13", Command: `["gunicorn", "--bind", "0.0.0.0:8000", "site.wsgi:application"]`}},
+		"python uv": {Kind: kindPython, Port: 8000, HealthPath: "/health",
+			Python: pythonProject{Version: "3.12", Uv: true, Command: `["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`}},
+		"sveltekit": {Kind: kindSvelte, Port: 3000, HealthPath: "/", HealthLive: true,
+			Node: nodeProject{Manifests: npm.Manifests, Install: npm.Install, Prune: npm.Prune, Run: npm.Run, HasBuild: true}},
+		"astro": {Kind: kindNode, Port: 4321, HealthPath: "/", HealthLive: true,
+			Node: nodeProject{Manifests: npm.Manifests, Install: npm.Install, Prune: npm.Prune, Run: npm.Run, HasBuild: true, Host: true, Start: `["node", "./dist/server/entry.mjs"]`}},
 	}
 }
 
@@ -149,6 +155,12 @@ func TestDockerfileTemplateDetails(t *testing.T) {
 	contains("python requirements", "python:3.12-slim", "COPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt", "RUN useradd --create-home app\nUSER app", `CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]`)
 	contains("python pyproject", "python:3.13-slim", "RUN pip install --no-cache-dir .\n")
 	lacks("python pyproject", "requirements.txt")
+	contains("python uv", "python:3.12-slim", "COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv", "COPY pyproject.toml uv.lock ./\nRUN uv sync --frozen --no-dev --no-install-project\nCOPY . .\nRUN uv sync --frozen --no-dev\n",
+		"UV_PYTHON_DOWNLOADS=never", "PATH=/app/.venv/bin:$PATH", "COPY --from=build /app /app\nRUN useradd --create-home app\nUSER app")
+	lacks("python uv", "pip install", "/opt/venv")
+	contains("sveltekit", "RUN npm run build\nRUN npm prune --omit=dev\n", "COPY --from=build /src/package.json ./", "COPY --from=build /src/node_modules ./node_modules", "COPY --from=build /src/build ./build", "PORT=3000", `CMD ["node", "build"]`)
+	contains("astro", "ENV NODE_ENV=production HOST=0.0.0.0 PORT=4321", `CMD ["node", "./dist/server/entry.mjs"]`)
+	lacks("node", "HOST=")
 }
 
 func TestRenderConfigForProjects(t *testing.T) {

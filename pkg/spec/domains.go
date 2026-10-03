@@ -24,17 +24,23 @@ func (r raw) validateDomains(verr *ValidationError, domain string) (aliases, red
 		}
 		return nil, nil
 	}
+	if IsWildcard(domain) && len(r.Redirects) > 0 {
+		// A redirect needs one address to send the visitor to.
+		verr.add("redirects", "cannot be sent to a wildcard domain", "domain: example.com, with the wildcard under aliases")
+	}
 	// One hostname, one meaning: listed twice, or as an alias and a
 	// redirect, the proxy would have two routes for it.
 	seen := map[string]string{domain: "domain"}
-	aliases = validateHostnames(verr, "aliases", r.Aliases, seen)
-	redirects = validateHostnames(verr, "redirects", r.Redirects, seen)
+	aliases = validateHostnames(verr, "aliases", r.Aliases, seen, ValidateHostname)
+	redirects = validateHostnames(verr, "redirects", r.Redirects, seen, ValidateDomain)
 	return aliases, redirects
 }
 
 // validateHostnames normalizes the entries of one list the way the domain is
-// normalized, and records each under its field in seen.
-func validateHostnames(verr *ValidationError, field string, in []string, seen map[string]string) []string {
+// normalized, and records each under its field in seen. valid says what a
+// hostname of this list may be: an alias may be a wildcard, a redirect is one
+// name.
+func validateHostnames(verr *ValidationError, field string, in []string, seen map[string]string, valid func(string) error) []string {
 	if len(in) == 0 {
 		return nil
 	}
@@ -48,7 +54,7 @@ func validateHostnames(verr *ValidationError, field string, in []string, seen ma
 		h := strings.ToLower(strings.TrimSpace(raw))
 		if h == "" {
 			verr.add(entry, "is empty", "a hostname, e.g. www.example.com")
-		} else if err := ValidateDomain(h); err != nil {
+		} else if err := valid(h); err != nil {
 			verr.add(entry, err.Error(), "www.example.com")
 		} else if under := seen[h]; under != "" {
 			verr.add(entry, fmt.Sprintf("%q is already listed under %s", h, under), "each hostname once")

@@ -505,7 +505,7 @@ func TestDoctorChecksRecordsAgainstTheServersAddress(t *testing.T) {
 	c.checkDNS(context.Background(), r, local, "old.example.com", addrs)
 	assertInOrder(t, out.String(), []string{
 		"✓ agent.example.com → 203.0.113.10",
-		"✗ api.example.com → 104.16.0.1, which is not the server (203.0.113.10). Point the record at the server; if it is proxied through a CDN, turn the proxy off (DNS only)",
+		"✗ api.example.com resolves to Cloudflare's proxy (104.16.0.1), not to the server: turn the proxy off for this record (DNS only), or set SHIPWICK_CLOUDFLARE_API_TOKEN on the agent to keep it on",
 		"✗ old.example.com does not resolve. Create an A record old.example.com → 203.0.113.10, DNS only (not proxied)",
 	})
 	if r.problems != 2 {

@@ -19,26 +19,32 @@ const (
 
 func (c *cli) statusCommand() *cobra.Command {
 	var file string
+	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "status [app]",
 		Short: "Show the state of an application",
 		Long: `Show the state of an application: its version, replicas and recent deployments.
 
-Without an argument, the application described by deploy.yaml is shown.`,
+Without an argument, the application described by deploy.yaml is shown.
+
+A hostname whose certificate is not in order — still being obtained, waiting
+for DNS, close to its end — gets a line saying so; --verbose lists every
+hostname with its certificate's issuer and last day.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := c.resolveApp(args, file)
 			if err != nil {
 				return err
 			}
-			return c.status(cmd.Context(), name)
+			return c.status(cmd.Context(), name, verbose)
 		},
 	}
 	fileFlag(cmd, &file)
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "also list the certificates that are in order")
 	return cmd
 }
 
-func (c *cli) status(ctx context.Context, name string) error {
+func (c *cli) status(ctx context.Context, name string, verbose bool) error {
 	cl, err := c.connect()
 	if err != nil {
 		return err
@@ -71,7 +77,7 @@ func (c *cli) status(ctx context.Context, name string) error {
 		}
 	}
 	if app.Domain != "" {
-		fields = append(fields, [2]string{"URL", "https://" + app.Domain})
+		fields = append(fields, [2]string{"URL", "https://" + app.Domain + app.Path})
 	}
 	if app.Static {
 		var files *api.StaticFiles
@@ -98,7 +104,9 @@ func (c *cli) status(ctx context.Context, name string) error {
 		}
 		fields = append(fields, [2]string{"Limits", describeResources(app.Spec.Resources)})
 	}
+	fields = append(fields, c.backupStatusFields(ctx, cl, app)...)
 	c.ui.Fields(fields)
+	c.certificateLines(app.Certificates, verbose)
 
 	if len(app.Containers) > 0 {
 		c.ui.Println()
@@ -221,7 +229,7 @@ func (c *cli) psCommand() *cobra.Command {
 					{Text: status, Style: appStyle(app.Status)},
 					ui.C(app.Version),
 					ui.C(replicas),
-					ui.C(app.Domain),
+					ui.C(app.Domain + app.Path),
 					ui.C(ui.RelativeTime(app.UpdatedAt, now)),
 				})
 			}

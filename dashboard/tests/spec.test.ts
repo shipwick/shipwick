@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import {
+  addressOf,
+  applicationUrl,
   describeBuild,
   describeHealth,
   describeLogging,
   describeStatic,
   formatArgv,
   formatHostname,
+  formatPathRedirect,
   formatPublish,
+  hasProxySettings,
   hostnamesOf,
   isLocalImage,
+  isWildcard,
   shippedLogDriver,
 } from '../app/utils/spec'
 
@@ -107,6 +112,52 @@ describe('hostnamesOf', () => {
     expect(hostnamesOf({ domain: 'api.example.com' }).map(formatHostname)).toEqual(['api.example.com'])
     expect(hostnamesOf({ domain: '' })).toEqual([])
     expect(hostnamesOf({ domain: undefined, aliases: ['x'] })).toEqual([])
+  })
+
+  it('carries the path on the domain and the aliases, and takes a redirect hostname whole', () => {
+    const list = hostnamesOf({ domain: 'example.com', path: '/api', aliases: ['app.example.com'], redirects: ['www.example.com'] })
+    expect(list.map(h => h.address)).toEqual(['example.com/api', 'app.example.com/api', 'www.example.com'])
+    expect(list.map(h => h.url)).toEqual(['https://example.com/api', 'https://app.example.com/api', 'https://www.example.com'])
+    expect(list.map(formatHostname)).toEqual(['example.com/api', 'app.example.com/api', 'www.example.com → example.com'])
+  })
+
+  it('does not make a link of a wildcard: it is a pattern, not an address', () => {
+    const list = hostnamesOf({ domain: '*.example.com', aliases: ['example.com'] })
+    expect(list[0]).toMatchObject({ host: '*.example.com', address: '*.example.com', url: null })
+    expect(list[1]?.url).toBe('https://example.com')
+  })
+})
+
+describe('addresses', () => {
+  it('writes a hostname with the part of it an application serves', () => {
+    expect(addressOf('example.com', '/api')).toBe('example.com/api')
+    expect(addressOf('example.com', undefined)).toBe('example.com')
+    expect(addressOf('example.com', '')).toBe('example.com')
+  })
+
+  it('links an application by domain and path, and not at all without a domain or for a wildcard', () => {
+    expect(applicationUrl({ domain: 'example.com', path: '/docs' })).toBe('https://example.com/docs')
+    expect(applicationUrl({ domain: 'api.example.com' })).toBe('https://api.example.com')
+    expect(applicationUrl({ domain: '' })).toBeNull()
+    expect(applicationUrl({ domain: '*.example.com' })).toBeNull()
+    expect(isWildcard('*.example.com')).toBe(true)
+    expect(isWildcard('example.com')).toBe(false)
+  })
+})
+
+describe('the proxy block', () => {
+  it('writes a redirect with its status', () => {
+    expect(formatPathRedirect({ from: '/api/old', to: '/api/new', status: 308 })).toBe('/api/old → /api/new (308)')
+  })
+
+  it('knows a block that says nothing from one that does', () => {
+    expect(hasProxySettings({})).toBe(false)
+    expect(hasProxySettings({ proxy: {} })).toBe(false)
+    expect(hasProxySettings({ proxy: { headers: {} } })).toBe(false)
+    expect(hasProxySettings({ proxy: { strip_prefix: true } })).toBe(true)
+    expect(hasProxySettings({ proxy: { headers: { 'X-Frame-Options': 'DENY' } } })).toBe(true)
+    expect(hasProxySettings({ proxy: { basic_auth: [{ username: 'ops', password: '********' }] } })).toBe(true)
+    expect(hasProxySettings(null)).toBe(false)
   })
 })
 

@@ -220,8 +220,14 @@ func (e *Engine) DeployStatic(ctx context.Context, app spec.App, digest string) 
 	if !ValidStaticDigest(digest) {
 		return store.Deployment{}, &InvalidUploadError{Reason: "the digest must be sha256: followed by 64 hex characters, as the upload answered it"}
 	}
-	return e.start(ctx, app.Name, func(context.Context) (origin, error) {
+	return e.start(ctx, app.Name, func(ctx context.Context) (origin, error) {
 		files, err := e.uploadInfo(app.Name, digest)
+		if err != nil {
+			return origin{}, err
+		}
+		// A static application has no env, but its proxy block may hold
+		// passwords left for the server to fill in.
+		app, err := e.resolveSecrets(ctx, app)
 		if err != nil {
 			return origin{}, err
 		}
@@ -250,7 +256,7 @@ func (r *rollout) serveStatic(ctx context.Context) error {
 	dir := staticDir(d.Application, d.StaticDigest)
 	what := fmt.Sprintf("%s (%s)", plural(d.StaticFiles, "file"), spec.FormatMemory(d.StaticBytes))
 
-	if err := e.transition(ctx, d, api.StatusBuilding); err != nil {
+	if err := r.reach(ctx, api.StatusBuilding); err != nil {
 		return err
 	}
 	proxyID, err := e.rt.ProxyContainer(ctx)
@@ -282,7 +288,7 @@ func (r *rollout) serveStatic(ctx context.Context) error {
 		}
 	}
 
-	if err := e.transition(ctx, d, api.StatusStarting); err != nil {
+	if err := r.reach(ctx, api.StatusStarting); err != nil {
 		return err
 	}
 	if !present {
@@ -308,7 +314,7 @@ func (r *rollout) serveStatic(ctx context.Context) error {
 		e.step(ctx, d, "Copied %s into the proxy", plural(d.StaticFiles, "file"))
 	}
 
-	if err := e.transition(ctx, d, api.StatusHealthChecking); err != nil {
+	if err := r.reach(ctx, api.StatusHealthChecking); err != nil {
 		return err
 	}
 	check := dir
@@ -322,6 +328,21 @@ func (r *rollout) serveStatic(ctx context.Context) error {
 	if code != 0 {
 		return errors.New("the folder has no index.html: build the site first, then deploy the folder the build produced")
 	}
+	fallback := ""
+	if d.Spec.Static != nil {
+		fallback = d.Spec.Static.Fallback
+	}
+	if fallback != "" && fallback != "index.html" {
+		// Checked like index.html and for the same reason: routed to a page
+		// that is not there, every unknown path would answer with an error.
+		code, _, err := e.rt.Exec(ctx, proxyID, []string{"test", "-f", check + "/" + fallback}, staticExecTimeout)
+		if err != nil {
+			return fmt.Errorf("could not look for %s in the proxy: %w", fallback, err)
+		}
+		if code != 0 {
+			return fmt.Errorf("the folder has no %s, which static.fallback names: name a file the build produces", fallback)
+		}
+	}
 	if !present {
 		if err := e.proxyExec(ctx, proxyID, "mv", r.staticPart, dir); err != nil {
 			return err
@@ -329,8 +350,11 @@ func (r *rollout) serveStatic(ctx context.Context) error {
 		r.staticPart = ""
 	}
 	e.step(ctx, d, "Found index.html")
+	if fallback != "" && fallback != "index.html" {
+		e.step(ctx, d, "Found %s, the fallback page", fallback)
+	}
 
-	if err := e.transition(ctx, d, api.StatusHealthy); err != nil {
+	if err := r.reach(ctx, api.StatusHealthy); err != nil {
 		return err
 	}
 	if !CanTransition(d.Status, api.StatusActive) {
@@ -371,8 +395,16 @@ func (r *rollout) serveStatic(ctx context.Context) error {
 // serves: everything but the active deployment's and its most recent
 // predecessor's, which is the rollback target, and whatever a crash left
 // half-extracted.
+//
+// d may be a deployment that runs containers: the application was a folder
+// and is one no longer. The folder it replaced is still the rollback target
+// and stays; one container deployment later nothing can be rolled back to a
+// folder without naming it, and the last of them goes.
 func (e *Engine) retireStaticDirs(ctx context.Context, d *store.Deployment, proxyID string) {
-	keep := map[string]bool{strings.TrimPrefix(d.StaticDigest, "sha256:"): true}
+	keep := map[string]bool{}
+	if d.StaticDigest != "" {
+		keep[strings.TrimPrefix(d.StaticDigest, "sha256:")] = true
+	}
 	superseded, err := e.store.ListDeployments(ctx, store.DeploymentFilter{Application: d.Application, Statuses: []api.DeploymentStatus{api.StatusSuperseded}})
 	if err != nil {
 		e.event(ctx, d, api.LevelWarn, api.EventStep, fmt.Sprintf("Could not list older versions: %v", err))
@@ -382,6 +414,9 @@ func (e *Engine) retireStaticDirs(ctx context.Context, d *store.Deployment, prox
 		if s.StaticDigest != "" && s.StaticDigest != d.StaticDigest {
 			keep[strings.TrimPrefix(s.StaticDigest, "sha256:")] = true
 			break
+		}
+		if d.StaticDigest == "" {
+			break // its predecessor ran containers too
 		}
 	}
 
@@ -406,6 +441,30 @@ func (e *Engine) retireStaticDirs(ctx context.Context, d *store.Deployment, prox
 	if removed > 0 {
 		e.step(ctx, d, "Removed %s of older versions", plural(removed, "folder"))
 	}
+	if len(keep) == 0 {
+		// Nothing of the application is left in the proxy but the directory
+		// that held its folders.
+		e.proxyExec(ctx, proxyID, "rm", "-rf", path.Join(staticRoot, d.Application))
+	}
+}
+
+// retireStaticLeftovers is the sweep of a deployment that runs containers,
+// for an application that was a folder before: without it the folders would
+// stay in the proxy until the application is deleted. Most applications never
+// were a folder, and the proxy need not be a container at all; then there is
+// nothing to do and nothing to report.
+func (e *Engine) retireStaticLeftovers(ctx context.Context, d *store.Deployment) {
+	if e.opts.Proxy == nil {
+		return
+	}
+	proxyID, err := e.rt.ProxyContainer(ctx)
+	if err != nil {
+		return
+	}
+	if present, err := e.proxyDirExists(ctx, proxyID, path.Join(staticRoot, d.Application)); err != nil || !present {
+		return
+	}
+	e.retireStaticDirs(ctx, d, proxyID)
 }
 
 // removeStaticFiles is Delete's part for a static application: its folders in

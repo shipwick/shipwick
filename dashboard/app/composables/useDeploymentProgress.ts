@@ -40,6 +40,7 @@ export function useDeploymentProgress(onFinished?: (progress: DeploymentProgress
   }
 
   async function poll(id: number, own: AbortController) {
+    let wait = POLL_INTERVAL_MS
     try {
       const detail = await agent.get<DeploymentDetail>(`/deployments/${id}`, { signal: own.signal })
       if (own.signal.aborted) return
@@ -53,14 +54,17 @@ export function useDeploymentProgress(onFinished?: (progress: DeploymentProgress
     catch (error) {
       if (own.signal.aborted || isAbortError(error)) return
       const failure = toAgentError(error)
-      dispatch({ type: 'poll_failed', message: failure.message })
+      dispatch({ type: 'poll_failed', message: failure.displayMessage, unreachable: failure.unreachable || failure.code === 'RUNTIME_UNAVAILABLE' })
       // Gone (application deleted) or signed out: nothing more will come.
       if (failure.status === 404 || failure.status === 401) {
         finish(own)
         return
       }
+      // Anything else is waited out, an agent that is restarting included: the
+      // deployment is still in flight there and resumes when the agent is back.
+      wait = Math.max(wait, failure.retryAfterMs)
     }
-    timer = setTimeout(() => void poll(id, own), POLL_INTERVAL_MS)
+    timer = setTimeout(() => void poll(id, own), wait)
   }
 
   function begin(id: number) {

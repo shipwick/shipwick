@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/shipwick/shipwick/agent/internal/config"
@@ -73,26 +74,47 @@ func open(aead cipher.AEAD, name, stored string) (string, error) {
 	return string(plain), nil
 }
 
-// sealSpec returns app with its environment values encrypted, ready to be
-// stored. The caller's map is left alone: the engine still needs the values.
+// sealSpec returns app with its secrets encrypted, ready to be stored: the
+// environment values and the basic-auth passwords of the proxy block. What
+// the caller holds is left alone: the engine still needs the values.
 func (s *Store) sealSpec(app spec.App) (spec.App, error) {
-	if s.aead == nil || len(app.Env) == 0 {
+	if s.aead == nil {
 		return app, nil
 	}
-	env := make(map[string]string, len(app.Env))
-	for name, value := range app.Env {
-		sealed, err := seal(s.aead, name, value)
-		if err != nil {
-			return spec.App{}, err
+	if len(app.Env) > 0 {
+		env := make(map[string]string, len(app.Env))
+		for name, value := range app.Env {
+			sealed, err := seal(s.aead, name, value)
+			if err != nil {
+				return spec.App{}, err
+			}
+			env[name] = sealed
 		}
-		env[name] = sealed
+		app.Env = env
 	}
-	app.Env = env
+	if app.Proxy != nil && len(app.Proxy.BasicAuth) > 0 {
+		proxy := *app.Proxy
+		proxy.BasicAuth = slices.Clone(app.Proxy.BasicAuth)
+		for i := range proxy.BasicAuth {
+			sealed, err := seal(s.aead, passwordName(i), proxy.BasicAuth[i].Password)
+			if err != nil {
+				return spec.App{}, err
+			}
+			proxy.BasicAuth[i].Password = sealed
+		}
+		app.Proxy = &proxy
+	}
 	return app, nil
 }
 
-// openSpec decrypts, in place, the environment values of a spec read from
-// the database.
+// passwordName is what a basic-auth password is sealed under, in the place of
+// an environment variable's name: its position in the spec, which never
+// changes once the deployment is recorded.
+func passwordName(i int) string {
+	return fmt.Sprintf("proxy.basic_auth[%d].password", i)
+}
+
+// openSpec decrypts, in place, the secrets of a spec read from the database.
 func (s *Store) openSpec(app *spec.App) error {
 	if s.aead == nil {
 		return nil
@@ -106,6 +128,20 @@ func (s *Store) openSpec(app *spec.App) error {
 			return err
 		}
 		app.Env[name] = plain
+	}
+	if app.Proxy == nil {
+		return nil
+	}
+	for i := range app.Proxy.BasicAuth {
+		name := passwordName(i)
+		if !isSealed(app.Proxy.BasicAuth[i].Password) {
+			return fmt.Errorf("%s is stored unencrypted", name)
+		}
+		plain, err := open(s.aead, name, app.Proxy.BasicAuth[i].Password)
+		if err != nil {
+			return err
+		}
+		app.Proxy.BasicAuth[i].Password = plain
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/shipwick/shipwick/pkg/api"
+	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 // localOptions are the ways a command reaches past the agent's API: a
@@ -94,22 +95,41 @@ func (c *cli) smallCommands() []*cobra.Command {
 
 func (c *cli) openCommand() *cobra.Command {
 	var file string
+	var dashboard bool
 	cmd := &cobra.Command{
 		Use:   "open [app]",
-		Short: "Open the application in the browser",
+		Short: "Open the application, or the dashboard, in the browser",
 		Long: `Open https://<domain> of the application in the browser.
 
-Without an argument, the application described by deploy.yaml is opened.`,
+Without an argument, the application described by deploy.yaml is opened; in a
+directory without one, the server's dashboard. --dashboard opens the dashboard
+wherever you are.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if dashboard {
+				if len(args) > 0 {
+					return errors.New("--dashboard opens the dashboard, not an application; leave the name out")
+				}
+				return c.openDashboard(cmd.Context(), nil)
+			}
 			name, err := c.resolveApp(args, file)
 			if err != nil {
+				// No application was meant by name or by file: the dashboard
+				// is the one address left that the server has. A shipwick.yaml
+				// with several applications is a file that means some: the
+				// error that asks which one stands.
+				_, statErr := os.Stat(file)
+				_, manyErr := os.Stat(spec.MultiFile)
+				if len(args) == 0 && !cmd.Flags().Changed("file") && errors.Is(statErr, fs.ErrNotExist) && errors.Is(manyErr, fs.ErrNotExist) {
+					return c.openDashboard(cmd.Context(), err)
+				}
 				return err
 			}
 			return c.open(cmd.Context(), name)
 		},
 	}
 	fileFlag(cmd, &file)
+	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "open the server's dashboard")
 	return cmd
 }
 
@@ -125,8 +145,37 @@ func (c *cli) open(ctx context.Context, name string) error {
 	if app.Domain == "" {
 		return errors.New(noDomain(app))
 	}
+	if spec.IsWildcard(app.Domain) {
+		return fmt.Errorf("%s serves %s, which is every name under the domain and no address of its own; open one of them yourself", app.Name, app.Domain)
+	}
+	return c.openURL(ctx, "https://"+app.Domain+app.Path)
+}
 
-	url := "https://" + app.Domain
+// noDashboard is what a server without a dashboard hostname is answered with.
+const noDashboard = "This server has no dashboard hostname. Set SHIPWICK_DASHBOARD_DOMAIN in /opt/shipwick/.env and run the installer again"
+
+// openDashboard opens the address the agent reports for the dashboard. When
+// there is none, the answer is otherwise, if the caller has one: the error
+// that sent it here.
+func (c *cli) openDashboard(ctx context.Context, otherwise error) error {
+	cl, err := c.connect()
+	if err != nil {
+		return err
+	}
+	info, err := cl.Server(ctx)
+	if err != nil {
+		return err
+	}
+	if info.DashboardURL == "" {
+		if otherwise != nil {
+			return otherwise
+		}
+		return errors.New(noDashboard)
+	}
+	return c.openURL(ctx, info.DashboardURL)
+}
+
+func (c *cli) openURL(ctx context.Context, url string) error {
 	local := c.local.withDefaults()
 	argv := openerArgv(local.goos, url)
 	if err := local.exec(ctx, argv, io.Discard, io.Discard); err != nil {
@@ -201,8 +250,9 @@ func (c *cli) initClosing(files int) string {
 // printNextSteps closes an application's first deployment with the two
 // commands that answer the next question: is it running, and what is it
 // saying. A static application has no logs; its next question is what the
-// site looks like.
-func (c *cli) printNextSteps(name string, static bool) {
+// site looks like. A server with a dashboard adds where it is: a first
+// deployment is when its address is news.
+func (c *cli) printNextSteps(name string, static bool, dashboardURL string) {
 	c.ui.Println()
 	c.ui.Println("Next:")
 	first, firstWhy := "  shipwick logs -f "+name, "follow the logs"
@@ -211,7 +261,14 @@ func (c *cli) printNextSteps(name string, static bool) {
 		first, firstWhy = "  shipwick open "+name, "open it in the browser"
 		statusWhy = "what it serves, history"
 	}
+	dashboard := "  " + dashboardURL
 	width := max(len(first), len(status)) + 4
+	if dashboardURL != "" {
+		width = max(width, len(dashboard)+4)
+	}
 	c.ui.Printf("%-*s%s\n", width, first, firstWhy)
 	c.ui.Printf("%-*s%s\n", width, status, statusWhy)
+	if dashboardURL != "" {
+		c.ui.Printf("%-*s%s\n", width, dashboard, "the dashboard")
+	}
 }

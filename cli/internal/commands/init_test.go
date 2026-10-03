@@ -181,7 +181,7 @@ func TestInitAsksWhatDetectionCannotKnow(t *testing.T) {
 	}
 	var out bytes.Buffer
 	c, _ := newRoot(Options{In: strings.NewReader("svc\n2\napi.example.com\n"), Out: &out, Err: &out, Getenv: func(string) string { return "" }})
-	answers := initAnswers{Name: defaultAppName(), Project: &p}
+	answers := initAnswers{Name: defaultAppName("."), Project: &p}
 	if err := c.completeProject(&answers, true); err != nil {
 		t.Fatal(err)
 	}

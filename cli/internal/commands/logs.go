@@ -2,6 +2,8 @@ package commands
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -19,7 +21,9 @@ func (c *cli) logsCommand() *cobra.Command {
 		Short: "Show the logs of an application",
 		Long: `Show the logs of an application, merged across its replicas.
 
-Without an argument, the application described by deploy.yaml is shown.`,
+Without an argument, the application described by deploy.yaml is shown. With
+--follow in a terminal, an application that has printed nothing yet is said
+to be followed, so that an empty screen is not taken for a hang.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := c.resolveApp(args, file)
@@ -52,6 +56,11 @@ Without an argument, the application described by deploy.yaml is shown.`,
 				return nil
 			}
 
+			if c.ui.IsTerminal() {
+				var stop func()
+				print, stop = c.noteSilence(name, print)
+				defer stop()
+			}
 			err = cl.FollowLogs(cmd.Context(), name, tail, print)
 			if err != nil || cmd.Context().Err() != nil {
 				return err // Ctrl+C is the normal way out: no message
@@ -67,6 +76,39 @@ Without an argument, the application described by deploy.yaml is shown.`,
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "keep streaming new log lines")
 	cmd.Flags().BoolVarP(&timestamps, "timestamps", "t", false, "prefix each line with its timestamp")
 	return cmd
+}
+
+// quietAfter is how long `logs -f` shows nothing before it says that it is
+// waiting: longer than the agent takes to send the lines there are.
+const quietAfter = 2 * time.Second
+
+// noteSilence wraps print for a followed stream. An application that has
+// printed nothing leaves the screen empty, which reads as a hang; when no
+// line has arrived after quietAfter, the terminal is told once that the
+// command is waiting. The returned stop calls that off.
+func (c *cli) noteSilence(name string, print func(api.LogLine)) (wrapped func(api.LogLine), stop func()) {
+	after := c.after
+	if after == nil {
+		after = func(d time.Duration, f func()) func() {
+			t := time.AfterFunc(d, f)
+			return func() { t.Stop() }
+		}
+	}
+	var mu sync.Mutex
+	seen := false
+	stop = after(quietAfter, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !seen {
+			c.ui.Note("Following %s; nothing printed yet. Ctrl-C stops.", name)
+		}
+	})
+	return func(line api.LogLine) {
+		mu.Lock()
+		seen = true
+		mu.Unlock()
+		print(line)
+	}, stop
 }
 
 // replicaStyles tells replicas apart at a glance.

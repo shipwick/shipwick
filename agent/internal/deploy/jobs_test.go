@@ -510,6 +510,7 @@ func TestRecoverInterruptsRunsAndRemovesTheirContainers(t *testing.T) {
 	if err := h.engine.Recover(ctx); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
+	h.engine.Wait() // leftovers are retired in the background
 	got, _ := h.store.GetJobRun(ctx, run.ID)
 	if got.Status != api.RunInterrupted || got.FinishedAt == nil {
 		t.Errorf("run after Recover: %+v", got)

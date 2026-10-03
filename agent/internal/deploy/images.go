@@ -151,3 +151,20 @@ func (e *Engine) pruneImages(ctx context.Context, candidates []string) int {
 	}
 	return removed
 }
+
+// removeFailedImage removes the image of a deployment that has ended FAILED
+// or ROLLED_BACK, unless something keeps it. An image sent from a developer's
+// machine for this deployment in particular would otherwise stay until the
+// application's next successful deployment sweeps it, and a first deployment
+// that keeps failing would leave one behind at every attempt. Like every
+// removal here it is not forced, and its failure is nobody's error.
+func (e *Engine) removeFailedImage(d *store.Deployment) {
+	if d.Image == "" {
+		return // a static application
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if e.pruneImages(ctx, []string{d.Image}) > 0 {
+		e.step(ctx, d, "Removed image %s, which nothing else uses", d.Image)
+	}
+}

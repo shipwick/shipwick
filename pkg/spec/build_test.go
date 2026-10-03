@@ -19,6 +19,7 @@ func TestBuild(t *testing.T) {
 		{"cleaned", "name: a\nbuild: ./api/../api/\n", "api", "Dockerfile"},
 		{"backslashes become slashes", "name: a\nbuild: {context: .\\api, dockerfile: build\\Dockerfile}\n", "api", "build/Dockerfile"},
 		{"with the image the CLI fills in", "name: a\nbuild: .\nimage: shipwick.local/a:20260927-153000-a1b2\n", ".", "Dockerfile"},
+		{"only a dockerfile is built where the file is", "name: a\nbuild:\n  dockerfile: docker/Dockerfile.prod\n", ".", "docker/Dockerfile.prod"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,7 +52,7 @@ func TestBuildValidationErrors(t *testing.T) {
 		{"climbs out", "name: a\nbuild: ../other\n", "build.context", "inside"},
 		{"climbs out after cleaning", "name: a\nbuild: api/../..\n", "build.context", "inside"},
 		{"NUL", "name: a\nbuild: \"a\\x00b\"\n", "build.context", "control characters"},
-		{"map without context", "name: a\nbuild:\n  dockerfile: Dockerfile\n", "build.context", "is required"},
+		{"dockerfile outside the file's directory", "name: a\nbuild:\n  dockerfile: ../Dockerfile\n", "build.dockerfile", "inside"},
 		{"dockerfile outside the context", "name: a\nbuild:\n  context: .\n  dockerfile: ../Dockerfile\n", "build.dockerfile", "inside"},
 		{"absolute dockerfile", "name: a\nbuild:\n  context: .\n  dockerfile: /etc/Dockerfile\n", "build.dockerfile", "relative"},
 		{"with static", "name: a\nbuild: .\nstatic: dist\n", "build", "cannot be combined with static"},

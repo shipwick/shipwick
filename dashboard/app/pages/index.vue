@@ -82,6 +82,9 @@ function retryAll() {
           <span v-else class="skeleton w-80 max-w-full" />
         </div>
 
+        <!-- What the agent says needs a look right now; the server page lists the same. -->
+        <AlertList v-if="(server.data.value?.alerts?.length ?? 0) > 0" :alerts="server.data.value?.alerts ?? []" />
+
         <!-- Counts by status: a single ruled strip, not a grid of cards -->
         <UiPanel title="Applications" :meta="apps.data.value?.length ?? null">
           <template #actions>

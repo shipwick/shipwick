@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { durationBetween, formatDuration } from '~/utils/format'
 import type { DeploymentProgress } from '~/utils/deploymentProgress'
+import { deniedRegistry } from '~/utils/registries'
 import type { ApplicationStatus } from '~/types/api'
 
 /**
@@ -29,6 +30,9 @@ const props = withDefaults(defineProps<{
 /** Over, not a success, and the application is not fine: say so instead of reassuring. */
 const impaired = computed(() => (props.progress.phase === 'failed' || props.progress.phase === 'rolled_back')
   && props.appStatus !== undefined && props.appStatus !== 'HEALTHY' && props.appStatus !== 'STOPPED')
+
+/** The registry a refused pull names: the way to the form that stores a credential for it. */
+const registry = computed(() => deniedRegistry(props.progress.error))
 
 const emit = defineEmits<{ dismiss: [] }>()
 
@@ -121,6 +125,10 @@ const TONE_FRAME = { ok: 'border-line', warn: 'border-line', danger: 'border-dan
           <UiIcon name="x-circle" :size="14" class="mt-[3px]" />
           <span class="min-w-0 break-words">{{ progress.error || 'Deployment failed' }}</span>
         </p>
+        <p v-if="registry" class="mt-1.5 text-fg-muted">
+          If the image is private, the server needs a credential for <span class="mono text-fg">{{ registry }}</span>:
+          <NuxtLink :to="{ path: '/registries', query: { registry } }" class="link">log it in on the Registries page</NuxtLink>, then deploy again.
+        </p>
         <template v-if="progress.logs.length > 0">
           <p class="label mt-3">
             Last output
@@ -143,7 +151,10 @@ const TONE_FRAME = { ok: 'border-line', warn: 'border-line', danger: 'border-dan
         </p>
       </div>
 
-      <p v-if="progress.pollError" class="mt-3 text-xs text-warn" role="status">
+      <p v-if="progress.pollError && progress.agentAway" class="mt-3 text-xs text-warn" role="status">
+        The agent is not answering ({{ progress.pollError }}). If it is restarting, the deployment is not lost: the agent picks it up where it stopped. Still watching.
+      </p>
+      <p v-else-if="progress.pollError" class="mt-3 text-xs text-warn" role="status">
         Lost contact while watching this deployment ({{ progress.pollError }}). It continues on the server; retrying.
       </p>
     </div>

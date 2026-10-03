@@ -2,7 +2,7 @@
 # Builds the files attached to a GitHub release into ./dist:
 #
 #   shipwick_<os>_<arch>[.exe]   the CLI, for every supported platform
-#   compose.production.yml        with both images pinned to this version
+#   compose.production.yml        with the three images pinned to this version
 #   checksums.txt                 SHA-256 of all of the above
 #
 #   sh scripts/build-release.sh v0.1.0
@@ -39,8 +39,9 @@ done
 # "latest" means on the day its containers are recreated.
 sed -e "s|\(ghcr\.io/shipwick/agent\):latest|\1:$IMAGE_TAG|" \
     -e "s|\(ghcr\.io/shipwick/dashboard\):latest|\1:$IMAGE_TAG|" \
+    -e "s|\(ghcr\.io/shipwick/caddy\):latest|\1:$IMAGE_TAG|" \
     configs/compose.production.yml > dist/compose.production.yml
-for image in agent dashboard; do
+for image in agent dashboard caddy; do
     grep -q "ghcr.io/shipwick/$image:$IMAGE_TAG" dist/compose.production.yml || {
         echo "could not pin the $image image in compose.production.yml" >&2
         exit 1

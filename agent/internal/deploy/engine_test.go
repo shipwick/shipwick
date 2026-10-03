@@ -288,7 +288,7 @@ func TestCompletedAtMeansNextDeployIsAccepted(t *testing.T) {
 	h.engine.Wait()
 }
 
-func TestShutdownAbortsInFlightDeployment(t *testing.T) {
+func TestShutdownLeavesAnInFlightDeploymentToBeResumed(t *testing.T) {
 	h := newHarness(t)
 	h.rt.PullDelay = time.Minute
 
@@ -302,8 +302,10 @@ func TestShutdownAbortsInFlightDeployment(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
+	// Neither failed nor completed: whoever polls it keeps polling, and the
+	// agent that starts next takes it from here (see resume_test.go).
 	final, _ := h.store.GetDeployment(context.Background(), d.ID)
-	if final.Status != api.StatusFailed || !strings.Contains(final.Error, "shut down") {
+	if IsSettled(final.Status) || final.Error != "" || final.CompletedAt != nil {
 		t.Errorf("unexpected deployment after shutdown: %+v", final)
 	}
 	if _, err := h.engine.Deploy(context.Background(), app("my-api", "my-api:1.0", 1)); !errors.Is(err, ErrShuttingDown) {
@@ -398,12 +400,17 @@ func TestRecover(t *testing.T) {
 	h := newHarness(t)
 	v1 := h.deploy(app("my-api", "my-api:1.0", 1))
 
-	// Simulate an agent crash in the middle of v2: a record stuck in
-	// STARTING and a container that belongs to it.
-	stuck, _ := h.store.CreateDeployment(ctx, app("my-api", "my-api:1.1", 1), time.Now())
-	h.store.TransitionDeployment(ctx, stuck.ID, api.StatusPending, api.StatusBuilding, "")
-	h.store.TransitionDeployment(ctx, stuck.ID, api.StatusBuilding, api.StatusStarting, "")
-	h.rt.CreateContainer(ctx, containerSpec("my-api", stuck.ID, 2, 1))
+	// Records no agent can have left behind — two deployments of one
+	// application in flight at once — and a container of one of them. What
+	// cannot be resumed (see resume_test.go for what can) fails and is removed.
+	var stuck []store.Deployment
+	for _, image := range []string{"my-api:1.1", "my-api:1.2"} {
+		d, _ := h.store.CreateDeployment(ctx, app("my-api", image, 1), time.Now())
+		h.store.TransitionDeployment(ctx, d.ID, api.StatusPending, api.StatusBuilding, "")
+		h.store.TransitionDeployment(ctx, d.ID, api.StatusBuilding, api.StatusStarting, "")
+		stuck = append(stuck, d)
+	}
+	h.rt.CreateContainer(ctx, containerSpec("my-api", stuck[0].ID, 2, 1))
 
 	// A container of an application the database has never heard of.
 	foreignID, _, _ := h.rt.CreateContainer(ctx, containerSpec("unknown-app", 99, 1, 1))
@@ -411,10 +418,13 @@ func TestRecover(t *testing.T) {
 	if err := h.engine.Recover(ctx); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
+	h.engine.Wait() // leftovers are retired in the background
 
-	got, _ := h.store.GetDeployment(ctx, stuck.ID)
-	if got.Status != api.StatusFailed || !strings.Contains(got.Error, "agent restarted") {
-		t.Errorf("interrupted deployment: %+v", got)
+	for _, d := range stuck {
+		got, _ := h.store.GetDeployment(ctx, d.ID)
+		if got.Status != api.StatusFailed || !strings.Contains(got.Error, "agent restarted") || got.CompletedAt == nil {
+			t.Errorf("interrupted deployment: %+v", got)
+		}
 	}
 
 	var sawActive, sawForeign bool

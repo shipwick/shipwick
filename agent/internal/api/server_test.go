@@ -518,7 +518,7 @@ func TestDomainConflictIsAConfigError(t *testing.T) {
 func TestServerReportsProxyStatus(t *testing.T) {
 	f := newFixture(t)
 	_, body := f.do("GET", "/api/v1/server", "")
-	if !strings.Contains(string(body), `"proxy":{"enabled":false,"reachable":false,"error":"","routes":0}`) {
+	if !strings.Contains(string(body), `"proxy":{"enabled":false,"reachable":false,"error":"","routes":0,"dns_challenge":false}`) {
 		t.Errorf("server view should always carry the proxy status, even when disabled: %s", body)
 	}
 }

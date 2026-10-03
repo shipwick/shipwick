@@ -4,6 +4,8 @@ node_modules
 .output
 .nitro
 .next
+.svelte-kit
+.astro
 .cache
 .data
 dist

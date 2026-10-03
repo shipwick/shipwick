@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,34 +36,53 @@ func (c *cli) initCommand() *cobra.Command {
 	var answers initAnswers
 
 	cmd := &cobra.Command{
-		Use:   "init",
+		Use:   "init [dir]",
 		Short: "Create a deploy.yaml, and a Dockerfile for a recognised project",
 		Long: `Create a deploy.yaml in the current directory.
 
-A Node (Nuxt, Next, a server), .NET, Go or Python project is recognised from
-its files: init writes a Dockerfile and a .dockerignore for it, and a
-deploy.yaml with "build: ." so that "shipwick deploy" builds the image here and
-sends it to the server. A folder of static files (an index.html at the root, or
-in dist/, build/, out/, public/) gets "static: <dir>": the proxy serves it, no
+A Node (Nuxt, Next, SvelteKit, Remix, Astro, a server), .NET, Go or Python
+project is recognised from its files: init writes a Dockerfile and a
+.dockerignore for it, and a deploy.yaml with "build: ." so that "shipwick
+deploy" builds the image here and sends it to the server. A folder of static
+files (an index.html at the root, or in dist/, build/, out/, public/) and a
+project whose build writes one get "static: <dir>": the proxy serves it, no
 container. Existing Dockerfile and .dockerignore files are kept.
+
+Where there is a shipwick.yaml and no deploy.yaml, init adds an entry to its
+apps list instead, for the project in the current directory or in the one
+given: "shipwick init web" writes web/Dockerfile and an entry with
+"build: ./web". The file is appended to, never rewritten.
 
 Run in a terminal, init asks for what it cannot tell (name, domain). With
 --image it never prompts and writes no Dockerfile, which suits scripts:
 
   shipwick init --name my-api --image ghcr.io/company/my-api:1.0.0 --port 8080`,
-		Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// A shipwick.yaml is what deploy reads when there is no
+			// deploy.yaml; a second file next to it would take its place.
+			many := !cmd.Flags().Changed("file") && !exists(".", DefaultFile) && exists(".", spec.MultiFile)
+			if !many && len(args) > 0 {
+				return fmt.Errorf("a directory is for adding its project to a shipwick.yaml, and there is none here\n\nRun shipwick init inside %s instead", args[0])
+			}
 			if _, err := os.Stat(file); err == nil && !force {
 				return fmt.Errorf("%s already exists\n\nEdit it, or overwrite it with: shipwick init --force", file)
 			}
 			if answers.Image != "" && static != "" {
 				return errors.New("--image and --static exclude each other: an image runs in a container, a static folder is served by the proxy without one")
 			}
-			if answers.Name == "" {
-				answers.Name = defaultAppName()
-			}
 
-			dir := filepath.Dir(file)
+			dir, named := filepath.Dir(file), "."
+			if many {
+				var err error
+				if dir, err = entryDir(args, answers.Image != "" || static != ""); err != nil {
+					return err
+				}
+				named = dir
+			}
+			if answers.Name == "" {
+				answers.Name = defaultAppName(named)
+			}
 			switch {
 			case answers.Image != "":
 			case static != "":
@@ -93,6 +114,10 @@ Run in a terminal, init asks for what it cannot tell (name, domain). With
 				}
 			}
 
+			if many {
+				return c.initEntry(answers, dir)
+			}
+
 			content := renderConfig(answers)
 			if _, err := spec.Parse([]byte(content)); err != nil {
 				return err
@@ -118,6 +143,7 @@ Run in a terminal, init asks for what it cannot tell (name, domain). With
 				c.ui.Success("Kept the existing %s; build: . will use %s", joinFiles(kept), itOrThem(len(kept)))
 			}
 			c.ui.Success("Wrote %s", joinFiles(written))
+			c.noteNoLock(p, written)
 			c.ui.Println()
 			c.ui.Println(c.initClosing(len(written)))
 			return nil
@@ -162,6 +188,7 @@ func (p prompter) ask(label, fallback string) (string, error) {
 }
 
 func (p prompter) askName(a *initAnswers) error {
+	suggested := a.Name
 	for {
 		name, err := p.ask("Application name", a.Name)
 		if err != nil {
@@ -172,7 +199,7 @@ func (p prompter) askName(a *initAnswers) error {
 			return nil
 		}
 		p.c.ui.Println("  Use lowercase letters, digits and dashes, e.g. my-api.")
-		a.Name = defaultAppName()
+		a.Name = suggested
 	}
 }
 
@@ -342,10 +369,20 @@ func joinFiles(names []string) string {
 
 var invalidNameChars = regexp.MustCompile(`[^a-z0-9]+`)
 
-// defaultAppName derives a valid application name from the directory name.
-func defaultAppName() string {
+// noteNoLock says what a Dockerfile written for a Node project without a
+// lock file cannot promise.
+func (c *cli) noteNoLock(p *project, written []string) {
+	if !p.Node.NoLock || !slices.ContainsFunc(written, func(name string) bool { return path.Base(name) == "Dockerfile" }) {
+		return
+	}
+	c.ui.Warn("no lock file: the Dockerfile installs with npm install, and the build is not reproducible until package-lock.json is committed")
+}
+
+// defaultAppName derives a valid application name from the name of dir, the
+// directory the project is in.
+func defaultAppName(dir string) string {
 	const fallback = "my-app"
-	dir, err := os.Getwd()
+	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return fallback
 	}
@@ -500,7 +537,12 @@ func renderStaticConfig(b *strings.Builder, a initAnswers) string {
 	if s.Build != "" {
 		line("# It is what `%s` produces; run that before `shipwick deploy`.", s.Build)
 	}
-	line("static: %s", s.Dir)
+	if s.Fallback != "" {
+		line("# A single-page application: a path that names no file gets %s.", s.Fallback)
+		line("static: {dir: %s, fallback: %s}", s.Dir, s.Fallback)
+	} else {
+		line("static: %s", s.Dir)
+	}
 	line("")
 	line("# Served over HTTPS automatically.")
 	line("domain: %s", a.Domain)

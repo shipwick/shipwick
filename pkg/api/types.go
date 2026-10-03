@@ -96,6 +96,7 @@ type Application struct {
 	Domain    string       `json:"domain"`
 	Aliases   []string     `json:"aliases,omitempty"`   // served like Domain
 	Redirects []string     `json:"redirects,omitempty"` // redirected to Domain
+	Path      string       `json:"path,omitempty"`      // the part of Domain and Aliases it serves; empty: all
 	Replicas  ReplicaCount `json:"replicas"`
 	Deploying bool         `json:"deploying"`
 	// InFlightDeploymentID is the deployment to follow while Deploying is true.
@@ -130,6 +131,9 @@ type ApplicationDetail struct {
 	Spec             *spec.App   `json:"spec"`
 	ActiveDeployment *Deployment `json:"active_deployment"`
 	Containers       []Container `json:"containers"`
+	// Certificates is the certificate status of every hostname the
+	// application answers to; empty for an application without a domain.
+	Certificates []HostnameCertificate `json:"certificates"`
 }
 
 type Container struct {
@@ -238,6 +242,15 @@ type Server struct {
 	// knows what it may do before it tries.
 	Token         TokenIdentity      `json:"token"`
 	Notifications NotificationStatus `json:"notifications"`
+	// DashboardURL is where the dashboard is served, "" when it has no
+	// hostname.
+	DashboardURL string `json:"dashboard_url"`
+	// Alerts are the conditions that hold right now; Disk is null where the
+	// agent cannot measure it (a development build off Linux).
+	Alerts []Alert    `json:"alerts"`
+	Disk   *DiskUsage `json:"disk"`
+	// Backups is absent from agents older than scheduled backups.
+	Backups *BackupStatus `json:"backups,omitempty"`
 }
 
 // ProxyStatus describes the reverse proxy in front of the applications.
@@ -246,6 +259,10 @@ type ProxyStatus struct {
 	Reachable bool   `json:"reachable"` // the last configuration sync succeeded
 	Error     string `json:"error"`     // why it did not
 	Routes    int    `json:"routes"`    // hostnames being served
+	// DNSChallenge is true when certificates are obtained through a DNS
+	// record (SHIPWICK_CLOUDFLARE_API_TOKEN): hostnames may stand behind
+	// Cloudflare's proxy and may be wildcards.
+	DNSChallenge bool `json:"dns_challenge"`
 }
 
 // Deployment kinds.
@@ -517,3 +534,471 @@ const (
 	// failed within a minute; the Retry-After header says when to try again.
 	CodeRateLimited = "RATE_LIMITED"
 )
+
+// Sending only the layers the server lacks.
+
+// MissingLayersRequest is the body of POST /applications/:name/images/missing:
+// the layers of the image about to be sent, as diff IDs (sha256:<64 hex
+// characters>, the RootFS.Layers of `docker image inspect`), base layer first.
+type MissingLayersRequest struct {
+	Layers []string `json:"layers"`
+}
+
+// MissingLayers is the answer: the layers of the request the server's Docker
+// does not have, in the request's order. The others can be left out of the
+// archive.
+type MissingLayers struct {
+	Missing []string `json:"missing"`
+}
+
+// CodeImageIncomplete means an image archive left out layers the server does
+// not have; nothing was loaded, and the whole image is to be sent.
+const CodeImageIncomplete = "IMAGE_INCOMPLETE"
+
+// Alerts and disk usage.
+
+// Alert kinds.
+const (
+	AlertMemory    = "memory"    // a replica close to its memory limit
+	AlertDisk      = "disk"      // the disk that holds the agent's data is filling up
+	AlertRestarts  = "restarts"  // a replica that keeps being restarted
+	AlertUnhealthy = "unhealthy" // an application that has not been healthy for a while
+)
+
+// Alert severities.
+const (
+	SeverityWarning  = "warning"
+	SeverityCritical = "critical"
+)
+
+// EventAlert marks an alert about the application being raised or cleared.
+const EventAlert = "alert"
+
+// Alert is a condition that holds right now and that somebody should look
+// at. It is raised once, when the condition becomes true, and is gone once it
+// stops being true.
+type Alert struct {
+	Kind     string `json:"kind"`     // see the Alert* constants
+	Severity string `json:"severity"` // warning | critical
+	// Application and Replica say what the alert is about: both for memory
+	// and restarts, the application alone for unhealthy (replica 0), neither
+	// for disk.
+	Application string    `json:"application"`
+	Replica     int       `json:"replica"`
+	Message     string    `json:"message"`
+	Since       time.Time `json:"since"`
+}
+
+// DiskUsage describes the filesystem that holds the agent's data directory —
+// in the standard installation the disk Docker keeps images and volumes on.
+// UsedBytes / TotalBytes is the percentage `df` shows: TotalBytes leaves out
+// the blocks the filesystem reserves for root.
+type DiskUsage struct {
+	TotalBytes int64 `json:"total_bytes"`
+	UsedBytes  int64 `json:"used_bytes"`
+}
+
+// Registry credentials the agent keeps, and rotating the encryption key.
+
+// Registry is a stored registry credential as GET /registries lists it. The
+// password is never returned.
+type Registry struct {
+	Registry  string    `json:"registry"` // a hostname with an optional port, as image references name it
+	Username  string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SetRegistryRequest is the body of PUT /registries/:registry.
+type SetRegistryRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// Where the agent's encryption key comes from, in KeyRotation.KeySource.
+const (
+	KeySourceFile        = "file"
+	KeySourceEnvironment = "environment"
+)
+
+// KeyRotation is the answer to POST /server/rotate-key.
+type KeyRotation struct {
+	// Values counts the re-encrypted values outside deployments: secrets,
+	// registry passwords and the keys of supplied certificates. Deployments counts the deployment records whose
+	// environment values were re-encrypted.
+	Values      int `json:"values"`
+	Deployments int `json:"deployments"`
+	// KeySource is "file" when the agent keeps its key in the data directory
+	// and has replaced it there, and "environment" when the key is set in the
+	// agent's environment, which the agent cannot change.
+	KeySource string `json:"key_source"`
+	// KeyFile is the file on the server that holds the new key: the key file,
+	// or, for "environment", the file the agent keeps it in until it has been
+	// started with it.
+	KeyFile string `json:"key_file"`
+	// Key is the new key, present for "environment" only: this response is
+	// the one time the API shows it.
+	Key string `json:"key,omitempty"`
+}
+
+const (
+	// CodeRegistryLoginFailed means the registry refused the credential, or
+	// could not be asked; details: {registry, refused}. Nothing was stored.
+	CodeRegistryLoginFailed = "REGISTRY_LOGIN_FAILED"
+	// CodeKeyRotationPending means the key was already rotated since the
+	// agent started, and the agent's environment still holds the old one;
+	// details: {key_file}.
+	CodeKeyRotationPending = "KEY_ROTATION_PENDING"
+)
+
+// Certificates supplied by the operator, and the DNS challenge.
+
+// Certificate is a certificate the operator supplied for a hostname, as
+// GET /certificates lists it: what the chain says about itself. Neither the
+// key nor the PEM is ever returned.
+type Certificate struct {
+	Hostname string `json:"hostname"` // the name it is stored under
+	// Subjects are the DNS names of the certificate; the hostnames it covers
+	// are served with it, and no authority is asked for those.
+	Subjects  []string  `json:"subjects"`
+	Issuer    string    `json:"issuer"`
+	NotBefore time.Time `json:"not_before"`
+	NotAfter  time.Time `json:"not_after"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SetCertificateRequest is the body of PUT /certificates/:hostname: the chain,
+// the server's own certificate first, and its key, both PEM.
+type SetCertificateRequest struct {
+	Certificate string `json:"certificate"`
+	Key         string `json:"key"`
+}
+
+const (
+	// MaxCertificatePEMBytes bounds the chain, and the key, of one supplied
+	// certificate.
+	MaxCertificatePEMBytes = 64 * 1024
+	// MaxCertificates bounds how many certificates can be supplied: each one
+	// travels to the proxy with every configuration.
+	MaxCertificates = 50
+
+	// CodeInvalidCertificate means the certificate or key in a
+	// PUT /certificates/:hostname cannot serve that hostname; the message
+	// says why.
+	CodeInvalidCertificate = "INVALID_CERTIFICATE"
+)
+
+// Traffic as the proxy saw it, and certificate status.
+
+// CodeTrafficUnavailable means the agent cannot read the proxy's access log:
+// there is no proxy, or it is not a container of the agent's compose project.
+const CodeTrafficUnavailable = "TRAFFIC_UNAVAILABLE"
+
+// Traffic is GET /applications/:name/traffic: what the proxy's access log
+// says about the application's requests over a window.
+type Traffic struct {
+	Application string         `json:"application"`
+	Since       time.Time      `json:"since"`        // start of the window
+	StepSeconds int            `json:"step_seconds"` // bucket width: 60, 300 or 3600
+	Totals      TrafficCounts  `json:"totals"`
+	Points      []TrafficPoint `json:"points"` // buckets without a request are left out
+}
+
+// TrafficCounts are the requests of one stretch of time. The percentiles are
+// estimated from a histogram of the proxy's durations and are zero when there
+// were no requests.
+type TrafficCounts struct {
+	Requests  int64   `json:"requests"`
+	Status2xx int64   `json:"status_2xx"`
+	Status3xx int64   `json:"status_3xx"`
+	Status4xx int64   `json:"status_4xx"`
+	Status5xx int64   `json:"status_5xx"`
+	Bytes     int64   `json:"bytes"` // response bodies, as sent
+	P50Ms     float64 `json:"p50_ms"`
+	P95Ms     float64 `json:"p95_ms"`
+	P99Ms     float64 `json:"p99_ms"`
+}
+
+// TrafficPoint is one bucket of a Traffic series; T is its start.
+type TrafficPoint struct {
+	T time.Time `json:"t"`
+	TrafficCounts
+}
+
+// Request is one line of the proxy's access log. The path carries no query
+// string, and no headers are kept.
+type Request struct {
+	Time       time.Time `json:"time"`
+	Method     string    `json:"method"`
+	Path       string    `json:"path"`
+	Status     int       `json:"status"`
+	DurationMs float64   `json:"duration_ms"`
+	Bytes      int64     `json:"bytes"`
+	Client     string    `json:"client"`
+}
+
+// Certificate states of a hostname.
+const (
+	CertOK            = "ok"              // a certificate for this name, not close to its end
+	CertExpiring      = "expiring"        // 14 days or less left, or expired: renewal is failing
+	CertObtaining     = "obtaining"       // the proxy serves the hostname but has no certificate for it yet
+	CertWaitingForDNS = "waiting_for_dns" // the hostname does not point at this server and is not served
+	CertUnknown       = "unknown"         // there is no proxy to ask, or it does not answer
+)
+
+// HostnameCertificate is the certificate the proxy presents for one of an
+// application's hostnames. Issuer and NotAfter are set when there is one;
+// Message says, for every status but ok, what is going on.
+type HostnameCertificate struct {
+	Hostname string     `json:"hostname"`
+	Status   string     `json:"status"`
+	Issuer   string     `json:"issuer"`
+	NotAfter *time.Time `json:"not_after"`
+	Message  string     `json:"message"`
+}
+
+// Validating a deploy.yaml before deploying it.
+
+// Validation is the answer to POST /applications/:name/validate for a
+// document that a deployment would accept. One that it would refuse is
+// answered with the error the deployment would get.
+type Validation struct {
+	Valid bool `json:"valid"`
+}
+
+// Scheduled backups and the agent's own state.
+
+const (
+	// CodeBackupBusy means the backup is being verified or restored, or still
+	// being taken; the answer is 409.
+	CodeBackupBusy = "BACKUP_BUSY"
+	// CodeBackupNotUsable means a restore, a verification or a download was
+	// asked of a backup that did not succeed; the answer is 409.
+	CodeBackupNotUsable = "BACKUP_NOT_USABLE"
+	// CodeNoVolumes means a backup was asked of an application that has no
+	// volumes; the answer is 409.
+	CodeNoVolumes = "NO_VOLUMES"
+	// CodeBackupsNotEncrypted means a backup of the agent's state was asked
+	// for and SHIPWICK_BACKUP_PASSPHRASE is not set: the encryption key is
+	// never written unencrypted. The answer is 409.
+	CodeBackupsNotEncrypted = "BACKUPS_NOT_ENCRYPTED"
+)
+
+// EventBackup marks a backup that failed. Backups that succeed record no
+// event; a verification and a restore report on the backup itself.
+const EventBackup = "backup"
+
+// BackupRunStatus is how a backup stands.
+type BackupRunStatus string
+
+const (
+	BackupRunning   BackupRunStatus = "running"
+	BackupSucceeded BackupRunStatus = "succeeded"
+	BackupFailed    BackupRunStatus = "failed" // nothing was kept of it
+)
+
+// Backup triggers.
+const (
+	BackupTriggerSchedule = "schedule" // `backups.schedule` in deploy.yaml; daily for the agent's state
+	BackupTriggerManual   = "manual"   // POST …/backups
+)
+
+// What is being done with a backup that exists.
+const (
+	BackupActivityVerify  = "verify"
+	BackupActivityRestore = "restore"
+)
+
+// Backup destinations.
+const (
+	BackupDestinationNone  = "none"
+	BackupDestinationLocal = "local"
+	BackupDestinationS3    = "s3"
+)
+
+// BackupVolume is one archive of a backup: a volume of the application, or
+// for the agent's state one of its two files.
+type BackupVolume struct {
+	Volume    string `json:"volume"`
+	SizeBytes int64  `json:"size_bytes"` // of the archive, before encryption
+}
+
+// BackupRun is one backup of an application's volumes, or of the agent's
+// state. Poll it until completed_at is set; a verification or a restore of it
+// until activity is empty again.
+type BackupRun struct {
+	ID           int64           `json:"id"`
+	Trigger      string          `json:"trigger"`
+	Status       BackupRunStatus `json:"status"`
+	StartedAt    time.Time       `json:"started_at"`
+	CompletedAt  *time.Time      `json:"completed_at"`
+	Volumes      []BackupVolume  `json:"volumes"`
+	Destinations []string        `json:"destinations"` // "local", "s3"
+	Encrypted    bool            `json:"encrypted"`
+	Error        string          `json:"error"`
+	// Activity is "verify" or "restore" while one is in progress, else "".
+	Activity string `json:"activity"`
+	// VerifiedAt is when the backup last proved to restore into a container
+	// that came up; VerifyError is why the last verification failed. At most
+	// one of them is set.
+	VerifiedAt  *time.Time `json:"verified_at"`
+	VerifyError string     `json:"verify_error"`
+	// RestoredAt and RestoreError say the same of the last restore.
+	RestoredAt   *time.Time `json:"restored_at"`
+	RestoreError string     `json:"restore_error"`
+}
+
+// BackupRunDetail is a backup with the last output of the container its
+// verification started.
+type BackupRunDetail struct {
+	BackupRun
+	VerifyOutput string `json:"verify_output"`
+}
+
+// BackupStatus is the `backups` object of GET /server: where backups go, and
+// how the agent's own state — its database and the key that encrypts the
+// secrets in it — is doing.
+type BackupStatus struct {
+	Destination string `json:"destination"` // "none", "local" or "s3"
+	Encrypted   bool   `json:"encrypted"`   // SHIPWICK_BACKUP_PASSPHRASE is set
+	// StateLastAt is when the agent's state was last backed up; null if never.
+	StateLastAt *time.Time `json:"state_last_at"`
+	// StateError is why the state is not backed up, or why the last attempt
+	// failed; empty when the last attempt succeeded.
+	StateError string `json:"state_error"`
+}
+
+// Export, import and the standby server.
+
+// Deployment kinds an import adds.
+const (
+	KindImport  = "import"  // the configuration an export carried, deployed on another server
+	KindStandby = "standby" // the same, deployed stopped on a standby: `shipwick standby promote` starts it
+)
+
+const (
+	// CodeImportInProgress: an import is running; a server takes one at a time.
+	CodeImportInProgress = "IMPORT_IN_PROGRESS"
+	// CodeInvalidExport: the body is not an export, was written with another
+	// passphrase, or is damaged.
+	CodeInvalidExport = "INVALID_EXPORT"
+	// CodeExportInProgress: a scheduled or requested export is being written.
+	CodeExportInProgress = "EXPORT_IN_PROGRESS"
+	// CodeStandbyNotConfigured: the agent has no bucket to fetch exports from.
+	CodeStandbyNotConfigured = "STANDBY_NOT_CONFIGURED"
+)
+
+// PassphraseHeader carries the passphrase of an uploaded export, base64
+// encoded: the body is the archive itself, and headers are never logged.
+const PassphraseHeader = "X-Shipwick-Passphrase"
+
+// MinPassphraseLength is the shortest passphrase an export is written with.
+const MinPassphraseLength = 12
+
+// ExportRequest is the body of POST /export.
+type ExportRequest struct {
+	// Passphrase encrypts the archive; the agent keeps nothing of it.
+	Passphrase string `json:"passphrase"`
+	// Applications limits the export to the named ones; empty means all.
+	Applications []string `json:"applications,omitempty"`
+}
+
+// Import statuses, of the whole and of one application.
+const (
+	ImportRunning   = "running"
+	ImportSucceeded = "succeeded"
+	ImportFailed    = "failed"
+
+	ImportAppPending  = "pending"
+	ImportAppRunning  = "importing"
+	ImportAppImported = "imported"
+	ImportAppSkipped  = "skipped"
+	ImportAppFailed   = "failed"
+)
+
+// Import is the import a server is running, or ran last. It is kept in the
+// agent's memory: an agent that restarts has forgotten it.
+type Import struct {
+	Status string `json:"status"`
+	// Source says where the export came from: "upload", or the export in the
+	// bucket a standby fetched.
+	Source      string     `json:"source"`
+	Stopped     bool       `json:"stopped"`
+	Overwrite   bool       `json:"overwrite"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at"`
+	// ExportedAt is when the export was written; null until it has been read.
+	ExportedAt   *time.Time `json:"exported_at"`
+	Secrets      int        `json:"secrets"`
+	Registries   int        `json:"registries"`
+	Certificates int        `json:"certificates"`
+	// Applications are in the order they are deployed.
+	Applications []ImportedApplication `json:"applications"`
+	// Warnings are what was kept as it was, or could not be taken over.
+	Warnings []string `json:"warnings"`
+	Error    string   `json:"error"`
+}
+
+// ImportedApplication is one application of an import.
+type ImportedApplication struct {
+	Name         string   `json:"name"`
+	Status       string   `json:"status"`
+	Version      string   `json:"version"`
+	DeploymentID *int64   `json:"deployment_id"`
+	Volumes      []string `json:"volumes"` // restored before the application first started
+	// Message says why it was skipped or failed, and what to do about it.
+	Message string `json:"message"`
+}
+
+// DNSRecord is a record to create or change so that a hostname reaches this
+// server. Value is empty when the agent does not know its own address.
+type DNSRecord struct {
+	Hostname string `json:"hostname"`
+	Type     string `json:"type"` // "A" or "AAAA"
+	Value    string `json:"value"`
+}
+
+// Standby is what a server holds for the day it has to take over.
+type Standby struct {
+	// Applications were imported stopped and wait for a promotion.
+	Applications []StandbyApplication `json:"applications"`
+	// Records are what a promotion will ask for.
+	Records []DNSRecord `json:"records"`
+	// Pull is null when the agent does not fetch exports on a schedule.
+	Pull *StandbyPull `json:"pull"`
+}
+
+type StandbyApplication struct {
+	Name       string    `json:"name"`
+	Version    string    `json:"version"`
+	Hostnames  []string  `json:"hostnames"`
+	ImportedAt time.Time `json:"imported_at"`
+}
+
+// StandbyPull is how the scheduled import from the bucket is doing.
+type StandbyPull struct {
+	Schedule   string     `json:"schedule"`
+	LastAt     *time.Time `json:"last_at"`
+	LastExport int64      `json:"last_export"` // the export imported last; 0: none yet
+	LastError  string     `json:"last_error"`
+}
+
+// Promotion statuses.
+const (
+	PromotedRunning = "running" // started and ready
+	PromotedStarted = "started" // started, not ready within its startup budget
+	PromotedFailed  = "failed"  // could not be started
+)
+
+// Promotion is the answer of POST /standby/promote.
+type Promotion struct {
+	Applications []PromotedApplication `json:"applications"`
+	Records      []DNSRecord           `json:"records"`
+}
+
+type PromotedApplication struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
