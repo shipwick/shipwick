@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-03
+
 ### Added
 
 - **Cloudflare in front of the server.** With `SHIPWICK_CLOUDFLARE_API_TOKEN`
@@ -713,7 +715,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/shipwick/shipwick/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/shipwick/shipwick/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/shipwick/shipwick/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/shipwick/shipwick/compare/v0.3.0...v0.3.1

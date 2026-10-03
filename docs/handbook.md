@@ -1893,7 +1893,8 @@ old.example.com     expires in 9 days, on 2026-03-10 (Let's Encrypt E7)
 ```
 
 `--verbose` lists the ones that are in order too, with their issuer and last
-day. The agent learns this the way a browser would: once a minute it connects
+day. The agent learns this the way a browser would: once a minute — every ten
+seconds while a certificate is still being obtained — it connects
 to Caddy with the hostname as the server name and reads the certificate it is
 handed, without verifying it — on a development machine the issuer is Caddy's
 own authority, and is reported as that. A hostname is *waiting for DNS* while

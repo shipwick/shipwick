@@ -90,7 +90,7 @@ Failure — `details` is always an object:
 | 409 | `KEY_ROTATION_PENDING` | The encryption key was already rotated since the agent started, and the agent's environment still holds the old one; `details: {key_file}` |
 | 409 | `TRAFFIC_UNAVAILABLE` | Traffic or requests were asked of an agent that has no access log to read: no proxy, or one that is not the `caddy` container of its compose project |
 | 409 | `BACKUP_BUSY` | The backup is still being taken, verified, restored or removed; or a backup of the agent's state is already running |
-| 409 | `BACKUP_NOT_USABLE` | A verification, a restore or a download was asked of a backup that failed, so nothing was kept of it; or of one whose files do not decrypt with the agent's passphrase |
+| 409 | `BACKUP_NOT_USABLE` | A verification, a restore or a download was asked of a backup that failed, so nothing was kept of it; or of one whose files do not decrypt with the agent's passphrase. Also when backups or exports are asked of an agent that has no backup destination |
 | 409 | `NO_VOLUMES` | A backup was asked of an application without volumes |
 | 400 | `INVALID_EXPORT` | The body of an import is not an export, its passphrase does not match, or it breaks off |
 | 409 | `IMPORT_IN_PROGRESS` | An import is running; a server takes one at a time |

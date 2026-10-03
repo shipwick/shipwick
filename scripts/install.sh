@@ -459,6 +459,15 @@ Environment:
                               its own database and key (optional)
   SHIPWICK_BACKUP_S3_ENDPOINT, _BUCKET, _ACCESS_KEY_ID, _SECRET_ACCESS_KEY, _REGION, _PREFIX
                               an S3-compatible bucket the backups are also sent to (optional)
+  SHIPWICK_EXPORT_SCHEDULE, SHIPWICK_EXPORT_KEEP
+                              an export of the whole server on a schedule (optional)
+  SHIPWICK_STANDBY_SCHEDULE   makes this server a standby that imports those exports (optional)
+  SHIPWICK_ALERT_MEMORY_PERCENT, SHIPWICK_ALERT_DISK_PERCENT
+                              when a replica's memory and the disk raise an alert (90, 85)
+  SHIPWICK_HTTP_PORT, SHIPWICK_HTTPS_PORT
+                              the proxy's ports, when something else owns 80 and 443
+  SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE, SHIPWICK_CADDY_IMAGE
+                              images of your own instead of the release's
   SHIPWICK_INSTALL_DIR        default /opt/shipwick
   SHIPWICK_BIN_DIR            default /usr/local/bin
 EOF
