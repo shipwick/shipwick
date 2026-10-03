@@ -1845,7 +1845,11 @@ refused unless the agent has `SHIPWICK_CLOUDFLARE_API_TOKEN` or a certificate
 of your own covers it (below). `*.example.com` and `api.example.com` are
 different hostnames and may belong to different applications; a request for
 `api.example.com` goes to the application that names it exactly, every other
-name under the domain to the wildcard's. `redirects` cannot be wildcards, and
+name under the domain to the wildcard's. Behind Cloudflare's proxy, mind what
+Cloudflare's own certificate covers: on its free plan that is the zone and one
+label below it, so `*.example.com` is served and `*.apps.example.com` is
+refused at Cloudflare before it reaches the server, whatever certificate the
+server holds. `redirects` cannot be wildcards, and
 cannot point at a wildcard `domain`.
 
 **A certificate of your own.** For a hostname whose certificate comes from
