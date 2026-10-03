@@ -6,96 +6,54 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.6 — Teams
+## 0.7 — Logs and distribution
 
-More than one person, more than one server, and a record of who did what;
-and first, what 0.5 — the proxy, backups, alerts, moving to another server —
-left unfinished.
+Output that outlives its container, more ways to install, and first what
+0.6 — access for teams, a corporate network, a dashboard that deploys — left
+unfinished.
 
-### Left over from 0.5
+### Left over from 0.6
 
-Limits that 0.5 states in its documentation instead of hiding, each to be
-removed rather than explained.
+**A bundle whose images are proven.** `shipwick server bundle` checks the
+compose file, the installer and the CLI against the release's checksums; the
+three images are what the registry serves under the release's tags, as for
+any install. The release should publish their digests, and the bundle should
+check them.
 
-**Backups larger than 5 GB to a bucket.** An archive is sent to the bucket in
-one request, which S3-compatible services cap at 5 GB; a larger volume backs
-up to the server's disk only. Multipart upload removes the limit, for
-scheduled exports as well.
+**A `backups.before` that is ended.** When the command runs past
+`backups.before_timeout` the backup fails and the application is free again,
+but the command itself stays in the container until it exits: Docker cannot
+end a command it started in a running container. Running it in a way that
+can be ended.
 
-**Backups the database has forgotten.** A server restored from yesterday's
-state does not know the backups taken since, though they are in the bucket.
-A command that adopts what the bucket holds.
+**A configuration that can be edited where it is shown.** The dashboard
+deploys a pasted `deploy.yaml` and cannot prefill it from what runs, because
+the agent returns secrets masked. An endpoint that returns the document with
+its `${NAME}` references kept, and one that takes a document without a name
+in its address.
 
-**A time limit for `backups.before`.** The command that runs before an
-archive is taken has one hour, fixed. `backups.before_timeout`.
+**A token's applications, changed.** The applications a token is limited to
+are fixed when it is created; widening them means a new token.
 
-**A promotion that can be followed.** `shipwick standby promote` holds one
-request open until every application has started; a lost connection loses
-the answer, though not the promotion. It should be started and polled like a
-deployment, and what a standby last imported should survive a restart of its
-agent.
+**Sign-in for accounts without an address.** A provider account without an
+`email` claim is refused, and Microsoft Entra's multi-tenant issuers are not
+accepted. A claim of the operator's choice as the name.
+
+**The audit trail, searched.** It filters by application, by who and by time;
+not by kind of action, and it cannot be exported.
 
 **Exports and imports in the dashboard.** The dashboard writes an export to
 the backups and promotes a standby; a file of one's own, and an import from
 one, are the CLI's.
 
-**An init process, on request.** A process that runs as PID 1 and has no
-handler for `SIGTERM` — Node started as `node server.js` — is killed when
-its grace period ends. `init: true` in `deploy.yaml` would give it one that
-passes the signal on; it cannot be the default, because images that bring
-their own refuse a second.
-
-**A replaced replica that says so.** A container that is being stopped after
-a deployment is listed among the application's containers with nothing to
-tell it apart but the deployment it belongs to. A field in the API, for the
-dashboard and `shipwick status`.
-
-**Certificate and alert state in the list of applications.** Both are on an
-application's own page and on the server's; the list shows neither.
-
-**Redirect hostnames and `path`.** `www.example.com` redirects to the
-domain; with an application under `/api` it should redirect to the domain
-and its path.
-
 **Credential helpers.** `shipwick registry login` stores a credential on the
 server. A `credsStore` in the server's `~/.docker/config.json` is not read.
 
-**Traffic under another project name.** The agent finds the proxy's access
-log by the compose project `shipwick`; an installation under another name
-has no traffic figures and says so.
+**The dashboard without a mouse.** Its pages were looked at on a desktop and a
+phone, light and dark. A walk through every page with the keyboard alone, at
+tablet widths and with a screen reader has not been done.
 
-### Teams
-
-**Roles per application.** A token that may deploy one application and read
-the others.
-
-**An audit trail.** Deployments record who made them and stop/start events name
-the token; a delete, a restore, a token created or revoked are only in the
-agent's log. Every action a token takes, with who and when, in one place.
-
-**Tokens that expire.** `shipwick token create ci --role deploy --expires 90d`;
-an expired token is refused with a message that says so, and `token ls` shows
-what is about to lapse.
-
-**Behind a corporate proxy.** An agent that pulls images and reaches
-webhooks through `HTTPS_PROXY`, trusts an internal certificate authority, and
-can be installed from files copied to a server that has no way out.
-
-**Signing in to the dashboard with the company's accounts.** The dashboard
-has no users of its own and should not grow a user database. With an OpenID
-Connect provider configured on the agent (Google Workspace, Microsoft Entra,
-Okta, Keycloak), a person signs in there, and a table on the agent says which
-e-mail address or group gets which role. Two-factor authentication, password
-rules and offboarding stay where they already are. Tokens remain, for the CLI
-and for CI.
-
-**A new application from the dashboard.** Paste a `deploy.yaml`, deploy. Today
-the dashboard redeploys and rolls back what the CLI created.
-
-**Several servers in one dashboard.** The CLI already switches between servers
-with contexts; the dashboard should too, one sign-in per server.
-
-## 0.7 — Logs and distribution
+### Logs and distribution
 
 **Log archiving.** A run's output and a replica's last log lines kept beyond
 the container's life, searchable from the dashboard.
@@ -229,9 +187,8 @@ a scale one server does not reach.
 **Automatic failover.** See *A second server kept ready* in the handbook for
 what is offered instead, and *Scheduling across machines* below for why.
 
-**User accounts, SAML, LDAP.** The dashboard will accept identities from an
-OpenID Connect provider (0.6) and will not keep passwords, sessions for
-people, or a directory of its own. SAML and LDAP are reached through a
+**User accounts, SAML, LDAP.** The dashboard accepts identities from an
+OpenID Connect provider and keeps no passwords and no directory of its own. SAML and LDAP are reached through a
 provider that speaks OpenID Connect, which every one of them does.
 
 **Approval steps inside Shipwick.** A second person approving a production
