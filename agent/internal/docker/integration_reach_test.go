@@ -100,13 +100,19 @@ func TestIntegrationTheControlNetworkAndWhereApplicationsCallFrom(t *testing.T) 
 	if err := rt.StopContainer(ctx, id, time.Second); err != nil {
 		t.Fatalf("StopContainer: %v", err)
 	}
-	origins, err = rt.Origins(ctx)
-	if err != nil {
-		t.Fatalf("Origins: %v", err)
-	}
-	for _, a := range mine {
-		if slices.Contains(origins.Containers, a) {
-			t.Errorf("Containers = %v, still with the address %s of a stopped replica: the next holder would be refused", origins.Containers, a)
+	// The daemon's list of running containers follows a stop by a moment on
+	// some machines; the agent asks it again every two seconds, so a moment
+	// is all a stopped replica's address may stay for.
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		origins, err = rt.Origins(ctx)
+		if err != nil {
+			t.Fatalf("Origins: %v", err)
+		}
+		if !slices.ContainsFunc(mine, func(a netip.Addr) bool { return slices.Contains(origins.Containers, a) }) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Containers = %v, still with an address of a replica stopped 15s ago (%v): the next holder would be refused", origins.Containers, mine)
 		}
 	}
 }
