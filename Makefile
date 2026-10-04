@@ -17,18 +17,21 @@ build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/shipwick-agent ./agent/cmd/shipwick-agent
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/shipwick ./cli/cmd/shipwick
 
-## test: unit tests (no Docker required)
+## test: unit tests (no Docker required). caddy/ is a module of its own: what
+## the proxy image adds to Caddy, kept out of the agent's and the CLI's dependencies.
 test:
 	go test ./...
+	cd caddy && go test ./...
 
 ## test-race: unit tests under the race detector (requires cgo)
 test-race:
 	CGO_ENABLED=1 go test -race ./...
+	cd caddy && CGO_ENABLED=1 go test -race ./...
 
 ## test-race-docker: the same, in a Linux container — for machines without cgo (Windows)
 test-race-docker:
 	docker run --rm -v "$(CURDIR):/src:ro" -v shipwick-gomod:/go/pkg/mod -v shipwick-gocache:/root/.cache/go-build \
-		-w /src -e GOFLAGS=-buildvcs=false golang:1.27 go test -race -count=1 ./...
+		-w /src -e GOFLAGS=-buildvcs=false golang:1.27 sh -c 'go test -race -count=1 ./... && cd caddy && go test -race -count=1 ./...'
 
 ## test-integration: tests against a real Docker daemon
 test-integration:
@@ -40,8 +43,9 @@ test-dashboard:
 
 ## lint: formatting and static checks
 lint:
-	@test -z "$$(gofmt -l agent cli pkg 2>/dev/null)" || { echo "gofmt needed:"; gofmt -l agent cli pkg; exit 1; }
+	@test -z "$(gofmt -l agent cli pkg caddy 2>/dev/null)" || { echo "gofmt needed:"; gofmt -l agent cli pkg caddy; exit 1; }
 	go vet ./...
+	cd caddy && go vet ./...
 	go vet -tags integration ./agent/internal/docker/
 
 clean:

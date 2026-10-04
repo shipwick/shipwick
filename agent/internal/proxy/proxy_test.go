@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -190,6 +191,10 @@ type fakeCaddy struct {
 	loads  [][]byte
 	marker string
 	reject string // non-empty: /load answers 400 with this body
+	// older: a Caddy without Shipwick's source of replicas, which rejects a
+	// configuration that names it the way Caddy does.
+	older    bool
+	rejected int
 }
 
 func (f *fakeCaddy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +207,11 @@ func (f *fakeCaddy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
+		if f.older && bytes.Contains(body, []byte(`"source":"shipwick"`)) {
+			f.rejected++
+			http.Error(w, `{"error":"loading http app module: provision http: server shipwick: setting up route handlers: route 0: loading handler modules: position 0: loading module 'reverse_proxy': provision http.handlers.reverse_proxy: loading upstream source module: loading module 'shipwick': unknown module: http.reverse_proxy.upstreams.shipwick"}`, http.StatusBadRequest)
+			return
+		}
 		f.loads = append(f.loads, body)
 		var p parsed
 		json.Unmarshal(body, &p)
@@ -310,6 +320,82 @@ func TestSyncReportsRejectedConfig(t *testing.T) {
 	}
 	if s := c.Status(); !s.Reachable || s.Error != "" {
 		t.Errorf("Status after recovery = %+v", s)
+	}
+}
+
+var appRoutes = []Route{{Domain: "api.example.com", Backends: []Backend{{Name: "api_8080", Port: 8080}}}}
+
+func TestSyncServesThroughAProxyWithoutTheSource(t *testing.T) {
+	c, fake := newTestCaddy(t)
+	fake.older = true
+
+	if err := c.Sync(context.Background(), appRoutes); err != nil {
+		t.Fatalf("a proxy that lacks the source must still serve: %v", err)
+	}
+	if fake.loadCount() != 1 || !bytes.Contains(fake.loads[0], []byte(`"source":"a"`)) {
+		t.Fatalf("loads = %d, want the routes loaded with Caddy's own source", fake.loadCount())
+	}
+	if s := c.Status(); !s.Reachable || s.Error != "" || !s.PlainLookups {
+		t.Errorf("Status = %+v, want a working proxy that says what it lacks", s)
+	}
+
+	// Neither rendering is offered again while nothing changes.
+	if err := c.Sync(context.Background(), appRoutes); err != nil || fake.loadCount() != 1 || fake.rejected != 1 {
+		t.Errorf("second sync: err=%v loads=%d rejected=%d", err, fake.loadCount(), fake.rejected)
+	}
+	// A route that changes meanwhile is loaded the way the proxy understands.
+	more := append([]Route{{Domain: "web.example.com", Backends: []Backend{{Name: "web_80", Port: 80}}}}, appRoutes...)
+	if err := c.Sync(context.Background(), more); err != nil || fake.loadCount() != 2 || fake.rejected != 1 {
+		t.Errorf("changed routes: err=%v loads=%d rejected=%d", err, fake.loadCount(), fake.rejected)
+	}
+}
+
+func TestSyncOffersTheSourceAgainToAProxyThatWasReplaced(t *testing.T) {
+	c, fake := newTestCaddy(t)
+	fake.older = true
+	if err := c.Sync(context.Background(), appRoutes); err != nil {
+		t.Fatal(err)
+	}
+
+	// The upgrade that restarted the agent has replaced the proxy as well.
+	fake.mu.Lock()
+	fake.older = false
+	fake.mu.Unlock()
+	c.mu.Lock()
+	c.askedAt = time.Now().Add(-askAgainEvery)
+	c.mu.Unlock()
+
+	if err := c.Sync(context.Background(), appRoutes); err != nil {
+		t.Fatal(err)
+	}
+	if fake.loadCount() != 2 || !bytes.Contains(fake.loads[1], []byte(`"source":"shipwick"`)) {
+		t.Fatalf("loads = %d, want the routes loaded with Shipwick's source", fake.loadCount())
+	}
+	if s := c.Status(); !s.Reachable || s.PlainLookups {
+		t.Errorf("Status = %+v", s)
+	}
+}
+
+func TestSyncKeepsAskingAProxyThatStillLacksTheSource(t *testing.T) {
+	c, fake := newTestCaddy(t)
+	fake.older = true
+	if err := c.Sync(context.Background(), appRoutes); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.askedAt = time.Now().Add(-askAgainEvery)
+	c.mu.Unlock()
+
+	// Asked again and refused again: the routes it serves are not loaded a
+	// second time, a load being what resets connections.
+	if err := c.Sync(context.Background(), appRoutes); err != nil {
+		t.Fatal(err)
+	}
+	if fake.rejected != 2 || fake.loadCount() != 1 {
+		t.Errorf("rejected=%d loads=%d, want one more refusal and no load", fake.rejected, fake.loadCount())
+	}
+	if s := c.Status(); !s.Reachable || !s.PlainLookups {
+		t.Errorf("Status = %+v", s)
 	}
 }
 

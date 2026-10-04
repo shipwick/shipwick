@@ -12,10 +12,13 @@ Shipwick deploys Docker applications to a single server. Three programs:
 | `agent/` | `shipwick-agent`: runs on the server, drives Docker and Caddy, REST API | Go, SQLite |
 | `cli/` | `shipwick`: the command-line client | Go, Cobra |
 | `dashboard/` | Web UI, talks to the agent through its own server-side proxy | Nuxt 4, TypeScript, Tailwind |
+| `caddy/` | What the proxy image adds to Caddy: how it finds an application's replicas | Go, a module of its own |
 
 Shared Go packages are in `pkg/`: `spec` (parsing and validating `deploy.yaml`),
 `api` (the API's types, used by agent and CLI alike), `version`. One Go module
-at the root. `agent/internal` and `cli/internal` do not import each other.
+at the root; `caddy/` is a second one, so that Caddy and what it depends on
+stay out of the agent and the CLI. `agent/internal` and `cli/internal` do not
+import each other.
 
 Read before changing behavior: [docs/architecture.md](docs/architecture.md)
 (how it works and why), [docs/api.md](docs/api.md) (the API contract).
@@ -37,7 +40,8 @@ Dashboard alone, without Docker: `cd dashboard && npm run mock` in one terminal,
 
 Run `make lint test` before you call a Go change done, `make test-dashboard` for
 a dashboard change, and the race detector for anything that touches
-`agent/internal/deploy`.
+`agent/internal/deploy` or `caddy/`. A change in `caddy/` is in the proxy only
+once its image is rebuilt (`docker compose up --build`).
 
 ## Rules that are not negotiable
 

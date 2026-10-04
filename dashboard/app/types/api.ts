@@ -474,6 +474,8 @@ export interface ProxyStatus {
   routes: number
   /** Certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards. Absent on agents before 0.5. */
   dns_challenge?: boolean
+  /** The proxy is not Shipwick's image of this version: a name lookup that goes unanswered holds every request. Absent unless true, and on agents before 0.8. */
+  plain_lookups?: boolean
 }
 
 /** Who a request was made as: the token's name and role, and what narrows it. */

@@ -8,11 +8,14 @@ import (
 // resolver mirrors the part of a reverse_proxy handler that says where
 // upstreams come from.
 type resolver struct {
-	Source  string
-	Name    string
-	Port    string
-	Refresh string
-	Sources []resolver
+	Source   string
+	Name     string
+	Port     string
+	Refresh  string
+	Wait     string
+	Keep     string
+	Versions *struct{ IPv4, IPv6 bool }
+	Sources  []resolver
 }
 
 func handlerOf(t *testing.T, raw []byte, domain string) (dynamic *resolver, static []string) {
@@ -56,8 +59,33 @@ func TestBackendsAreResolvedByName(t *testing.T) {
 	if dynamic == nil || len(static) != 0 {
 		t.Fatalf("an application is reached by name, never through a list of replicas: dynamic=%+v static=%v", dynamic, static)
 	}
-	if dynamic.Source != "a" || dynamic.Name != "api.8080" || dynamic.Port != "8080" || dynamic.Refresh != resolveEvery {
+	if dynamic.Source != "shipwick" || dynamic.Name != "api.8080" || dynamic.Port != "8080" || dynamic.Refresh != resolveEvery {
 		t.Errorf("resolver = %+v", dynamic)
+	}
+	// What makes a lookup nobody answered invisible: the last answer is
+	// used, soon and for a while.
+	if dynamic.Wait != "200ms" || dynamic.Keep != "10s" {
+		t.Errorf("resolver = %+v, want a short wait and a kept answer", dynamic)
+	}
+}
+
+func TestAProxyWithoutTheSourceIsAskedTheWayEveryCaddyUnderstands(t *testing.T) {
+	routes := []Route{{Domain: "api.example.com", Backends: []Backend{{Name: "api.9090", Port: 9090}, {Name: "api.8080", Port: 8080}}}}
+	raw, plain, err := buildFor("localhost:2019", routes, TLS{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic, _ := handlerOf(t, raw, "api.example.com")
+	if dynamic == nil || dynamic.Source != "multi" || len(dynamic.Sources) != 2 {
+		t.Fatalf("resolver = %+v", dynamic)
+	}
+	for _, s := range dynamic.Sources {
+		if s.Source != "a" || s.Refresh != resolveEvery || s.Wait != "" || s.Keep != "" || s.Versions == nil || !s.Versions.IPv4 || s.Versions.IPv6 {
+			t.Errorf("source = %+v, want Caddy's own, asking for A records only", s)
+		}
+	}
+	if _, kept, _ := Build("localhost:2019", routes); kept == plain {
+		t.Error("the two renderings are two configurations: one fingerprint cannot stand for both")
 	}
 }
 

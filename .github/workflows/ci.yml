@@ -25,20 +25,25 @@ jobs:
           go-version-file: go.mod
 
       - name: gofmt
-        run: test -z "$(gofmt -l agent cli pkg)" || { gofmt -l agent cli pkg; exit 1; }
+        run: test -z "$(gofmt -l agent cli pkg caddy)" || { gofmt -l agent cli pkg caddy; exit 1; }
       - name: go vet
         run: |
           go vet ./...
           go vet -tags integration ./agent/internal/docker/
+          cd caddy && go vet ./...
       - name: go mod tidy is a no-op
-        run: go mod tidy && git diff --exit-code go.mod go.sum
+        run: |
+          go mod tidy && git diff --exit-code go.mod go.sum
+          cd caddy && go mod tidy && git diff --exit-code go.mod go.sum
       - name: Known vulnerabilities in dependencies
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       # The race detector needs cgo, which is why it runs here and not on
       # every developer machine.
       - name: Unit tests (race detector)
-        run: go test -race -count=1 ./...
+        run: |
+          go test -race -count=1 ./...
+          cd caddy && go test -race -count=1 ./...
 
       # Real container lifecycle against the runner's Docker daemon.
       - name: Integration tests
@@ -86,6 +91,13 @@ jobs:
         run: docker build -t ghcr.io/shipwick/caddy:ci -f Dockerfile.caddy .
       - name: The proxy image has the Cloudflare module
         run: docker run --rm ghcr.io/shipwick/caddy:ci caddy list-modules | grep -x dns.providers.cloudflare
+      - name: The proxy image has Shipwick's source of replicas
+        run: docker run --rm ghcr.io/shipwick/caddy:ci caddy list-modules | grep -x http.reverse_proxy.upstreams.shipwick
+      # caddy/ is compiled against the Caddy it is built into.
+      - name: caddy/go.mod names the Caddy the image is built from
+        run: |
+          version=$(sed -n 's/^ARG CADDY_VERSION=//p' Dockerfile.caddy)
+          grep -qx "	github.com/caddyserver/caddy/v2 v$version" caddy/go.mod
       - name: Compose files are valid
         run: |
           docker compose config --quiet

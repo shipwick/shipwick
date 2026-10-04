@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// askAgainEvery is how often a proxy that lacked Shipwick's source of
+// replicas is offered the configuration that uses it. A proxy does not gain a
+// module while it runs; its container is replaced, by an upgrade that
+// restarts the agent first or by whoever runs an image of their own.
+const askAgainEvery = time.Minute
+
 // verifyEvery is how often an unchanged config is re-checked against what
 // Caddy actually runs. Caddy restarting with an older config is rare, but the
 // consequence — every application unreachable until the next deployment —
@@ -29,6 +35,10 @@ type Status struct {
 	// DNSChallenge: certificates are obtained through a DNS record, so a
 	// hostname may stand behind Cloudflare's proxy and may be a wildcard.
 	DNSChallenge bool
+	// PlainLookups: the proxy is not Shipwick's image of this version and
+	// finds replicas the way every Caddy does, without keeping the last
+	// answer while Docker's DNS is silent.
+	PlainLookups bool
 }
 
 // Caddy applies routes through Caddy's admin API.
@@ -44,6 +54,11 @@ type Caddy struct {
 	lastErr     error
 	everReached bool
 	tls         TLS // see tls.go
+
+	// plainLookups: Caddy refused the source of replicas this agent prefers,
+	// and runs the configuration without it. askedAt is when it last refused.
+	plainLookups bool
+	askedAt      time.Time
 }
 
 // NewCaddy creates a client for the admin endpoint at addr, given either as
@@ -98,7 +113,21 @@ func (c *Caddy) Sync(ctx context.Context, routes []Route) error {
 }
 
 func (c *Caddy) sync(ctx context.Context, routes []Route) error {
-	config, fingerprint, err := BuildWithTLS(c.adminListen, routes, c.tls)
+	if c.plainLookups && time.Since(c.askedAt) >= askAgainEvery {
+		c.plainLookups = false
+	}
+	err := c.syncWith(ctx, routes, c.plainLookups)
+	if err != nil && !c.plainLookups && strings.Contains(err.Error(), missingSource) {
+		// A rejected configuration changes nothing in Caddy: what it ran, it
+		// still runs. The same routes are loaded the way it understands.
+		c.plainLookups, c.askedAt = true, time.Now()
+		err = c.syncWith(ctx, routes, true)
+	}
+	return err
+}
+
+func (c *Caddy) syncWith(ctx context.Context, routes []Route, plainLookups bool) error {
+	config, fingerprint, err := buildFor(c.adminListen, routes, c.tls, plainLookups)
 	if err != nil {
 		return fmt.Errorf("build proxy config: %w", err)
 	}
@@ -129,7 +158,7 @@ func (c *Caddy) sync(ctx context.Context, routes []Route) error {
 func (c *Caddy) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := Status{Enabled: true, Reachable: c.everReached && c.lastErr == nil, Routes: c.routes, DNSChallenge: c.tls.CloudflareToken != ""}
+	s := Status{Enabled: true, Reachable: c.everReached && c.lastErr == nil, Routes: c.routes, DNSChallenge: c.tls.CloudflareToken != "", PlainLookups: c.plainLookups}
 	if c.lastErr != nil {
 		s.Error = c.lastErr.Error()
 	}

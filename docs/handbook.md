@@ -2527,7 +2527,14 @@ Caddy is told a *name*, not a list of containers. Every application has one on
 the server's `shipwick-services` network — its own name — and a replica answers
 to it exactly while it is ready for traffic: it takes the name once it passed
 its health check, and loses it the moment it stops. Docker's DNS returns one
-address per replica that carries the name, and Caddy asks it for every request.
+address per replica that carries the name, and Caddy asks it again every
+second.
+
+Now and then Docker's DNS does not answer. The proxy then goes on with the
+replicas of the last answer, for up to 10 seconds, and asks again in the
+background: a request waits a fifth of a second at most, and the requests of
+one application never wait for the name of another. Its log says when a name
+stopped being answered and when it was answered again.
 
 - **Only healthy replicas receive traffic.** A replica that fails its health
   check is taken off the name within a second and put back once it passes
@@ -2638,9 +2645,27 @@ cd /opt/shipwick && docker compose up -d
   challenge is on (`proxy.dns_challenge`), which `shipwick doctor` reads.
 
 The proxy is Shipwick's own build of Caddy, `ghcr.io/shipwick/caddy`: the
-official image plus the Cloudflare DNS module and nothing else, on every
-installation whether or not the token is set
-([Dockerfile.caddy](../Dockerfile.caddy)).
+official image plus the Cloudflare DNS module and Shipwick's own way of
+finding replicas (above), and nothing else, on every installation whether or
+not the token is set ([Dockerfile.caddy](../Dockerfile.caddy)).
+
+**A proxy image of your own** (`SHIPWICK_CADDY_IMAGE`), for another DNS
+provider for instance, is built from that Dockerfile with your module added.
+The agent also works with a Caddy that lacks Shipwick's part — the official
+image, or the proxy of a release before 0.8 — by asking for replicas the way
+every Caddy can; a name lookup that Docker leaves unanswered then holds the
+requests to every application until the resolver gives up, five seconds.
+`shipwick doctor` and the dashboard's page of the server say when that is the
+case, and the agent offers the proxy its own way again once a minute, so
+replacing the image is all it takes.
+
+**Going back to a release before 0.8.** The installer does it like any other
+version (`SHIPWICK_VERSION=v0.7.0`), and removes the configuration the proxy
+saved, which the older proxy cannot read; the agent loads the routes again a
+few seconds later. Without the installer — the packages, or a compose file of
+your own — remove it yourself before the older proxy starts, or it will not
+start: `docker compose run --rm --no-deps --entrypoint rm caddy -f
+/config/caddy/autosave.json`.
 
 **Wildcards.** `domain` and `aliases` may be a wildcard — one leading `*`
 label, quoted in YAML:

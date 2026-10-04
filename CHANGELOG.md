@@ -8,6 +8,34 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One lost answer from Docker's DNS no longer holds every request.** The
+  proxy looked an application's name up once a second, on behalf of whichever
+  request came first and with one lock for all names. When Docker's DNS left
+  a lookup unanswered — seen on a real server, with nothing being deployed —
+  the requests to every application waited five seconds for the resolver to
+  give up, and some ended with a `503`. The proxy now asks per application
+  and in the background, and goes on with the replicas of the last answer for
+  up to 10 seconds: a request waits a fifth of a second at most. Its log says
+  when a name stopped being answered and when it was answered again.
+
+### Changed
+
+- The proxy image has a part of Shipwick's own besides the Cloudflare module
+  (`caddy/` in the repository), and the agent's configuration names it. An
+  agent of this version in front of a proxy without it — the proxy of an
+  older release, the official Caddy image, an image of your own — still
+  serves, the way it did before; `shipwick doctor`, the dashboard and
+  `proxy.plain_lookups` in `GET /server` say so. An image of your own is
+  built from `Dockerfile.caddy`.
+- **Going back to an older release**: the installer removes the configuration
+  the proxy saved when the older proxy cannot read it, and the agent loads
+  the routes again within seconds. Without the installer, remove
+  `/config/caddy/autosave.json` from the proxy's `caddy-config` volume
+  before the older proxy starts; it does not start otherwise. The handbook has
+  the command.
+
 ## [0.7.0] - 2026-10-04
 
 ### Added

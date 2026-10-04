@@ -116,6 +116,8 @@
 //   MOCK_VERIFY_FAILS=1  a backup verification ends with `verify_error`
 //   MOCK_DNS_CHALLENGE=1 server.proxy.dns_challenge is true, and wildcard
 //                    hostnames deploy without a supplied certificate
+//   MOCK_PLAIN_PROXY=1 server.proxy.plain_lookups is true: the proxy is not
+//                    Shipwick's image of this version
 //   MOCK_STANDBY=1   this server is a standby: postgres, shop and docs were
 //                    imported stopped and wait for POST /standby/promote, and
 //                    exports are fetched on a schedule (POST /standby/pull
@@ -193,6 +195,7 @@ const PASSPHRASE = process.env.MOCK_NO_PASSPHRASE !== '1'
 const BUCKET = process.env.MOCK_NO_BUCKET !== '1'
 const VERIFY_FAILS = process.env.MOCK_VERIFY_FAILS === '1'
 const DNS_CHALLENGE = PROXY_ENABLED && process.env.MOCK_DNS_CHALLENGE === '1'
+const PLAIN_PROXY = PROXY_ENABLED && process.env.MOCK_PLAIN_PROXY === '1'
 const IS_STANDBY = process.env.MOCK_STANDBY === '1'
 // A server nobody has deployed to yet: no applications, no deployments, nothing to alert about.
 const EMPTY = process.env.MOCK_EMPTY === '1'
@@ -3898,7 +3901,7 @@ async function handle(req, res) {
         memory_bytes: 8 * 1024 ** 3 - 212 * 1024 ** 2,
         applications: apps.size,
         containers: [...apps.values()].reduce((n, a) => n + a.containers.filter(c => c.state === 'running').length, 0),
-        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }) },
+        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }), ...(PLAIN_PROXY ? { plain_lookups: true } : {}) },
         token: who,
         notifications: { webhook: WEBHOOK },
         ...(OLD_AGENT ? {} : { dashboard_url: DASHBOARD_URL, alerts: activeAlerts(), disk: diskUsage(), backups: backupStatus() }),

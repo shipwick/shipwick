@@ -442,6 +442,7 @@ install_server() {
         warn "Could not pull images; using the ones already on this server."
     fi
 
+    forget_unreadable_proxy_config
     docker compose up -d --remove-orphans
     step "Started the Shipwick services"
 
@@ -462,6 +463,21 @@ install_server() {
     install_cli || true
     sign_in_cli
     print_summary
+}
+
+# forget_unreadable_proxy_config is for going back to an older release. The
+# proxy starts from the configuration it saved last, and one saved under a
+# newer release may name a module the older image does not have: a proxy that
+# cannot load its saved configuration does not start at all. Without the file
+# it starts empty, and the agent loads the routes within seconds.
+forget_unreadable_proxy_config() {
+    saved=/config/caddy/autosave.json
+    # shellcheck disable=SC2016 # expanded by the shell in the container
+    docker compose run --rm --no-deps -T --entrypoint sh -e SAVED="$saved" caddy -c '
+        [ -f "$SAVED" ] || exit 0
+        caddy validate --config "$SAVED" 2>&1 | grep -q "unknown module" || exit 0
+        rm -f "$SAVED" && echo forgotten' 2>/dev/null | grep -q forgotten || return 0
+    warn "The proxy's saved configuration was written by a newer release and was removed; the agent loads the routes again."
 }
 
 # daemon_proxy_advice is for a pull that failed while this installer has a

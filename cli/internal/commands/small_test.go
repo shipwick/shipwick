@@ -449,6 +449,23 @@ func TestDoctorReportsAHealthySetup(t *testing.T) {
 	})
 }
 
+func TestDoctorSaysWhenTheProxyIsNotShipwicks(t *testing.T) {
+	f := doctorAgent(t,
+		func(string) ([]string, error) { return []string{"203.0.113.10"}, nil },
+		func(*http.Request) (*http.Response, error) { return answer(200), nil })
+	f.server.Proxy.PlainLookups = true
+	out, _, err := f.run(t.TempDir(), "doctor")
+	if err != nil {
+		t.Fatalf("a proxy that serves is worth a look, not a failure: %v\n%s", err, out)
+	}
+	assertInOrder(t, out, []string{
+		"✓ Proxy serving 2 routes",
+		"! The proxy is not Shipwick's image of this version",
+		"On the server, run the installer again",
+		"No problems; 3 things worth a look.",
+	})
+}
+
 func TestDoctorFailsOnMissingDNSAndCertificates(t *testing.T) {
 	f := doctorAgent(t,
 		func(host string) ([]string, error) { return nil, notFound(host) },

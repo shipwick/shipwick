@@ -46,7 +46,7 @@ var web8080 = []Backend{{Name: "web_8080", Port: 8080}}
 
 const (
 	encodeJSON  = `{"encodings":{"gzip":{},"zstd":{}},"handler":"encode","minimum_length":1024,"prefer":["zstd","gzip"]}`
-	proxyPrefix = `{"dynamic_upstreams":{"name":"web_8080"`
+	proxyPrefix = `{"dynamic_upstreams":{"keep":"10s","name":"web_8080"`
 )
 
 func TestARouteWithAPathMatchesItAndEverythingUnderIt(t *testing.T) {

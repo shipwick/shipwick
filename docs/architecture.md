@@ -982,15 +982,40 @@ routing = for every replica that should serve: give it its names
 
 - **Ready** means running and not failing its health check (`unknown` counts;
   `starting` does not — a restarted replica waits for its first passing check).
-- **Caddy resolves the name for every request** (`dynamic_upstreams`, the `a`
-  source, refreshed every second, IPv4 only — an AAAA query would be forwarded
-  to the outside resolvers). Two versions on different ports are two sources of
-  one route while the rollout lasts. A name is put in the config only while a
+- **Caddy resolves the name for every request** (`dynamic_upstreams`, the
+  `shipwick` source, refreshed every second, IPv4 only — an AAAA query would
+  be forwarded to the outside resolvers). Two versions on different ports are
+  two sources of one route while the rollout lasts. A name is put in the config only while a
   running replica carries it: Docker's DNS forwards a name nobody carries to the
   outside resolvers, and every request would wait seconds for that to fail. With
   no such name the route is a static `503`, and a server-level error route turns
   the `502` Caddy would produce between a replica's death and the next sync into
   the same `503`.
+- **The source is Shipwick's, not Caddy's** (`caddy/`, compiled into the
+  proxy image). Caddy's `a` source looks a stale name up while holding one
+  lock for all names, on behalf of the request that came first. Docker's DNS
+  loses an answer now and then; the resolver waits five seconds for it, which
+  is also how long a request is retried — so one lost answer held every
+  request to every application for five seconds and ended some with a `503`,
+  on a server where nothing was being deployed. And a request that was
+  abandoned took the lookup with it. The `shipwick` source asks per name, in
+  the background, with a timeout of its own (2 s); a request waits 200 ms for
+  an answer that is on its way and otherwise goes to the replicas of the last
+  one, for as long as that answer is younger than 10 s. Ten seconds covers
+  a lost answer or two and no more, because an address must not outlive its
+  container by long: Docker gives the address of a container that is gone
+  to the next one that starts. "Nobody carries the name" is an answer, not a failure, and is
+  never replaced by an older one.
+- **A proxy without the source still serves.** Caddy rejects a configuration
+  that names a module it lacks, and keeps the one it runs. The agent then
+  renders the same routes with the `a` source, loads those, reports
+  `proxy.plain_lookups`, and offers the proxy its own source once a minute:
+  an upgrade restarts the agent before it replaces the proxy, and an image of
+  the operator's own may not have it at all. A configuration that is rejected
+  is not a reload and resets no connection. The reverse — an older proxy
+  starting from a configuration a newer agent saved — cannot be handled by
+  the agent, because that proxy does not start; the installer removes the
+  saved configuration when the proxy image cannot read it.
 - **A rollout waits 1.5 s** between naming a newcomer and stopping its
   predecessor, so that Caddy's next lookup has found the newcomer. Whoever named
   it — the rollout or the supervisor's tick, which syncs routing too.
@@ -1240,8 +1265,8 @@ only Caddy mounts.
 
 The DNS provider is not in the official Caddy image, so the proxy is an image
 of Shipwick's own: `Dockerfile.caddy`, an `xcaddy` build of a pinned Caddy
-with `caddy-dns/cloudflare` at a pinned version on the official image of the
-same version, published as `ghcr.io/shipwick/caddy` with each release and
+with `caddy-dns/cloudflare` at a pinned version and with the source of
+replicas in `caddy/`, on the official image of the same version, published as `ghcr.io/shipwick/caddy` with each release and
 pinned in the release's compose file like the agent and the dashboard. Every
 installation runs it, with or without a token: two proxy images would be two
 paths to test, and turning Cloudflare on would mean replacing the proxy

@@ -284,6 +284,10 @@ type ProxyStatus struct {
 	// record (SHIPWICK_CLOUDFLARE_API_TOKEN): hostnames may stand behind
 	// Cloudflare's proxy and may be wildcards.
 	DNSChallenge bool `json:"dns_challenge"`
+	// PlainLookups is true when the proxy is not Shipwick's image of this
+	// version: it finds an application's replicas without keeping the last
+	// answer, so a name lookup that goes unanswered holds every request.
+	PlainLookups bool `json:"plain_lookups,omitempty"`
 }
 
 // Deployment kinds.

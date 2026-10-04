@@ -69,6 +69,10 @@ type Route struct {
 	BasicAuth []BasicAuth
 	// PathRedirects answer single paths before anything else looks at them.
 	PathRedirects []PathRedirect
+
+	// plainLookups is set while rendering, for a proxy that lacks Shipwick's
+	// source of replicas: see sourceKept.
+	plainLookups bool
 }
 
 // BasicAuth is one account for Path and everything under it; an empty Path is
@@ -107,6 +111,27 @@ const (
 	// bounds how long a new replica waits for traffic and how long a stopped
 	// one is still tried (and found refusing, and skipped).
 	resolveEvery = "1s"
+	// resolveWait is how long a request waits for a name that has just been
+	// asked again before it goes to the replicas of the last answer. Docker's
+	// DNS answers in a few milliseconds or, now and then, not at all.
+	resolveWait = "200ms"
+	// resolveKeep is how long the last answer is used while the name goes
+	// unanswered: long enough for a lost answer or two, which is what
+	// happens, and no longer. Docker gives the address of a container that
+	// is gone to the next one that starts, so an old answer may name a
+	// container of another application.
+	resolveKeep = "10s"
+
+	// sourceKept is the source of replicas in Shipwick's Caddy (caddy/ in
+	// this repository): it keeps the last answer while Docker's DNS is slow
+	// or silent, and one application's lookup holds up no other's.
+	sourceKept = "shipwick"
+	// sourcePlain is the source every Caddy has. A lookup that goes
+	// unanswered holds the requests to every application until the resolver
+	// gives up; it is used only for a proxy without sourceKept.
+	sourcePlain = "a"
+	// missingSource is how Caddy says that it lacks sourceKept.
+	missingSource = "unknown module: http.reverse_proxy.upstreams." + sourceKept
 )
 
 // Build renders the Caddy JSON config for routes, and its fingerprint.
@@ -123,23 +148,32 @@ func Build(adminListen string, routes []Route) (config []byte, fingerprint strin
 // TLS. The fingerprint covers that too, as a hash: a certificate replaced or
 // a token changed is a configuration to load.
 func BuildWithTLS(adminListen string, routes []Route, tls TLS) (config []byte, fingerprint string, err error) {
+	return buildFor(adminListen, routes, tls, false)
+}
+
+// buildFor is BuildWithTLS for a proxy that has Shipwick's source of replicas,
+// or, with plainLookups, for one that does not.
+func buildFor(adminListen string, routes []Route, tls TLS, plainLookups bool) (config []byte, fingerprint string, err error) {
 	// The fingerprint covers the whole rendered config, not just the routes:
 	// an agent upgrade that changes how routes are rendered (a timeout, a
 	// header) must count as a change too, or Caddy would keep the old
 	// rendering until some application happened to be redeployed.
-	unmarked, err := render(adminListen, routes, tls, "")
+	unmarked, err := render(adminListen, routes, tls, plainLookups, "")
 	if err != nil {
 		return nil, "", err
 	}
 	sum := sha256.Sum256(unmarked)
 	fingerprint = hex.EncodeToString(sum[:8])
 
-	config, err = render(adminListen, routes, tls, markerPrefix+fingerprint)
+	config, err = render(adminListen, routes, tls, plainLookups, markerPrefix+fingerprint)
 	return config, fingerprint, err
 }
 
-func render(adminListen string, routes []Route, tls TLS, markerID string) ([]byte, error) {
+func render(adminListen string, routes []Route, tls TLS, plainLookups bool, markerID string) ([]byte, error) {
 	routes = normalize(routes)
+	for i := range routes {
+		routes[i].plainLookups = plainLookups
+	}
 	caddyRoutes := make([]any, 0, len(routes)+1)
 	// Routes are tried in order and the first match answers. A wildcard
 	// matches the names other routes serve one by one, so every wildcard
@@ -508,7 +542,7 @@ func handlerFor(r Route) obj {
 		},
 	}
 	if len(r.Backends) > 0 {
-		h["dynamic_upstreams"] = resolverFor(r.Backends)
+		h["dynamic_upstreams"] = resolverFor(r.Backends, r.plainLookups)
 	} else {
 		upstreams := make([]any, 0, len(r.Upstreams))
 		for _, u := range r.Upstreams {
@@ -538,17 +572,28 @@ func fileServer(root string) obj {
 // backends: one A record per replica that carries the name. A stopped replica
 // leaves the answer by itself, and until the next lookup it refuses
 // connections, which is a failure that is retried elsewhere.
-func resolverFor(backends []Backend) obj {
+func resolverFor(backends []Backend, plainLookups bool) obj {
 	sources := make([]any, 0, len(backends))
 	for _, b := range backends {
+		if plainLookups {
+			sources = append(sources, obj{
+				"source":  sourcePlain,
+				"name":    b.Name,
+				"port":    strconv.Itoa(b.Port),
+				"refresh": resolveEvery,
+				// The networks are IPv4; an AAAA question would be forwarded to
+				// the outside resolvers and hold up the answer.
+				"versions": obj{"ipv4": true, "ipv6": false},
+			})
+			continue
+		}
 		sources = append(sources, obj{
-			"source":  "a",
+			"source":  sourceKept,
 			"name":    b.Name,
 			"port":    strconv.Itoa(b.Port),
 			"refresh": resolveEvery,
-			// The networks are IPv4; an AAAA question would be forwarded to
-			// the outside resolvers and hold up the answer.
-			"versions": obj{"ipv4": true, "ipv6": false},
+			"wait":    resolveWait,
+			"keep":    resolveKeep,
 		})
 	}
 	if len(sources) == 1 {

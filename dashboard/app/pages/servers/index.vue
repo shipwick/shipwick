@@ -111,6 +111,9 @@ const newer = computed(() => updateNotice(server.value))
             <span v-if="server.proxy.dns_challenge" class="basis-full text-fg-muted">
               Certificates are obtained through Cloudflare DNS: hostnames may be proxied by Cloudflare and may be wildcards.
             </span>
+            <span v-if="server.proxy.plain_lookups" class="basis-full text-fg-muted">
+              Not Shipwick's image of this version: a name lookup Docker leaves unanswered holds every request for seconds. On the server, run the installer again; an image of your own is built from <span class="mono text-fg">Dockerfile.caddy</span>.
+            </span>
           </dd>
         </div>
         <div v-if="stateBackup">

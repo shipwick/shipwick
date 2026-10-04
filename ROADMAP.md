@@ -56,13 +56,15 @@ produces it, the behaviour that test pins down, and a page that says what the
 operator sees and does. Some of this is tested today; none of it is in one
 place.
 
-**A slow name lookup that no visitor notices.** The proxy asks Docker's DNS
-for an application's replicas once a second, and the requests to that
-application wait for the answer. On a real server one lookup went unanswered
-for five seconds, which is also how long a request is retried: one visitor
-got a `503` from an application that was running, with no deployment in
-progress. Seen once and not yet reproduced; first a test that produces it,
-then a proxy that keeps serving the replicas it last knew.
+**An address that changed hands.** Docker gives the address of a container
+that is gone to the next one that starts, on the network every application
+shares, and the proxy uses what it learned about a name for a second — ten
+while Docker's DNS is silent. A replica that stops while another
+application's starts could, within that time, leave the proxy sending one
+application's requests to the other. Nobody has seen it; nothing rules it
+out. A test that tries to produce it under deployments in parallel, and then
+either the proof that the order of a rollout prevents it or a change that
+does.
 
 **`doctor` on the server it deploys to.** It checks the agent, the proxy, DNS
 and certificates, and says nothing about the two things that take a small

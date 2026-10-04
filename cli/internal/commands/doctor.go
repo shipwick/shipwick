@@ -204,6 +204,9 @@ func (c *cli) doctor(ctx context.Context) error {
 		r.problem("Proxy unreachable: %s. Check the caddy container on the server: docker logs shipwick-caddy-1", p.Error)
 	default:
 		r.ok("Proxy serving %s", plural(p.Routes, "route"))
+		if p.PlainLookups {
+			r.hint("The proxy is not Shipwick's image of this version: a name lookup Docker leaves unanswered holds every request for seconds. On the server, run the installer again; an image of your own is built from Dockerfile.caddy")
+		}
 	}
 	r.alerts(info.Alerts)
 	r.dnsChallenge = info.Proxy.DNSChallenge
