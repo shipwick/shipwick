@@ -4897,8 +4897,9 @@ const server = createServer((req, res) => {
   handle(req, res).catch((error) => {
     if (res.headersSent) return res.destroy()
     if (error instanceof HttpError) return sendError(res, error.status, error.code, error.message, error.details)
+    // What went wrong is for whoever runs the mock, not for the page.
     console.error(error)
-    sendError(res, 500, 'INTERNAL_ERROR', String(error?.message ?? error))
+    sendError(res, 500, 'INTERNAL_ERROR', 'the mock agent failed; its output says why')
   })
 })
 

@@ -187,6 +187,10 @@ func parseSearchCursor(s string) (searchCursor, error) {
 	}
 	switch s[0] {
 	case 'l':
+		// A replica's index: nothing a cursor of ours holds comes near the bound.
+		if a > math.MaxInt32 {
+			return searchCursor{}, ErrInvalidCursor
+		}
 		c := searchCursor{live: true, replica: int(a)}
 		if two {
 			c.before = time.Unix(0, b).UTC()

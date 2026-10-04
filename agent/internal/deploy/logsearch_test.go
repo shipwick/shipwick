@@ -200,7 +200,7 @@ func TestSearchFindsTheOutputOfARun(t *testing.T) {
 func TestSearchRefusesACursorItDidNotReturn(t *testing.T) {
 	h := newHarness(t)
 	history(h)
-	for _, cursor := range []string{"x", "a", "l", "a-1", "a1.2.3", "l1.x", "b12", "a99999999999999999999", "a1.99999999999"} {
+	for _, cursor := range []string{"x", "a", "l", "a-1", "a1.2.3", "l1.x", "b12", "a99999999999999999999", "a1.99999999999", "l99999999999"} {
 		if _, err := h.engine.SearchLogs(context.Background(), "my-api", LogSearch{Limit: 10, Cursor: cursor}); !errors.Is(err, ErrInvalidCursor) {
 			t.Errorf("cursor %q: %v, want ErrInvalidCursor", cursor, err)
 		}
