@@ -1440,8 +1440,7 @@ is `404 NOT_FOUND`. In the audit trail the action is `token.update`, the
 target the token, and the detail what changed, as it was and as it is:
 `applications my-api -> my-api web worker`, `applications my-api web -> all`,
 `expires 2026-10-02T12:00:00Z -> 2027-04-01T00:00:00Z`, `expires … -> never`,
-or `nothing changed`. An agent before 0.7 answers `405` without the error
-envelope.
+or `nothing changed`. An agent before 0.7 answers `404 ENDPOINT_NOT_FOUND`.
 
 ### Audit trail
 

@@ -3,7 +3,6 @@ package commands
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -81,12 +80,11 @@ was before.`,
 			}
 			token, err := cl.UpdateToken(cmd.Context(), name, req)
 			if err != nil {
-				var apiErr *client.APIError
 				switch {
 				case client.IsCode(err, api.CodeNotFound):
 					return fmt.Errorf("there is no token named %s\n\nList the tokens with: shipwick token ls", name)
-				// An agent from before answers the path with the methods it has.
-				case errors.As(err, &apiErr) && apiErr.Status == http.StatusMethodNotAllowed:
+				// An agent from before knows the path for revoking only.
+				case client.IsCode(err, api.CodeEndpointNotFound):
 					return errors.New("the agent is older than this shipwick and cannot change a token: nothing was changed\n\nCompare versions with: shipwick server status\nUntil it is upgraded, create a new token and revoke the old one")
 				}
 				return err

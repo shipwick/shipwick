@@ -31,7 +31,7 @@ domain.
   *@example.com         everyone with an address at that domain
   name:248289761001     one person whose name is not an address
 
-The most specific rule that matches decides: the address, else the groups,
+The most specific rule that matches decides: the name, else the address, else the groups,
 else the domain. Of several groups the highest role counts. Nobody without a
 matching rule gets in.
 

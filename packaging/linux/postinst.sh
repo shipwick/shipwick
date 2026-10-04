@@ -41,7 +41,7 @@ The Shipwick agent is installed and not started.
   4. The reverse proxy and the dashboard run as containers:
        docker compose --env-file $ENV_FILE -f /usr/share/shipwick/compose.yml up -d
 
-What this package covers, and what it does not: handbook §3, "Installation from a package".
+What this package covers, and what it does not: handbook §4, "Installation from a package".
 
 EOF
 fi

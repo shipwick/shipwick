@@ -140,8 +140,8 @@
 //                    without showing its page of accounts
 //   MOCK_HOSTNAME    the server's hostname (default shipwick-fsn1-01)
 //   MOCK_AGENT=0.6   answers like an agent before 0.7: what it added is 404
-//                    ENDPOINT_NOT_FOUND (PUT /tokens/:name is net/http's plain
-//                    405), its fields are absent and its filters are ignored
+//                    ENDPOINT_NOT_FOUND, its fields are absent and its filters are
+//                    ignored
 //   MOCK_UPDATE=available|current|unknown|off   `update` on GET /server: a
 //                    newer release (the default), none, GitHub never answered,
 //                    or SHIPWICK_UPDATE_CHECK=off
@@ -3831,10 +3831,9 @@ async function handle(req, res) {
   const param = segments[1]
   const required = ROUTES[route]
 
-  // An agent before 0.7 knows the path of a token for DELETE only: net/http answers the method itself, without the envelope.
+  // An agent before 0.7 knows the path of a token for DELETE only; another method is an operation it lacks.
   if (BEFORE_07 && method === 'PUT' && segments[0] === 'tokens' && segments.length === 2) {
-    res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', 'allow': 'DELETE', 'x-content-type-options': 'nosniff' })
-    return res.end('Method Not Allowed\n')
+    return sendError(res, 404, 'ENDPOINT_NOT_FOUND', `no such endpoint: ${method} ${path}`)
   }
   if (!required) {
     // The agent has no such operation, as opposed to NOT_FOUND: unknown application or deployment.

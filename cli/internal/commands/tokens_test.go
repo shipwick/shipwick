@@ -47,6 +47,11 @@ func newTokenAgent(t *testing.T) *tokenAgent {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// As the agent does: an operation it lacks, a method of a known path
+	// included, is ENDPOINT_NOT_FOUND from its catch-all route.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		respondError(w, 404, api.Error{Code: api.CodeEndpointNotFound, Message: "no such endpoint: " + r.Method + " " + r.URL.Path})
+	})
 	a.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.requests = append(a.requests, r.Method+" "+r.URL.Path)

@@ -23,7 +23,10 @@ func TestIntegrationReadLogsOfARunThatEnded(t *testing.T) {
 	}
 	id, _, err := rt.CreateContainer(ctx, ContainerSpec{
 		App: app, DeploymentID: 1, Sequence: 1, Replica: 1, Image: testImage,
-		Entrypoint: []string{"sh"}, Command: []string{"-c", "echo one; echo two >&2; echo three; exit 3"},
+		// The pauses are inside the container: the daemon reads the two
+		// streams through pipes of their own, and lines written within
+		// microseconds of each other on different streams have no order.
+		Entrypoint: []string{"sh"}, Command: []string{"-c", "echo one; sleep 0.2; echo two >&2; sleep 0.2; echo three; exit 3"},
 	})
 	if err != nil {
 		t.Fatalf("CreateContainer: %v", err)

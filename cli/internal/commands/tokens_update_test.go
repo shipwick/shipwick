@@ -97,7 +97,7 @@ func TestTokenUpdateSendsOnlyWhatIsToChange(t *testing.T) {
 
 func TestTokenUpdateSaysWhenTheAgentCannotChangeATokenYet(t *testing.T) {
 	// An agent from before knows the path for DELETE only, and answers
-	// another method the way net/http does: 405, without the API's envelope.
+	// another method as it answers every operation it lacks.
 	a := newTokenAgent(t)
 	_, _, err := a.run(t.TempDir(), "token", "update", "ci", "--all-apps")
 	want := "Error: the agent is older than this shipwick and cannot change a token: nothing was changed\n\n" +

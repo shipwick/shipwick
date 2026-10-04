@@ -67,8 +67,8 @@ async function save() {
   }
 }
 
-/** An agent before 0.7 knows the address for revoking only, and answers the method itself: no envelope, status 405. */
-const tooOld = computed(() => error.value?.status === 405)
+/** An agent before 0.7 knows the address for revoking only: changing a token is an operation it lacks. */
+const tooOld = computed(() => error.value?.code === 'ENDPOINT_NOT_FOUND')
 </script>
 
 <template>

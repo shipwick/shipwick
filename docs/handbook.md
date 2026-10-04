@@ -3078,7 +3078,7 @@ shipwick audit --action deploy --format json | jq -r .actor.name
 `actor`, `address`, `forwarded_for`, `action`, `application`, `target`,
 `outcome`, `status`, `code`, `detail`), times in UTC; `json` has one JSON
 object per line, the same object the API returns. Both are newest first.
-`--output` takes the format from the file's name (`.csv`, `.json`,
+`--output` takes the format from the file's name (`.csv`, `.json`, `.jsonl`,
 `.ndjson`), does not write over a file that exists, and leaves none behind
 when the export was interrupted. The agent sends the trail as it reads it,
 500 entries at a time, so the largest trail costs it no more memory
