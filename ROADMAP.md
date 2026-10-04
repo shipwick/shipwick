@@ -56,6 +56,21 @@ produces it, the behaviour that test pins down, and a page that says what the
 operator sees and does. Some of this is tested today; none of it is in one
 place.
 
+**A slow name lookup that no visitor notices.** The proxy asks Docker's DNS
+for an application's replicas once a second, and the requests to that
+application wait for the answer. On a real server one lookup went unanswered
+for five seconds, which is also how long a request is retried: one visitor
+got a `503` from an application that was running, with no deployment in
+progress. Seen once and not yet reproduced; first a test that produces it,
+then a proxy that keeps serving the replicas it last knew.
+
+**`doctor` on the server it deploys to.** It checks the agent, the proxy, DNS
+and certificates, and says nothing about the two things that take a small
+server down most often: applications without a memory limit, and a server
+without swap. Both in the tone of its other notes, with what to set.
+Shipwick reports what it can see through Docker and changes nothing on the
+host; SSH, updates and the firewall stay the operator's.
+
 **More than one distribution in CI.** The integration tests run on one Ubuntu
 image with one Docker version. A matrix over the distributions the installer
 claims to support and the Docker versions still in use, on amd64 and arm64.
@@ -103,8 +118,9 @@ Not tied to a version; written when someone needs them.
 `docker-compose.yml` on a server, and what each of its parts becomes in
 `deploy.yaml` and `shipwick.yaml`.
 
-**GitLab CI.** The GitHub Action has a page; the same three lines for a
-`.gitlab-ci.yml`.
+**GitLab CI and Azure Pipelines.** The GitHub Action has a page; the same
+three lines for a `.gitlab-ci.yml` and an `azure-pipelines.yml`, each run
+against a real server before it is published.
 
 **Where your data is.** One page for whoever has to answer a security
 questionnaire: what the agent stores and where, what is encrypted and with
@@ -139,6 +155,21 @@ the 0.x series has run real installations for long enough that the last two
 minor versions changed nothing anyone had to relearn, when every item above
 has either shipped or been dropped on purpose, and when the limits of one
 server are written down with numbers that were measured.
+
+## 2.x
+
+Not before 1.0 has been out long enough to say what 2.0 is for. One item is
+already known.
+
+**The usual services, written for you.** `shipwick init postgres` adds an
+entry to `shipwick.yaml` that is right the first time: the volume at the path
+this version of the image keeps its data in, `deploy.strategy: recreate`, a
+health check that is not HTTP, a `backups` block whose `before` takes a
+consistent dump, and the address other applications reach it at. The same for
+Redis, MySQL and MariaDB, and no further: a handful of services every
+application needs, each started in a container by the tests, not a catalogue
+to keep up with. What is written is plain `deploy.yaml`; the agent learns
+nothing new, and a database remains an application like any other.
 
 ## Not planned
 
