@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-04
+
 ### Added
 
 - **The limits of one server, measured.** The handbook's *What one server
@@ -103,6 +105,76 @@ says so under **Changed** and explains how to upgrade.
   unenforced_limits}` and an application's metrics `unenforced_limits`. The
   `memory` alert is not raised about a limit nothing applies.
 
+### Changed
+
+- The proxy image has a part of Shipwick's own besides the Cloudflare module
+  (`caddy/` in the repository), and the agent's configuration names it. An
+  agent of this version in front of a proxy without it — the proxy of an
+  older release, the official Caddy image, an image of your own — still
+  serves, the way it did before; `shipwick doctor`, the dashboard and
+  `proxy.plain_lookups` in `GET /server` say so. An image of your own is
+  built from `Dockerfile.caddy`.
+- **Going back to an older release**: the installer removes the configuration
+  the proxy saved when the older proxy cannot read it, and the agent loads
+  the routes again within seconds. Without the installer, remove
+  `/config/caddy/autosave.json` from the proxy's `caddy-config` volume
+  before the older proxy starts; it does not start otherwise. The handbook has
+  the command.
+- **The dashboard's tooltips no longer need a mouse.** What they say — the
+  date and time behind "3m ago", why a button cannot be used — shows on
+  keyboard focus and on a tap, goes away with Escape, and is announced as
+  the element's description. A button that is off for a reason can be
+  reached with Tab; a few explanations that stood in tooltips are on the
+  page now. Checked in Chrome with the keyboard and with touch emulation;
+  still not used with a screen reader.
+- **`shipwick config` gives back the values that were written in the file.**
+  It returned every `env` value that was not a reference to a stored secret
+  as `"********"`, a log level as much as a password, because the agent
+  cannot tell them apart. `shipwick deploy` can: it now tells the agent which
+  values stood in the file as it sent them (`?plain=` on a deployment), the
+  agent keeps that with the deployment, and those values come back as they
+  are — from `shipwick config`, `GET /applications/:name/config` (with a new
+  `plain` list) and the dashboard's editor. A value the CLI filled in from
+  the environment or `--env-file` is masked as before, and so is every value
+  of an application until it is deployed again by this version of both. What
+  is written in `deploy.yaml` in plain sight is therefore readable by whoever
+  may deploy the application; a password belongs in `${NAME}`.
+- The integration tests run against Docker 20.10, 26.1, 28 and 29 and on
+  Ubuntu 22.04 as well as 24.04, each on amd64 and arm64, and the installer
+  is run on Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04, Rocky Linux 8,
+  9 and 10, Fedora and Alpine, on both architectures, before a release and
+  on every change to `main`.
+- **Upgrading from any release since 0.1.0 is running the installer, and
+  nothing else.** Every release was installed as it was released, given
+  applications, a volume with data, secrets, tokens, jobs and backups as far
+  as it had them, and upgraded to this version: the applications' containers
+  are not touched, and requests go unanswered for the two to three seconds
+  in which the proxy's container is replaced. The handbook has *Upgrading*
+  (§4): what happens from each release, what it costs, and the way back.
+  `scripts/test-upgrade.sh` walks one release; CI walks the last two.
+- **Applications no longer reach the agent's API.** The agent shares the
+  `shipwick` network with the applications, to probe them, and listened
+  there: any application's container could reach port 9000 and try tokens.
+  The API now has a network of its own, `shipwick-control`, for the agent,
+  the proxy and the dashboard; the agent listens there and on loopback only,
+  and a request that comes from an application's container all the same is
+  answered `403 APPLICATION_CALLER` before its token is looked at. Running
+  the installer again sets this up with the applications left running. The
+  dashboard is no longer reachable from application containers either. An
+  application that calls the API on purpose does so at the API's hostname.
+- What stays open says so: with a compose file of your own that has no
+  `shipwick-control` network, with `SHIPWICK_LISTEN_ADDR` set for the agent's
+  container, or with the API's port published on Docker before 28, the agent
+  listens as it did, refuses the containers it manages by their address
+  only, and `shipwick doctor`, the agent's log and `open_to_applications` in
+  `GET /server` report it. The handbook, §12, says what to change.
+- **The agent from a package**: after upgrading the package, run the compose
+  command again (`docker compose --env-file /etc/shipwick/agent.env -f
+  /usr/share/shipwick/compose.yml up -d`). It moves the proxy and the
+  dashboard onto the control network; until then the agent refuses both. The
+  proxy now reaches the agent by itself: `SHIPWICK_LISTEN_ADDR` on the Docker
+  bridge is needed for the dashboard only.
+
 ### Fixed
 
 - **One lost answer from Docker's DNS no longer holds every request.** The
@@ -174,76 +246,6 @@ says so under **Changed** and explains how to upgrade.
   that had been removed: the hostname left the proxy and came back ten
   seconds later at the earliest. Only an answer takes a served hostname out
   now; without one it stays and is asked about again.
-
-### Changed
-
-- The proxy image has a part of Shipwick's own besides the Cloudflare module
-  (`caddy/` in the repository), and the agent's configuration names it. An
-  agent of this version in front of a proxy without it — the proxy of an
-  older release, the official Caddy image, an image of your own — still
-  serves, the way it did before; `shipwick doctor`, the dashboard and
-  `proxy.plain_lookups` in `GET /server` say so. An image of your own is
-  built from `Dockerfile.caddy`.
-- **Going back to an older release**: the installer removes the configuration
-  the proxy saved when the older proxy cannot read it, and the agent loads
-  the routes again within seconds. Without the installer, remove
-  `/config/caddy/autosave.json` from the proxy's `caddy-config` volume
-  before the older proxy starts; it does not start otherwise. The handbook has
-  the command.
-- **The dashboard's tooltips no longer need a mouse.** What they say — the
-  date and time behind "3m ago", why a button cannot be used — shows on
-  keyboard focus and on a tap, goes away with Escape, and is announced as
-  the element's description. A button that is off for a reason can be
-  reached with Tab; a few explanations that stood in tooltips are on the
-  page now. Checked in Chrome with the keyboard and with touch emulation;
-  still not used with a screen reader.
-- **`shipwick config` gives back the values that were written in the file.**
-  It returned every `env` value that was not a reference to a stored secret
-  as `"********"`, a log level as much as a password, because the agent
-  cannot tell them apart. `shipwick deploy` can: it now tells the agent which
-  values stood in the file as it sent them (`?plain=` on a deployment), the
-  agent keeps that with the deployment, and those values come back as they
-  are — from `shipwick config`, `GET /applications/:name/config` (with a new
-  `plain` list) and the dashboard's editor. A value the CLI filled in from
-  the environment or `--env-file` is masked as before, and so is every value
-  of an application until it is deployed again by this version of both. What
-  is written in `deploy.yaml` in plain sight is therefore readable by whoever
-  may deploy the application; a password belongs in `${NAME}`.
-- The integration tests run against Docker 20.10, 26.1, 28 and 29 and on
-  Ubuntu 22.04 as well as 24.04, each on amd64 and arm64, and the installer
-  is run on Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04, Rocky Linux 8,
-  9 and 10, Fedora and Alpine, on both architectures, before a release and
-  on every change to `main`.
-- **Upgrading from any release since 0.1.0 is running the installer, and
-  nothing else.** Every release was installed as it was released, given
-  applications, a volume with data, secrets, tokens, jobs and backups as far
-  as it had them, and upgraded to this version: the applications' containers
-  are not touched, and requests go unanswered for the two to three seconds
-  in which the proxy's container is replaced. The handbook has *Upgrading*
-  (§4): what happens from each release, what it costs, and the way back.
-  `scripts/test-upgrade.sh` walks one release; CI walks the last two.
-- **Applications no longer reach the agent's API.** The agent shares the
-  `shipwick` network with the applications, to probe them, and listened
-  there: any application's container could reach port 9000 and try tokens.
-  The API now has a network of its own, `shipwick-control`, for the agent,
-  the proxy and the dashboard; the agent listens there and on loopback only,
-  and a request that comes from an application's container all the same is
-  answered `403 APPLICATION_CALLER` before its token is looked at. Running
-  the installer again sets this up with the applications left running. The
-  dashboard is no longer reachable from application containers either. An
-  application that calls the API on purpose does so at the API's hostname.
-- What stays open says so: with a compose file of your own that has no
-  `shipwick-control` network, with `SHIPWICK_LISTEN_ADDR` set for the agent's
-  container, or with the API's port published on Docker before 28, the agent
-  listens as it did, refuses the containers it manages by their address
-  only, and `shipwick doctor`, the agent's log and `open_to_applications` in
-  `GET /server` report it. The handbook, §12, says what to change.
-- **The agent from a package**: after upgrading the package, run the compose
-  command again (`docker compose --env-file /etc/shipwick/agent.env -f
-  /usr/share/shipwick/compose.yml up -d`). It moves the proxy and the
-  dashboard onto the control network; until then the agent refuses both. The
-  proxy now reaches the agent by itself: `SHIPWICK_LISTEN_ADDR` on the Docker
-  bridge is needed for the dashboard only.
 
 ## [0.7.0] - 2026-10-04
 
@@ -1318,7 +1320,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/shipwick/shipwick/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shipwick/shipwick/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/shipwick/shipwick/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/shipwick/shipwick/compare/v0.5.0...v0.5.1
