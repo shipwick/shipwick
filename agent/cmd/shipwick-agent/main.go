@@ -24,6 +24,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/deploy"
 	"github.com/shipwick/shipwick/agent/internal/disk"
 	"github.com/shipwick/shipwick/agent/internal/docker"
+	"github.com/shipwick/shipwick/agent/internal/memory"
 	"github.com/shipwick/shipwick/agent/internal/notify"
 	"github.com/shipwick/shipwick/agent/internal/oidc"
 	"github.com/shipwick/shipwick/agent/internal/proxy"
@@ -193,6 +194,7 @@ func run() error {
 		u, ok := disk.Of(cfg.DataDir)
 		return sharedapi.DiskUsage{TotalBytes: u.Total, UsedBytes: u.Used}, ok
 	}
+	opts.SwapBytes = memory.Swap
 	if cfg.CloudflareToken != "" {
 		// Config.Load has made sure there is a proxy to give it to.
 		if caddy, ok := opts.Proxy.(*proxy.Caddy); ok {

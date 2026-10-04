@@ -364,6 +364,26 @@ func logLineView(r store.Replica, entry docker.LogEntry) api.LogLine {
 	}
 }
 
+// unlimitedMemory names the applications whose replicas run without a memory
+// limit. One that is stopped uses none, and a static one has no replica.
+func (e *Engine) unlimitedMemory(ctx context.Context, apps []store.Application) ([]string, error) {
+	var names []string
+	for _, app := range apps {
+		if app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
+			continue
+		}
+		d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
+		if err != nil {
+			return nil, err
+		}
+		if d.StaticDigest == "" && d.Spec.Resources.MemoryBytes <= 0 {
+			names = append(names, app.Name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // Server describes the host the agent runs on.
 func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 	info, err := e.rt.Info(ctx)
@@ -389,25 +409,37 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 	if hostname == "" {
 		hostname, _ = os.Hostname()
 	}
+	unlimited, err := e.unlimitedMemory(ctx, apps)
+	if err != nil {
+		return api.Server{}, err
+	}
+	var swap *int64
+	if e.opts.SwapBytes != nil {
+		if bytes, ok := e.opts.SwapBytes(); ok {
+			swap = &bytes
+		}
+	}
 	return api.Server{
-		AgentVersion:  version.Version,
-		Hostname:      hostname,
-		OS:            info.OS,
-		Kernel:        info.Kernel,
-		Architecture:  info.Architecture,
-		DockerVersion: info.DockerVersion,
-		CPUs:          info.CPUs,
-		MemoryBytes:   info.MemoryBytes,
-		Applications:  len(apps),
-		Containers:    running,
-		Proxy:         api.ProxyStatus(e.ProxyStatus()),
-		Notifications: e.Notifications(),
-		DashboardURL:  e.opts.DashboardURL,
-		Alerts:        e.Alerts(),
-		Disk:          e.Disk(),
-		Backups:       e.BackupStatus(ctx),
-		Network:       e.networkStatus(info),
-		LogArchive:    e.logArchiveStatus(ctx),
-		Update:        e.updateStatus(),
+		AgentVersion:    version.Version,
+		Hostname:        hostname,
+		OS:              info.OS,
+		Kernel:          info.Kernel,
+		Architecture:    info.Architecture,
+		DockerVersion:   info.DockerVersion,
+		CPUs:            info.CPUs,
+		MemoryBytes:     info.MemoryBytes,
+		Applications:    len(apps),
+		Containers:      running,
+		Proxy:           api.ProxyStatus(e.ProxyStatus()),
+		Notifications:   e.Notifications(),
+		DashboardURL:    e.opts.DashboardURL,
+		Alerts:          e.Alerts(),
+		Disk:            e.Disk(),
+		SwapBytes:       swap,
+		UnlimitedMemory: unlimited,
+		Backups:         e.BackupStatus(ctx),
+		Network:         e.networkStatus(info),
+		LogArchive:      e.logArchiveStatus(ctx),
+		Update:          e.updateStatus(),
 	}, nil
 }

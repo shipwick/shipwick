@@ -506,6 +506,10 @@ export interface Server {
   docker_version: string
   cpus: number
   memory_bytes: number
+  /** How much swap the server has; 0 is none. Absent where the agent cannot tell, and on agents before 0.8. */
+  swap_bytes?: number
+  /** The running applications without a memory limit. Absent when there are none, and on agents before 0.8. */
+  unlimited_memory?: string[]
   applications: number
   containers: number
   /** The reverse proxy in front of the applications; `enabled` is false when none is configured. */

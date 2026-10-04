@@ -118,6 +118,7 @@
 //                    hostnames deploy without a supplied certificate
 //   MOCK_PLAIN_PROXY=1 server.proxy.plain_lookups is true: the proxy is not
 //                    Shipwick's image of this version
+//   MOCK_NO_SWAP=1   server.swap_bytes is 0: a server without swap
 //   MOCK_STANDBY=1   this server is a standby: postgres, shop and docs were
 //                    imported stopped and wait for POST /standby/promote, and
 //                    exports are fetched on a schedule (POST /standby/pull
@@ -142,6 +143,8 @@
 //                    without showing its page of accounts
 //   MOCK_HOSTNAME    the server's hostname (default shipwick-fsn1-01)
 //   MOCK_AGENT=0.6   answers like an agent before 0.7: what it added is 404
+//   MOCK_AGENT=0.7   answers like an agent before 0.8: GET /server has no
+//                    swap_bytes and no unlimited_memory
 //                    ENDPOINT_NOT_FOUND, its fields are absent and its filters are
 //                    ignored
 //   MOCK_UPDATE=available|current|unknown|off   `update` on GET /server: a
@@ -180,6 +183,8 @@ const OLD_AGENT = process.env.MOCK_OLD_AGENT === '1'
 const BEFORE_06 = OLD_AGENT || process.env.MOCK_AGENT === '0.5'
 // An agent before 0.7: no log archive, no document to edit, no token update, no update notice.
 const BEFORE_07 = BEFORE_06 || process.env.MOCK_AGENT === '0.6'
+// An agent before 0.8: says nothing about swap or about applications without a memory limit.
+const BEFORE_08 = BEFORE_07 || process.env.MOCK_AGENT === '0.7'
 const VERSION = OLD_AGENT ? 'v0.4.2' : BEFORE_06 ? 'v0.5.1' : BEFORE_07 ? 'v0.6.0' : 'v0.7.0'
 const UPDATE = ['available', 'current', 'unknown', 'off'].includes(process.env.MOCK_UPDATE) ? process.env.MOCK_UPDATE : 'available'
 const LOG_ARCHIVE = process.env.MOCK_LOG_ARCHIVE !== 'off'
@@ -965,6 +970,15 @@ function isHealthy(c) {
 }
 
 const isStaticSpec = sp => Boolean(sp?.static)
+
+/** What GET /server says about applications without a memory limit: the running ones, by name, and nothing when there are none. */
+function unlimitedMemory() {
+  const names = [...apps.values()].filter((app) => {
+    const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+    return active && app.desired_state === 'running' && !isStaticSpec(active.spec) && !(active.spec.resources?.memory_bytes > 0)
+  }).map(app => app.name).sort()
+  return names.length ? { unlimited_memory: names } : {}
+}
 
 function appSummary(app) {
   const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
@@ -3899,6 +3913,7 @@ async function handle(req, res) {
         docker_version: '27.4.1',
         cpus: 4,
         memory_bytes: 8 * 1024 ** 3 - 212 * 1024 ** 2,
+        ...(BEFORE_08 ? {} : { swap_bytes: process.env.MOCK_NO_SWAP === '1' ? 0 : 2 * 1024 ** 3, ...unlimitedMemory() }),
         applications: apps.size,
         containers: [...apps.values()].reduce((n, a) => n + a.containers.filter(c => c.state === 'running').length, 0),
         proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }), ...(PLAIN_PROXY ? { plain_lookups: true } : {}) },

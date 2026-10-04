@@ -2438,6 +2438,19 @@ extend it, and a container exceeding it is OOM-killed (reported as such, and
 restarted per `restart.policy`). Without a `resources` block a replica may use
 whatever the server has.
 
+That is how one application takes a small server down: it leaks, the server's
+memory fills, and the kernel kills a process — not necessarily the one that
+leaked. `shipwick doctor` names the running applications that have no memory
+limit, and says when the server has no swap, which is what turns a full
+memory into a killed process at once; `shipwick server status` and the
+dashboard show the swap next to the memory. Shipwick reports both and changes
+neither: a limit is a line in `deploy.yaml`, swap is the server's.
+
+```text
+! 3 applications run without a memory limit: postgres, redis, web. One that leaks takes the server's memory from all the others; set resources.memory in deploy.yaml
+! The server has no swap: once its 4 GB of memory is used, the kernel kills a process at once. Add a swap file on the server
+```
+
 Usage is one command away, and live in the dashboard:
 
 ```text

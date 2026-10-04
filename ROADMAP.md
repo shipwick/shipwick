@@ -66,13 +66,6 @@ out. A test that tries to produce it under deployments in parallel, and then
 either the proof that the order of a rollout prevents it or a change that
 does.
 
-**`doctor` on the server it deploys to.** It checks the agent, the proxy, DNS
-and certificates, and says nothing about the two things that take a small
-server down most often: applications without a memory limit, and a server
-without swap. Both in the tone of its other notes, with what to set.
-Shipwick reports what it can see through Docker and changes nothing on the
-host; SSH, updates and the firewall stay the operator's.
-
 **More than one distribution in CI.** The integration tests run on one Ubuntu
 image with one Docker version. A matrix over the distributions the installer
 claims to support and the Docker versions still in use, on amd64 and arm64.
@@ -115,6 +108,11 @@ published with the release.
 ## Documentation, as it becomes true
 
 Not tied to a version; written when someone needs them.
+
+**Preparing a server.** What Shipwick does not do and a server needs before
+it carries real data: SSH without passwords, automatic security updates, a
+swap file, a firewall and what Docker does to it. `shipwick doctor` says what
+it can see from where it runs; the rest stays the operator's, on one page.
 
 **From Docker Compose.** A guide for the commonest starting point: a
 `docker-compose.yml` on a server, and what each of its parts becomes in

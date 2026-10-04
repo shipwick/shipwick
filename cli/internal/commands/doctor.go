@@ -94,6 +94,28 @@ func (r *report) behindCloudflare(hostname string, addrs []string) {
 
 func (r *report) ok(format string, args ...any) { r.c.ui.Success(format, args...) }
 
+// memory says what takes a small server down without any single thing being
+// wrong: nothing between one application's appetite and the others, and
+// nothing between a full memory and a killed process.
+func (r *report) memory(info api.Server) {
+	if n := len(info.UnlimitedMemory); n > 0 {
+		names := info.UnlimitedMemory
+		more := ""
+		if n > 5 {
+			names, more = names[:5], fmt.Sprintf(" and %d more", n-5)
+		}
+		runs := "run"
+		if n == 1 {
+			runs = "runs"
+		}
+		r.hint("%s %s without a memory limit: %s%s. One that leaks takes the server's memory from all the others; set resources.memory in deploy.yaml",
+			plural(n, "application"), runs, strings.Join(names, ", "), more)
+	}
+	if info.SwapBytes != nil && *info.SwapBytes == 0 {
+		r.hint("The server has no swap: once its %s of memory is used, the kernel kills a process at once. Add a swap file on the server", spec.FormatMemory(info.MemoryBytes))
+	}
+}
+
 func (r *report) hint(format string, args ...any) {
 	r.hints++
 	r.c.ui.Println(r.c.ui.Styled(ui.Yellow, "!") + " " + fmt.Sprintf(format, args...))
@@ -209,6 +231,7 @@ func (c *cli) doctor(ctx context.Context) error {
 		}
 	}
 	r.alerts(info.Alerts)
+	r.memory(info)
 	r.dnsChallenge = info.Proxy.DNSChallenge
 	// An agent from before supplied certificates has none to report.
 	if supplied, err := cl.Certificates(ctx); err == nil {

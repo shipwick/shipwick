@@ -174,6 +174,9 @@ type Options struct {
 	AlertMemoryPercent int
 	AlertDiskPercent   int
 	DiskUsage          func() (usage api.DiskUsage, ok bool)
+	// SwapBytes says how much swap the server has; nil, or not ok, means it
+	// cannot be told here.
+	SwapBytes func() (bytes int64, ok bool)
 	// DNSChallenge says that the proxy obtains certificates through a DNS
 	// record rather than from the server itself. A hostname may then stand
 	// behind Cloudflare's proxy, and may be a wildcard.

@@ -77,7 +77,7 @@ const newer = computed(() => updateNotice(server.value))
             Memory
           </dt>
           <dd class="mono mt-0.5">
-            {{ formatBytes(server.memory_bytes) }}
+            {{ formatBytes(server.memory_bytes) }}<template v-if="server.swap_bytes !== undefined">, {{ server.swap_bytes > 0 ? `${formatBytes(server.swap_bytes)} swap` : 'no swap' }}</template>
           </dd>
         </div>
         <div>

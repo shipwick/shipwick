@@ -61,7 +61,7 @@ func (c *cli) serverCommand() *cobra.Command {
 				{"OS", fmt.Sprintf("%s (%s, kernel %s)", info.OS, info.Architecture, info.Kernel)},
 				{"Docker", info.DockerVersion},
 				{"CPUs", fmt.Sprint(info.CPUs)},
-				{"Memory", spec.FormatMemory(info.MemoryBytes)},
+				{"Memory", describeMemory(info)},
 				{"Applications", fmt.Sprint(info.Applications)},
 				{"Containers", fmt.Sprintf("%d running", info.Containers)},
 				{"Proxy", c.describeProxy(info.Proxy)},
@@ -260,4 +260,18 @@ func signInText(s api.SignInStatus) string {
 		return s.Issuer
 	}
 	return s.Issuer + " (people are named by the " + s.NameClaim + " claim)"
+}
+
+// describeMemory is the server's memory and, where the agent could tell, its
+// swap: none is worth saying.
+func describeMemory(info api.Server) string {
+	memory := spec.FormatMemory(info.MemoryBytes)
+	switch {
+	case info.SwapBytes == nil:
+		return memory
+	case *info.SwapBytes == 0:
+		return memory + ", no swap"
+	default:
+		return memory + ", " + spec.FormatMemory(*info.SwapBytes) + " swap"
+	}
 }

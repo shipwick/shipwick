@@ -260,6 +260,14 @@ type Server struct {
 	// agent cannot measure it (a development build off Linux).
 	Alerts []Alert    `json:"alerts"`
 	Disk   *DiskUsage `json:"disk"`
+	// SwapBytes is how much swap the server has. Absent where the agent
+	// cannot tell (a development build off Linux) and from agents older
+	// than 0.8; zero is a server without swap.
+	SwapBytes *int64 `json:"swap_bytes,omitempty"`
+	// UnlimitedMemory names the running applications that have no memory
+	// limit: each may use whatever the server has. Absent when there are
+	// none, and from agents older than 0.8.
+	UnlimitedMemory []string `json:"unlimited_memory,omitempty"`
 	// Backups is absent from agents older than scheduled backups.
 	Backups *BackupStatus `json:"backups,omitempty"`
 	// Network is absent from agents older than 0.6.

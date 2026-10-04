@@ -8,6 +8,15 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- `shipwick doctor` names the running applications that have no memory limit
+  and says when the server has no swap: the two things that let one
+  application take the others down. `shipwick server status` and the
+  dashboard show the swap next to the memory; `GET /server` has
+  `swap_bytes` and `unlimited_memory`. Shipwick reports both and changes
+  neither.
+
 ### Fixed
 
 - **One lost answer from Docker's DNS no longer holds every request.** The

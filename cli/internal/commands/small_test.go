@@ -449,6 +449,54 @@ func TestDoctorReportsAHealthySetup(t *testing.T) {
 	})
 }
 
+func TestDoctorNamesWhatRunsWithoutALimitAndAServerWithoutSwap(t *testing.T) {
+	f := doctorAgent(t,
+		func(string) ([]string, error) { return []string{"203.0.113.10"}, nil },
+		func(*http.Request) (*http.Response, error) { return answer(200), nil })
+	none := int64(0)
+	f.server.MemoryBytes, f.server.SwapBytes = 4<<30, &none
+	f.server.UnlimitedMemory = []string{"postgres", "redis", "scrum-poker"}
+	out, _, err := f.run(t.TempDir(), "doctor")
+	if err != nil {
+		t.Fatalf("worth a look, not a failure: %v\n%s", err, out)
+	}
+	assertInOrder(t, out, []string{
+		"✓ Proxy serving 2 routes",
+		"! 3 applications run without a memory limit: postgres, redis, scrum-poker. One that leaks",
+		"set resources.memory in deploy.yaml",
+		"! The server has no swap: once its 4 GB of memory is used, the kernel kills a process at once. Add a swap file on the server",
+		"No problems; 4 things worth a look.",
+	})
+
+	// One application, and a server that has swap or does not say.
+	some := int64(2 << 30)
+	f.server.SwapBytes, f.server.UnlimitedMemory = &some, []string{"web"}
+	out, _, _ = f.run(t.TempDir(), "doctor")
+	assertInOrder(t, out, []string{"! 1 application runs without a memory limit: web.", "No problems; 3 things worth a look."})
+	f.server.SwapBytes, f.server.UnlimitedMemory = nil, []string{"a", "b", "c", "d", "e", "f", "g"}
+	out, _, _ = f.run(t.TempDir(), "doctor")
+	assertInOrder(t, out, []string{"! 7 applications run without a memory limit: a, b, c, d, e and 2 more.", "No problems; 3 things worth a look."})
+}
+
+func TestServerStatusSaysHowMuchSwapThereIs(t *testing.T) {
+	f := newFakeAgent(t)
+	none, some := int64(0), int64(2<<30)
+	f.server = api.Server{AgentVersion: "1.2.3", Hostname: "vps-1", MemoryBytes: 4 << 30}
+	for _, tc := range []struct {
+		swap *int64
+		want string
+	}{{nil, "4 GB\n"}, {&none, "4 GB, no swap\n"}, {&some, "4 GB, 2 GB swap\n"}} {
+		f.server.SwapBytes = tc.swap
+		out, _, err := f.run(t.TempDir(), "server", "status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("swap %v: want a Memory line ending %q in\n%s", tc.swap, tc.want, out)
+		}
+	}
+}
+
 func TestDoctorSaysWhenTheProxyIsNotShipwicks(t *testing.T) {
 	f := doctorAgent(t,
 		func(string) ([]string, error) { return []string{"203.0.113.10"}, nil },
