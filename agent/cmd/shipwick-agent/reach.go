@@ -40,7 +40,9 @@ func openAPI(ctx context.Context, rt *docker.Runtime, cfg config.Config, log *sl
 	if err != nil {
 		return apiReach{}, fmt.Errorf("%s: %w", config.EnvListenAddr, err)
 	}
-	port, _ := strconv.Atoi(portText)
+	// A port is sixteen bits; what does not parse as one was never listened on.
+	port16, _ := strconv.ParseUint(portText, 10, 16)
+	port := int(port16)
 	ip := net.ParseIP(host)
 	everywhere := host == "" || (ip != nil && ip.IsUnspecified())
 	loopback := host == "localhost" || (ip != nil && ip.IsLoopback())
@@ -75,7 +77,7 @@ func openAPI(ctx context.Context, rt *docker.Runtime, cfg config.Config, log *sl
 
 	switch {
 	case inContainer && everywhere && reach.Control.IsValid() && !reach.PortElsewhere:
-		at := netip.AddrPortFrom(reach.Control, uint16(port)).String()
+		at := netip.AddrPortFrom(reach.Control, uint16(port16)).String()
 		if err := listen(at); err != nil {
 			return apiReach{}, err
 		}
@@ -125,7 +127,7 @@ func openAPI(ctx context.Context, rt *docker.Runtime, cfg config.Config, log *sl
 	// address the host has on a network they share. Sent anywhere else it
 	// would call from whichever of its networks has its default route, an
 	// application network.
-	at := netip.AddrPortFrom(reach.Control, uint16(port)).String()
+	at := netip.AddrPortFrom(reach.Control, uint16(port16)).String()
 	if !everywhere && host != reach.Control.String() {
 		if err := listen(at); err != nil {
 			log.Warn("could not listen on the control network; the proxy reaches the API where "+config.EnvListenAddr+" says", "network", control, "error", err)
