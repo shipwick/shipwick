@@ -48,6 +48,10 @@ type Deployment struct {
 	StaticDigest string
 	StaticFiles  int
 	StaticBytes  int64
+	// References is set on the way in only: what insertDeployment keeps next
+	// to the record (references.go). A deployment that was read has none;
+	// DeploymentReferences reads them.
+	References spec.References
 }
 
 type Replica struct {
@@ -124,8 +128,10 @@ func (s *Store) insertDeployment(ctx context.Context, d Deployment, now time.Tim
 		if err != nil {
 			return err
 		}
-		d.ID, err = res.LastInsertId()
-		return err
+		if d.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		return s.insertReferences(ctx, tx, d.ID, d.References)
 	})
 	if err != nil {
 		return Deployment{}, fmt.Errorf("create deployment: %w", err)

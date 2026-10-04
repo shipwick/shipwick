@@ -70,7 +70,7 @@ function closeRemove() {
           A volume appears here once an application with <span class="mono text-fg">volumes</span> in its deploy.yaml has been deployed.
         </EmptyState>
         <div v-else class="overflow-x-auto">
-          <table class="data-table stack">
+          <table class="data-table stack" aria-label="Volumes">
             <thead>
               <tr>
                 <th>Name</th>
@@ -101,7 +101,7 @@ function closeRemove() {
                   <StatusBadge v-bind="volumeStatusDisplay(v)" />
                 </td>
                 <td class="right">
-                  <UiButton v-if="removable(v)" variant="danger" size="sm" :disabled="!mayAdmin" :title="removeHint" @click="removing = v">
+                  <UiButton v-if="removable(v)" variant="danger" size="sm" :disabled="!mayAdmin" :title="removeHint" :aria-label="`Remove ${v.name}`" @click="removing = v">
                     Remove
                   </UiButton>
                 </td>

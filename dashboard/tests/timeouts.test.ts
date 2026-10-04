@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { ARCHIVE_ANSWER_TIMEOUT_MS, HEADERS_TIMEOUT_MS, PROMOTE_ANSWER_TIMEOUT_MS, STOP_ANSWER_TIMEOUT_MS, answerTimeoutMs, isSafeSegment } from '../server/utils/timeouts'
+import { ARCHIVE_ANSWER_TIMEOUT_MS, DOWNLOAD_CLAIM_MS, EXPORT_ANSWER_TIMEOUT_MS, HEADERS_TIMEOUT_MS, IMPORT_ANSWER_TIMEOUT_MS, PROMOTE_ANSWER_TIMEOUT_MS, STOP_ANSWER_TIMEOUT_MS, answerTimeoutMs, isSafeSegment, streamsBody } from '../server/utils/timeouts'
+import { attachmentName } from '../server/utils/downloads'
 
 const MINUTE = 60_000
 
@@ -40,6 +41,42 @@ describe('answerTimeoutMs', () => {
     expect(answerTimeoutMs('GET', ['applications', 'postgres', 'volumes', 'data', 'archive'])).toBe(ARCHIVE_ANSWER_TIMEOUT_MS)
     expect(answerTimeoutMs('GET', ['applications', 'postgres', 'backups', '12', 'volumes', 'data', 'archive'])).toBe(ARCHIVE_ANSWER_TIMEOUT_MS)
     expect(answerTimeoutMs('PUT', ['certificates', 'example.com'])).toBe(ARCHIVE_ANSWER_TIMEOUT_MS)
+  })
+})
+
+describe('an export and an import', () => {
+  it('waits for an import from its last byte as long as for a promotion: the applications at the end of the file are still being deployed', () => {
+    expect(answerTimeoutMs('POST', ['import'])).toBe(IMPORT_ANSWER_TIMEOUT_MS)
+    expect(IMPORT_ANSWER_TIMEOUT_MS).toBeGreaterThanOrEqual(30 * MINUTE)
+    expect(answerTimeoutMs('GET', ['import'])).toBe(HEADERS_TIMEOUT_MS)
+  })
+
+  it('waits for the first byte of an export as for an archive', () => {
+    expect(answerTimeoutMs('POST', ['export'])).toBe(EXPORT_ANSWER_TIMEOUT_MS)
+    expect(EXPORT_ANSWER_TIMEOUT_MS).toBe(ARCHIVE_ANSWER_TIMEOUT_MS)
+    expect(answerTimeoutMs('POST', ['exports'])).toBe(HEADERS_TIMEOUT_MS)
+  })
+
+  it('passes on as it arrives every PUT, and of the POSTs only the import', () => {
+    expect(streamsBody('PUT', ['applications', 'postgres', 'volumes', 'data', 'archive'])).toBe(true)
+    expect(streamsBody('PUT', ['secrets', 'STRIPE_KEY'])).toBe(true)
+    expect(streamsBody('POST', ['import'])).toBe(true)
+    for (const segments of [['export'], ['exports'], ['applications'], ['validate'], ['applications', 'import'], ['import', 'x'], ['standby', 'pull']]) {
+      expect(streamsBody('POST', segments), segments.join('/')).toBe(false)
+    }
+    expect(streamsBody('GET', ['import'])).toBe(false)
+    expect(streamsBody('DELETE', ['applications', 'import'])).toBe(false)
+  })
+
+  it('holds a started export for less than the minute after which the agent gives a stalled write up', () => {
+    expect(DOWNLOAD_CLAIM_MS).toBeLessThan(MINUTE)
+  })
+
+  it('shows the file name the agent chose, and none that is not a plain name', () => {
+    expect(attachmentName('attachment; filename="shipwick-export-20261004-005656.swexport"')).toBe('shipwick-export-20261004-005656.swexport')
+    expect(attachmentName('attachment; filename="../../etc/passwd"')).toBe('')
+    expect(attachmentName('attachment; filename="<script>.swexport"')).toBe('')
+    expect(attachmentName(undefined)).toBe('')
   })
 })
 

@@ -19,7 +19,6 @@ const FRAME = {
       :key="finding.key"
       class="flex flex-wrap items-start gap-x-3 gap-y-1.5 rounded-sm border px-3 py-2 text-xs"
       :class="FRAME[finding.tone]"
-      role="status"
     >
       <UiIcon :name="finding.tone === 'danger' ? 'x-circle' : 'alert'" :size="14" class="mt-px" />
       <div class="min-w-0 flex-1 basis-64">

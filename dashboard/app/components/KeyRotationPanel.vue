@@ -20,6 +20,9 @@ const pending = ref(false)
 const error = shallowRef<AgentError | null>(null)
 const rotation = shallowRef<KeyRotation | null>(null)
 const copied = ref(false)
+const result = ref<HTMLElement | null>(null)
+useFocusWhenShown(result)
+const { announce } = useAnnounce()
 
 async function rotate() {
   if (pending.value) return
@@ -54,7 +57,15 @@ async function copy() {
   }
   catch {
     // No clipboard access (http, or denied): the line is selectable right there.
+    announce('Could not copy. Select the line and copy it by hand.')
   }
+}
+
+// The button that rotates is back where the result was: it takes the focus Done had.
+const start = ref<HTMLElement | null>(null)
+function done() {
+  rotation.value = null
+  void nextTick(() => start.value?.querySelector('button')?.focus())
 }
 
 // The key leaves the page with the panel; nothing else ever held it.
@@ -65,7 +76,7 @@ onBeforeUnmount(() => {
 
 <template>
   <UiPanel title="Encryption key">
-    <div v-if="rotation" class="space-y-3 px-4 py-4" role="status">
+    <div v-if="rotation" ref="result" tabindex="-1" class="space-y-3 px-4 py-4 focus-visible:-outline-offset-2" role="status">
       <p class="flex items-center gap-2 font-medium text-ok">
         <UiIcon name="check" :size="14" />
         Rotated the encryption key: {{ counts }}
@@ -88,11 +99,11 @@ onBeforeUnmount(() => {
       <p v-else class="text-fg-muted">
         The new key is in <span class="mono text-fg">{{ rotation.key_file }}</span> on the server. Back it up: database backups made from now on need it, earlier ones the old key.
       </p>
-      <UiButton size="sm" variant="ghost" @click="rotation = null">
+      <UiButton size="sm" variant="ghost" @click="done">
         Done
       </UiButton>
     </div>
-    <div v-else class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-3">
+    <div v-else ref="start" class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-3">
       <p class="max-w-prose text-fg-muted">
         Environment values, secrets, registry passwords and certificate keys are stored encrypted with one key. Rotating has the agent generate a new one and re-encrypt everything under it; nothing is deployed and nothing restarts.
       </p>

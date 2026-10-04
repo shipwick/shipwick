@@ -66,6 +66,7 @@ var sealedColumns = []sealedColumn{
 	{table: "secrets", key: "name", column: "value", name: func(name string) string { return name }},
 	{table: "registries", key: "registry", column: "password", name: registryPasswordName},
 	{table: "certificates", key: "hostname", column: "key", name: keyLabel},
+	{table: "deployment_references", key: "deployment_id", column: "value", name: referencesName},
 }
 
 // keyring is the store's cipher.AEAD. It seals with the current key; it opens

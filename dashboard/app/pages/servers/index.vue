@@ -2,8 +2,10 @@
 import type { Server } from '~/types/api'
 import { stateBackupDisplay } from '~/utils/backups'
 import { formatBytes, pluralize } from '~/utils/format'
+import { describeLogArchive } from '~/utils/logArchive'
 import { describeNetwork } from '~/utils/network'
 import type { Tone } from '~/utils/status'
+import { updateLine, updateNotice } from '~/utils/updates'
 
 /** Whether the server is healthy: what needs attention first, then what it has and what it runs. */
 const polling = useServerInfo()
@@ -22,6 +24,9 @@ const proxy = computed<{ tone: Tone, label: string, detail: string }>(() => {
 const stateBackup = computed(() => (server.value.backups ? stateBackupDisplay(server.value.backups, now.value) : null))
 /** Only on a server where something was set: a proxy, authorities of its own, resolvers, another certificate authority. */
 const network = computed(() => describeNetwork(server.value.network))
+/** What the agent heard about newer releases, when there is nothing to do about it: said quietly next to its version. */
+const upToDate = computed(() => updateLine(server.value.update, now.value))
+const newer = computed(() => updateNotice(server.value))
 </script>
 
 <template>
@@ -37,6 +42,8 @@ const network = computed(() => describeNetwork(server.value.network))
         <UiIcon name="chevron-right" :size="12" />
       </NuxtLink>
     </p>
+
+    <UpdateNotice :server="server" />
 
     <UiPanel v-if="server.alerts !== undefined" title="Alerts" :meta="server.alerts.length" :bordered="false">
       <AlertList v-if="server.alerts.length > 0" :alerts="server.alerts" />
@@ -142,6 +149,22 @@ const network = computed(() => describeNetwork(server.value.network))
             <span v-else class="text-fg-muted">No hostname: set <span class="mono text-fg">SHIPWICK_DASHBOARD_DOMAIN</span> to serve it over HTTPS through the proxy.</span>
           </dd>
         </div>
+        <!-- What is kept of containers that ended; absent on an agent before 0.7. -->
+        <div v-if="server.log_archive">
+          <dt class="label">
+            Log archive
+          </dt>
+          <dd class="mt-0.5">
+            <template v-if="server.log_archive.enabled">
+              <span class="mono">{{ describeLogArchive(server.log_archive) }}</span>
+              <span class="block text-xs text-fg-muted">The last output of every container that ended, under Logs on an application's page.</span>
+            </template>
+            <template v-else>
+              <StatusBadge tone="muted" label="Off" />
+              <span class="ml-2 text-fg-muted">Nothing is kept of a container that ended: <span class="mono text-fg">SHIPWICK_LOG_RETENTION_SIZE</span> is 0 on the agent.</span>
+            </template>
+          </dd>
+        </div>
         <div v-if="network" class="sm:col-span-2">
           <dt class="label">
             Network
@@ -159,6 +182,16 @@ const network = computed(() => describeNetwork(server.value.network))
 
     <UiPanel title="System">
       <dl class="facts sm:grid-cols-2 lg:grid-cols-4">
+        <div class="sm:col-span-2 lg:col-span-4">
+          <dt class="label">
+            Shipwick agent
+          </dt>
+          <dd class="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+            <span class="mono">{{ server.agent_version }}</span>
+            <a v-if="newer" href="#update" class="link text-fg-muted">{{ newer.latest }} is available</a>
+            <span v-else-if="upToDate" class="text-fg-muted">{{ upToDate }}</span>
+          </dd>
+        </div>
         <div>
           <dt class="label">
             Operating system

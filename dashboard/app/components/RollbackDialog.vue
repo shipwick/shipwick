@@ -77,13 +77,13 @@ async function submit() {
           <label
             v-for="(d, index) in candidates"
             :key="d.id"
-            class="flex cursor-pointer items-center gap-3 border-b border-line px-3 py-2 last:border-b-0 hover:bg-hover has-[:checked]:bg-active"
+            class="target flex cursor-pointer items-center gap-3 border-b border-line px-3 py-2 last:border-b-0 hover:bg-hover has-[:checked]:bg-active has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent"
           >
             <input v-model="selected" type="radio" name="rollback-target" :value="d.id" class="accent-[var(--fg)]" :autofocus="index === 0">
             <span class="mono w-10 shrink-0 text-fg-muted">#{{ d.sequence }}</span>
             <span class="mono min-w-0 truncate font-medium" :title="d.image">{{ d.version }}</span>
-            <span class="min-w-0 flex-1 truncate text-xs text-fg-subtle">{{ originOf(d) }}</span>
-            <span v-if="index === 0" class="label max-sm:hidden">Previous version</span>
+            <span class="min-w-0 flex-1 truncate text-xs text-fg-muted">{{ originOf(d) }}</span>
+            <span v-if="index === 0" class="label !text-fg-muted max-sm:hidden">Previous version</span>
             <TimeAgo :time="d.started_at" class="w-16 shrink-0 text-right text-xs text-fg-muted" />
           </label>
         </fieldset>

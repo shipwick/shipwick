@@ -1,28 +1,41 @@
 import { describe, expect, it } from 'vitest'
-import type { TokenIdentity } from '../app/types/api'
+import type { Token, TokenIdentity } from '../app/types/api'
 import { AgentError } from '../app/utils/agentError'
 import {
+  AUDIT_FAMILIES,
+  NO_AUDIT_FILTERS,
   accessSummary,
   auditActionLabel,
+  auditActionProblem,
   auditDetailLink,
+  auditFiltersIgnored,
   auditFrom,
   auditHasOlder,
+  auditMore,
   auditOutcomeDisplay,
+  auditQuery,
   auditSubject,
   canDeploy,
+  cleanRuleSubject,
   deployHint,
+  editExpiryChoices,
   expiryFromChoice,
   issuerHost,
   limitedExplanation,
   listNames,
+  newAuditFilters,
+  otherNameClaim,
   parseApplications,
   readOnlyReason,
+  ruleKinds,
+  ruleReach,
   ruleSubject,
   ruleSubjectProblem,
   sessionEndedMessage,
   sessionExpiryWarning,
   signedInUntil,
   spanInWords,
+  tokenChanges,
   tokenExpiryDisplay,
 } from '../app/utils/access'
 import { accessTabs, activeTab } from '../app/utils/tabs'
@@ -235,6 +248,162 @@ describe('the audit trail', () => {
   it('offers older entries only while a page came back full', () => {
     expect(auditHasOlder(Array.from({ length: 50 }), 50)).toBe(true)
     expect(auditHasOlder(Array.from({ length: 49 }), 50)).toBe(false)
+  })
+})
+
+describe('the audit trail, searched', () => {
+  it('asks only for what is set', () => {
+    expect(auditQuery(NO_AUDIT_FILTERS)).toEqual({})
+    expect(auditQuery({ ...NO_AUDIT_FILTERS, application: 'web', actor: ' ci ', actorKind: 'token', since: '7d' })).toEqual({ application: 'web', actor: 'ci', actor_kind: 'token', since: '7d' })
+  })
+
+  it('turns a family into the agent\'s actions, and lets a typed action replace it', () => {
+    expect(auditQuery({ ...NO_AUDIT_FILTERS, family: 'tokens' })).toEqual({ action: 'token.' })
+    expect(auditQuery({ ...NO_AUDIT_FILTERS, family: 'deployments' }).action).toBe('deploy,redeploy,rollback,image.,static.')
+    expect(auditQuery({ ...NO_AUDIT_FILTERS, family: 'tokens', action: ' secret.set ' })).toEqual({ action: 'secret.set' })
+  })
+
+  it('names only actions and families the agent accepts, and at most twenty at once', () => {
+    const pattern = /^[a-z]{1,20}(\.[a-z]{1,20})?$|^[a-z]{1,20}\.$/
+    for (const family of AUDIT_FAMILIES) {
+      const actions = family.actions === '' ? [] : family.actions.split(',')
+      expect(actions.length, family.value).toBeLessThanOrEqual(20)
+      for (const action of actions) expect(pattern.test(action), `${family.value}: ${action}`).toBe(true)
+    }
+  })
+
+  it('joins the outcomes, and asks for none when all three are ticked', () => {
+    expect(auditQuery({ ...NO_AUDIT_FILTERS, outcomes: ['refused', 'failed'] })).toEqual({ outcome: 'refused,failed' })
+    expect(auditQuery({ ...NO_AUDIT_FILTERS, outcomes: ['ok', 'refused', 'failed'] })).toEqual({})
+  })
+
+  it('holds a typed action to the agent\'s pattern', () => {
+    for (const good of ['', 'deploy', 'token.create', 'backup.', ' token. ']) expect(auditActionProblem(good), good).toBe('')
+    for (const bad of ['Token.create', 'token.create.x', '.create', 'a b', 'token*']) expect(auditActionProblem(bad), bad).not.toBe('')
+  })
+
+  it('believes the agent about older entries, and a full page where it does not say', () => {
+    const page = (n: number) => Array.from({ length: n }, () => ({})) as never[]
+    expect(auditMore({ data: page(50), more: false }, 50)).toBe(false)
+    expect(auditMore({ data: page(3), more: true }, 50)).toBe(true)
+    expect(auditMore({ data: page(50) }, 50)).toBe(true)
+    expect(auditMore({ data: page(49) }, 50)).toBe(false)
+  })
+
+  it('notices an agent before 0.7, which ignores what it does not know', () => {
+    expect(auditFiltersIgnored({ data: [] }, { action: 'token.' })).toBe(true)
+    expect(auditFiltersIgnored({ data: [] }, { outcome: 'refused', actor_kind: 'user' })).toBe(true)
+    // It knows these three.
+    expect(auditFiltersIgnored({ data: [] }, { application: 'web', actor: 'ci', since: '7d' })).toBe(false)
+    expect(auditFiltersIgnored({ data: [], more: false }, { action: 'token.' })).toBe(false)
+    expect(newAuditFilters({ action: 'token.', outcome: 'ok', actor_kind: 'user', since: '7d' })).toEqual(['the action', 'the result', 'tokens or people'])
+  })
+
+  it('has words for what 0.7 records', () => {
+    expect(auditActionLabel('token.update')).toBe('Change token')
+    expect(auditActionLabel('audit.export')).toBe('Export audit trail')
+  })
+})
+
+describe('a token that is changed', () => {
+  const ci: Pick<Token, 'role' | 'applications' | 'expires_at'> = { role: 'deploy', applications: ['my-api'], expires_at: null }
+  const keep = { applications: ['my-api'], expiry: 'keep' as const, date: '' }
+
+  it('sends nothing when nothing was changed', () => {
+    expect(tokenChanges(ci, keep, now)).toEqual({ body: null, problem: '' })
+    expect(tokenChanges(ci, { ...keep, expiry: 'never' }, now).body).toBeNull()
+  })
+
+  it('sends only what was changed', () => {
+    expect(tokenChanges(ci, { ...keep, applications: ['web', 'my-api'] }, now).body).toEqual({ applications: ['my-api', 'web'] })
+    expect(tokenChanges(ci, { ...keep, expiry: '30' }, now).body).toEqual({ expires_at: '2026-11-02T12:00:00Z' })
+  })
+
+  it('lifts the limit with an empty list', () => {
+    expect(tokenChanges(ci, { ...keep, applications: [] }, now).body).toEqual({ applications: [] })
+  })
+
+  it('takes the end away from a token that has one', () => {
+    expect(tokenChanges({ ...ci, expires_at: '2026-10-12T12:00:00Z' }, { ...keep, expiry: 'never' }, now).body).toEqual({ never_expires: true })
+  })
+
+  it('gives an expired token a new end', () => {
+    const expired = { ...ci, expires_at: '2026-09-18T12:00:00Z' }
+    expect(tokenChanges(expired, { ...keep, expiry: 'date', date: '2027-01-31' }, now).body).toEqual({ expires_at: '2027-01-31T23:59:59Z' })
+  })
+
+  it('says why a date cannot be used, and sends nothing then', () => {
+    expect(tokenChanges(ci, { ...keep, expiry: 'date', date: '2026-01-01' }, now)).toEqual({ body: null, problem: 'That day is over: a token that has expired already would be of no use.' })
+    expect(tokenChanges(ci, { ...keep, expiry: 'date', date: '' }, now).problem).toBe('Choose the day the token stops working.')
+  })
+
+  it('never sends applications for a token that cannot be limited', () => {
+    expect(tokenChanges({ role: 'read', applications: [], expires_at: null }, { applications: ['web'], expiry: 'keep', date: '' }, now).body).toBeNull()
+    expect(tokenChanges({ role: 'admin', applications: [], expires_at: null }, { applications: ['web'], expiry: '90', date: '' }, now).body).toEqual({ expires_at: '2027-01-01T12:00:00Z' })
+  })
+
+  it('offers to leave the end as it is, in words that say what that is', () => {
+    expect(editExpiryChoices({ expires_at: null }, now).map(c => c.label)).toEqual(['Leave it: no end', 'In 30 days', 'In 90 days', 'In a year', 'On a date…'])
+    expect(editExpiryChoices({ expires_at: '2026-10-12T12:00:00Z' }, now).slice(0, 2).map(c => c.label)).toEqual(['Leave it: ends in 9 days', 'No end'])
+    expect(editExpiryChoices({ expires_at: '2026-09-18T12:00:00Z' }, now)[0]!.label).toBe('Leave it: expired 15d ago')
+  })
+})
+
+describe('people who are named by another claim than their address', () => {
+  it('knows the claim only when it is not the address', () => {
+    expect(otherNameClaim({ configured: true, name_claim: 'preferred_username' })).toBe('preferred_username')
+    expect(otherNameClaim({ configured: true, name_claim: 'email' })).toBe('')
+    expect(otherNameClaim({ configured: false, name_claim: '' })).toBe('')
+    // An agent before 0.7 does not say: it names people by their address.
+    expect(otherNameClaim({ configured: true })).toBe('')
+    expect(otherNameClaim(null)).toBe('')
+  })
+
+  it('offers a rule by name first, and says whom a rule by address reaches', () => {
+    const kinds = ruleKinds('preferred_username', true)
+    expect(kinds.map(k => k.value)).toEqual(['name', 'group', 'email', 'domain'])
+    expect(kinds[0]).toMatchObject({ label: 'One person', field: 'Name' })
+    expect(kinds[2]!.help).toBe('This server names people by the preferred_username claim: the rule applies to those whose preferred_username is an address.')
+  })
+
+  it('offers a rule by address first where people are named by it, and a rule by name with what it then means', () => {
+    const kinds = ruleKinds('', true)
+    expect(kinds.map(k => k.value)).toEqual(['email', 'group', 'domain', 'name'])
+    expect(kinds[3]!.help).toContain('a rule by name matches an address written exactly as the agent keeps it')
+  })
+
+  it('offers no rule by name to an agent that knows none', () => {
+    expect(ruleKinds('', false).map(k => k.value)).toEqual(['email', 'group', 'domain'])
+  })
+
+  it('writes a rule by name as the CLI does', () => {
+    expect(ruleSubject({ kind: 'name', subject: 'svc-deploy' })).toBe('name:svc-deploy')
+  })
+
+  it('keeps a name and a group as typed, and lowercases an address and a domain', () => {
+    expect(cleanRuleSubject('name', ' Ada.Lovelace ')).toBe('Ada.Lovelace')
+    expect(cleanRuleSubject('group', ' Developers ')).toBe('Developers')
+    expect(cleanRuleSubject('email', ' Ada@Example.com ')).toBe('ada@example.com')
+    expect(cleanRuleSubject('domain', '*@Example.com')).toBe('example.com')
+  })
+
+  it('holds a name to what a claim can hold', () => {
+    expect(ruleSubjectProblem('name', 'svc-deploy')).toBe('')
+    expect(ruleSubjectProblem('name', '248289761001')).toBe('')
+    expect(ruleSubjectProblem('name', 'auth0|5f7c8ec7c33c6c004bbafe82')).toBe('')
+    expect(ruleSubjectProblem('name', 'ada lovelace')).not.toBe('')
+    expect(ruleSubjectProblem('name', 'x'.repeat(255))).not.toBe('')
+  })
+
+  it('says under a rule by address or domain whom it reaches', () => {
+    expect(ruleReach({ kind: 'domain' }, 'sub')).toBe('applies to names that are addresses')
+    expect(ruleReach({ kind: 'email' }, 'sub')).toBe('applies to names that are addresses')
+    expect(ruleReach({ kind: 'name' }, 'sub')).toBe('')
+    expect(ruleReach({ kind: 'domain' }, '')).toBe('')
+  })
+
+  it('says why a session ended when the way people sign in was changed', () => {
+    expect(sessionEndedMessage(new AgentError(401, 'SESSION_ENDED', 'how people sign in to this server was changed. Sign in again', { reason: 'sign_in_changed' }))).toBe('How people sign in to this server was changed. Sign in again.')
   })
 })
 

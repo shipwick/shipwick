@@ -67,6 +67,19 @@ Properties worth keeping if you change it:
   `images.tar` is checked against `images.tar.sha256` before anything is
   changed and handed to `docker load` before the compose file is replaced,
   and nothing is pulled. Every other step is shared; keep it that way.
+- **What Docker loaded is held against the release.** With
+  `image-digests.txt` in the bundle, `verify_bundle_images` compares the ID
+  of each loaded image with the digests the release published for the
+  server's platform: the configuration's with the classic image store, the
+  manifest's with containerd's. A bundle made with the classic store and
+  loaded into containerd's has a manifest `docker save` wrote; it is read
+  from the archive by its digest and must name the published configuration.
+  An image that fails is untagged and the installer stops before the compose
+  file is touched. Without the file — `--no-pull`, a release before 0.7.0 —
+  it warns and goes on. To try a change, make bundles with both stores
+  (`DOCKER_HOST` at a `docker:dind` started with and without
+  `--feature containerd-snapshotter=false`; the integration test in
+  `cli/internal/commands` makes one from `./dist`) and install each on both.
 - **Behind a proxy** it reads `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in
   either case, exports both spellings (`wget` reads the lower one only), and
   writes them to a new `.env`. When a pull fails while the installer has a
@@ -108,4 +121,36 @@ you to see what it would publish. The asset names are a contract with
 ```bash
 sh scripts/build-release.sh v0.2.0    # → ./dist
 sh scripts/release-notes.sh v0.2.0
+```
+
+## build-packages.sh
+
+The `.deb` and the `.rpm` of the agent, for amd64 and arm64, into `./dist`.
+`build-release.sh` runs it; run it alone to try a change under
+`packaging/linux`:
+
+```bash
+sh scripts/build-packages.sh v0.7.0
+```
+
+It compiles the agent, pins the images in the package's compose file, and
+hands everything to `packaging/linux/build-deb.sh` in a `debian:stable-slim`
+container and to `build-rpm.sh` in a `rockylinux/rockylinux:9` one
+(`SHIPWICK_DEB_IMAGE`, `SHIPWICK_RPM_IMAGE` choose others). The files go in
+and the packages come out as tar streams, so nothing is mounted and the
+script runs from Git Bash on Windows as it does on Linux. `postinst.sh`,
+`prerm.sh` and `postrm.sh` are shared by both formats: each build script puts
+the lines in front that turn its package manager's arguments into `install`,
+`upgrade` or `purge`. They must not contain a percent sign, which `rpm` would
+expand.
+
+## image-digests.sh
+
+The lines of a release's `image-digests.txt` for one image, read from the
+registry: the manifest list's digest, and each platform's manifest and
+configuration. The release workflow runs it after each push. Needs
+`docker buildx` and `jq`.
+
+```bash
+sh scripts/image-digests.sh ghcr.io/shipwick/agent:0.6.0
 ```

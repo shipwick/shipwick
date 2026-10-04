@@ -24,6 +24,12 @@ type Claims struct {
 	Email         string
 	EmailVerified *bool
 	Groups        []string
+	// Name is the value of the claim the agent names people by, as the
+	// provider wrote it; "" when the token lacks it or it is not a string.
+	Name string
+	// Tenant is the tid claim: the directory the account belongs to, for a
+	// provider that says so.
+	Tenant string
 }
 
 const (
@@ -44,21 +50,25 @@ const (
 
 // key is one of the provider's signing keys.
 type key struct {
-	id  string
-	rsa *rsa.PublicKey
-	ec  *ecdsa.PublicKey
+	id string
+	// issuer is set for a key that signs for one issuer only: see
+	// tenants.go.
+	issuer string
+	rsa    *rsa.PublicKey
+	ec     *ecdsa.PublicKey
 }
 
 type jwks struct {
 	Keys []struct {
-		Kty string `json:"kty"`
-		Kid string `json:"kid"`
-		Use string `json:"use"`
-		N   string `json:"n"`
-		E   string `json:"e"`
-		Crv string `json:"crv"`
-		X   string `json:"x"`
-		Y   string `json:"y"`
+		Kty    string `json:"kty"`
+		Kid    string `json:"kid"`
+		Use    string `json:"use"`
+		N      string `json:"n"`
+		E      string `json:"e"`
+		Crv    string `json:"crv"`
+		X      string `json:"x"`
+		Y      string `json:"y"`
+		Issuer string `json:"issuer"`
 	} `json:"keys"`
 }
 
@@ -102,7 +112,7 @@ func (p *Provider) keysFor(ctx context.Context, id string) ([]key, error) {
 			if n == nil || e == nil || n.BitLen() < minRSABits || !e.IsInt64() || e.Int64() < 3 || e.Int64() > 1<<31-1 {
 				continue
 			}
-			keys = append(keys, key{id: k.Kid, rsa: &rsa.PublicKey{N: n, E: int(e.Int64())}})
+			keys = append(keys, key{id: k.Kid, issuer: k.Issuer, rsa: &rsa.PublicKey{N: n, E: int(e.Int64())}})
 		case k.Kty == "EC" && k.Crv == "P-256":
 			x, errX := base64.RawURLEncoding.DecodeString(k.X)
 			y, errY := base64.RawURLEncoding.DecodeString(k.Y)
@@ -114,7 +124,7 @@ func (p *Provider) keysFor(ctx context.Context, id string) ([]key, error) {
 			if err != nil {
 				continue
 			}
-			keys = append(keys, key{id: k.Kid, ec: pub})
+			keys = append(keys, key{id: k.Kid, issuer: k.Issuer, ec: pub})
 		}
 	}
 	p.keys, p.keysAt = keys, now
@@ -160,6 +170,7 @@ type idToken struct {
 	Nonce         string   `json:"nonce"`
 	Email         string   `json:"email"`
 	EmailVerified *flag    `json:"email_verified"`
+	Tenant        string   `json:"tid"`
 }
 
 // Verify checks an ID token and returns what it says. The token is believed
@@ -194,7 +205,8 @@ func (p *Provider) Verify(ctx context.Context, raw, nonce string) (Claims, error
 		return Claims{}, err
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if !signedBy(keys, header.Alg, header.Kid, digest[:], signature) {
+	signer := signedBy(keys, header.Alg, header.Kid, digest[:], signature)
+	if signer == nil {
 		return invalid("its signature is not by one of the provider's keys")
 	}
 
@@ -202,9 +214,13 @@ func (p *Provider) Verify(ctx context.Context, raw, nonce string) (Claims, error
 	if !decodeSegment(parts[1], &token) {
 		return invalid("its claims cannot be read")
 	}
+	doc, err := p.discover(ctx)
+	if err != nil {
+		return Claims{}, err
+	}
 	now := p.now()
 	switch {
-	case token.Issuer != p.cfg.Issuer:
+	case !p.issuedBy(doc, token.Issuer, token.Tenant, signer.issuer):
 		return invalid("it was issued by " + printable(token.Issuer))
 	case !contains(token.Audience, p.cfg.ClientID):
 		return invalid("it was issued for another client")
@@ -227,7 +243,22 @@ func (p *Provider) Verify(ctx context.Context, raw, nonce string) (Claims, error
 		return Claims{}, failed(NonceMismatch, "the sign-in provider's ID token answers another sign-in than this one. Sign in again")
 	}
 
-	claims := Claims{Subject: token.Subject, Email: token.Email}
+	// Asked after the nonce: which tenant an account is in is told to the
+	// sign-in it belongs to, not to whoever presents a token.
+	if !p.TenantAllowed(token.Tenant) {
+		p.log.Info("sign-in refused: the tenant is not among SHIPWICK_OIDC_TENANTS", "tenant", printable(token.Tenant))
+		return Claims{}, failed(TenantNotAllowed, "this account belongs to a Microsoft Entra tenant that may not sign in here. An operator adds the tenant's id to SHIPWICK_OIDC_TENANTS on the agent")
+	}
+
+	claims := Claims{Subject: token.Subject, Email: token.Email, Tenant: token.Tenant}
+	switch name := p.NameClaim(); name {
+	case "email":
+		claims.Name = token.Email
+	case "sub":
+		claims.Name = token.Subject
+	default:
+		claims.Name = stringClaim(parts[1], name)
+	}
 	if token.EmailVerified != nil {
 		verified := bool(*token.EmailVerified)
 		claims.EmailVerified = &verified
@@ -254,18 +285,18 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// signedBy reports whether one of keys made signature over digest. A token
-// that names its key is checked against that key alone; one that does not,
-// against every key of the algorithm's kind.
-func signedBy(keys []key, alg, id string, digest, signature []byte) bool {
-	for _, k := range keys {
+// signedBy returns the one of keys that made signature over digest, or nil.
+// A token that names its key is checked against that key alone; one that
+// does not, against every key of the algorithm's kind.
+func signedBy(keys []key, alg, id string, digest, signature []byte) *key {
+	for i, k := range keys {
 		if id != "" && k.id != id {
 			continue
 		}
 		switch {
 		case alg == "RS256" && k.rsa != nil:
 			if rsa.VerifyPKCS1v15(k.rsa, crypto.SHA256, digest, signature) == nil {
-				return true
+				return &keys[i]
 			}
 		case alg == "ES256" && k.ec != nil:
 			// A JWT carries r and s side by side, 32 bytes each.
@@ -274,11 +305,11 @@ func signedBy(keys []key, alg, id string, digest, signature []byte) bool {
 			}
 			r, s := new(big.Int).SetBytes(signature[:32]), new(big.Int).SetBytes(signature[32:])
 			if ecdsa.Verify(k.ec, digest, r, s) {
-				return true
+				return &keys[i]
 			}
 		}
 	}
-	return false
+	return nil
 }
 
 // groupsOf reads the groups claim: a list of names, or one name. Anything
@@ -307,4 +338,17 @@ func groupsOf(payload, claim string) []string {
 		}
 	}
 	return groups
+}
+
+// stringClaim is the value of a claim that is a string, or "".
+func stringClaim(payload, claim string) string {
+	var all map[string]json.RawMessage
+	if !decodeSegment(payload, &all) {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(all[claim], &value) != nil {
+		return ""
+	}
+	return value
 }

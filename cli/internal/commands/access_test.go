@@ -18,9 +18,12 @@ type accessAgent struct {
 	rules      []api.AccessRule
 	sessions   []api.Session
 	configured bool
-	grantBody  string
-	revoked    []string
-	signedOut  []string
+	// nameClaim is what GET /server reports people are named by; "" as an
+	// agent from before 0.7.
+	nameClaim string
+	grantBody string
+	revoked   []string
+	signedOut []string
 }
 
 func newAccessAgent(t *testing.T) *accessAgent {
@@ -47,7 +50,7 @@ func newAccessAgent(t *testing.T) *accessAgent {
 	})
 	mux.HandleFunc("GET /api/v1/server", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, api.Server{AgentVersion: "1.2.3", Hostname: "server-1", Token: api.TokenIdentity{Name: "root", Role: api.RoleAdmin},
-			SignIn: api.SignInStatus{Configured: a.configured, Issuer: "https://accounts.example.com"}})
+			SignIn: api.SignInStatus{Configured: a.configured, Issuer: "https://accounts.example.com", NameClaim: a.nameClaim}})
 	})
 	a.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -80,12 +83,12 @@ func TestAccessGrantSendsWhoAndWhatAndRefusesTheRestLocally(t *testing.T) {
 	}
 
 	for want, args := range map[string][]string{
-		`"ada" is neither an address, a domain nor a group`: {"access", "grant", "ada", "--role", "read"},
-		"not an e-mail address":                             {"access", "grant", "a b@example.com", "--role", "read"},
-		"choose what they may do: --role":                   {"access", "grant", "ada@example.com"},
-		"invalid role":                                      {"access", "grant", "ada@example.com", "--role", "owner"},
-		"--app: only the deploy role can be limited":        {"access", "grant", "ada@example.com", "--role", "admin", "--app", "web"},
-		"--app: applications: ":                             {"access", "grant", "ada@example.com", "--role", "deploy", "--app", "Not_Valid"},
+		`"ada" is neither an address, a domain, a group nor a name`: {"access", "grant", "ada", "--role", "read"},
+		"not an e-mail address":                      {"access", "grant", "a b@example.com", "--role", "read"},
+		"choose what they may do: --role":            {"access", "grant", "ada@example.com"},
+		"invalid role":                               {"access", "grant", "ada@example.com", "--role", "owner"},
+		"--app: only the deploy role can be limited": {"access", "grant", "ada@example.com", "--role", "admin", "--app", "web"},
+		"--app: applications: ":                      {"access", "grant", "ada@example.com", "--role", "deploy", "--app", "Not_Valid"},
 	} {
 		a.requests = nil
 		if _, _, err := a.run(t.TempDir(), args...); err == nil || !strings.Contains(err.Error(), want) {
@@ -175,7 +178,7 @@ func TestAccessSessionsAndSignout(t *testing.T) {
 	if err != nil || len(a.signedOut) != 2 || a.signedOut[1] != "ada@example.com" || !strings.Contains(out, "Signed ada@example.com out of 2 sessions") {
 		t.Errorf("access signout: %v, sent %v\n%s", err, a.signedOut, out)
 	}
-	if _, _, err := a.run(t.TempDir(), "access", "signout", "group:backend"); err == nil || !strings.Contains(err.Error(), "not an e-mail address") {
+	if _, _, err := a.run(t.TempDir(), "access", "signout", "group:backend"); err == nil || !strings.Contains(err.Error(), "group:backend is not a person") {
 		t.Errorf("signing out a group: %v", err)
 	}
 }

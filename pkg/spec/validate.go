@@ -124,7 +124,8 @@ func documentOf(a App) raw {
 			Before        []string `yaml:"before,omitempty"`
 			BeforeTimeout string   `yaml:"before_timeout,omitempty"`
 			Stop          bool     `yaml:"stop,omitempty"`
-		}{b.Schedule, b.Keep, b.Before, beforeTimeout, b.Stop})
+			BeforeIn      string   `yaml:"before_in,omitempty"`
+		}{b.Schedule, b.Keep, b.Before, beforeTimeout, b.Stop, b.BeforeIn})
 	}
 	if a.Init {
 		on := true

@@ -68,6 +68,19 @@
 // /auth/exchange, sessions (`sws_…`), the /access endpoints, and a stand-in
 // for the provider itself at /mock-idp/authorize.
 //
+// And what 0.7 added: the log archive (GET …/logs/archive, …/logs/archive/:id
+// and …/logs/search; an entry is written when a replica crashes, is restarted,
+// stopped or replaced, when a deployment fails and when a run ends), GET
+// …/config with the deploy.yaml of what runs (mock/document.mjs; references
+// to stored secrets come back, every other secret value is the mask, and a
+// document that carries the mask is refused), POST /applications and POST
+// /validate for a document whose name is not in the address,
+// `backups.before_in`, PUT /tokens/:name, the audit trail's `action`,
+// `outcome` and `actor_kind` filters with `more` next to `data`, GET
+// /audit/export, rules of kind `name` and `sign_in.name_claim`, `update` and
+// `log_archive` on GET /server, and an export that is streamed, with its
+// error trailer.
+//
 // Magic image tags for POST /applications/:name/redeploy {"image": ...}:
 //   *:fail      replica 1 crashes: FAILED, nothing of the old version was touched
 //   *:rollback  replica 1 is replaced, replica 2 crashes: FAILED → ROLLBACK →
@@ -126,10 +139,25 @@
 //   MOCK_IDP_USER=ada@example.com   the stand-in provider signs this address in
 //                    without showing its page of accounts
 //   MOCK_HOSTNAME    the server's hostname (default shipwick-fsn1-01)
+//   MOCK_AGENT=0.6   answers like an agent before 0.7: what it added is 404
+//                    ENDPOINT_NOT_FOUND (PUT /tokens/:name is net/http's plain
+//                    405), its fields are absent and its filters are ignored
+//   MOCK_UPDATE=available|current|unknown|off   `update` on GET /server: a
+//                    newer release (the default), none, GitHub never answered,
+//                    or SHIPWICK_UPDATE_CHECK=off
+//   MOCK_LOG_ARCHIVE=off   SHIPWICK_LOG_RETENTION_SIZE=0: nothing is kept
+//   MOCK_NAME_CLAIM=preferred_username   people are named by that claim
+//                    instead of their address: rules of kind `name`
+//   MOCK_EXPORT_MB=64    the size of the file POST /export streams (default
+//                    a quarter of a megabyte)
+//   MOCK_EXPORT=trailer|breaks   the export stops half-way: with the agent's
+//                    error trailer, or with the connection cut
+//   MOCK_IMPORT_MS=1500  how long an import takes per application
 
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { parseYaml } from './yaml.mjs'
+import { documentOf, maskedFields, referencesOf } from './document.mjs'
 
 const PORT = Number(process.env.MOCK_PORT || 9100)
 const HOST = process.env.MOCK_HOST || '127.0.0.1'
@@ -143,12 +171,21 @@ const TOKEN_NAME_OF_ROLE = ROLE === 'admin' ? 'root' : ROLE === 'deploy' ? 'ci' 
 // Hostnames and server ports Shipwick itself holds: the dashboard's route, the proxy's and the agent's ports.
 const OWN_HOSTNAMES = ['shipwick.example.com']
 const RESERVED_PORTS = [80, 443, 8080, 8443, 9000]
-const VERSION = '0.1.0-mock'
 const LOG_BUFFER = 5000
 const MASK = '********'
 const OLD_AGENT = process.env.MOCK_OLD_AGENT === '1'
 // An agent before 0.6: no audit trail, no limits or expiry on tokens, no promotion record, no sign-in.
 const BEFORE_06 = OLD_AGENT || process.env.MOCK_AGENT === '0.5'
+// An agent before 0.7: no log archive, no document to edit, no token update, no update notice.
+const BEFORE_07 = BEFORE_06 || process.env.MOCK_AGENT === '0.6'
+const VERSION = OLD_AGENT ? 'v0.4.2' : BEFORE_06 ? 'v0.5.1' : BEFORE_07 ? 'v0.6.0' : 'v0.7.0'
+const UPDATE = ['available', 'current', 'unknown', 'off'].includes(process.env.MOCK_UPDATE) ? process.env.MOCK_UPDATE : 'available'
+const LOG_ARCHIVE = process.env.MOCK_LOG_ARCHIVE !== 'off'
+// The claim people are named by; anything but `email` names them by what stands before the @ of the stand-in provider's accounts.
+const NAME_CLAIM = /^[a-z_]{1,40}$/.test(process.env.MOCK_NAME_CLAIM ?? '') ? process.env.MOCK_NAME_CLAIM : 'email'
+const EXPORT_BYTES = (Number(process.env.MOCK_EXPORT_MB) > 0 ? Number(process.env.MOCK_EXPORT_MB) : 0.25) * 1024 * 1024
+const EXPORT_FAILS = ['trailer', 'breaks'].includes(process.env.MOCK_EXPORT) ? process.env.MOCK_EXPORT : ''
+const IMPORT_MS = Number(process.env.MOCK_IMPORT_MS) || 1500
 const TRAFFIC_AVAILABLE = PROXY_ENABLED && process.env.MOCK_NO_TRAFFIC !== '1'
 const ALERTS = ['none', 'warning', 'critical'].includes(process.env.MOCK_ALERTS) ? process.env.MOCK_ALERTS : 'warning'
 const KEY_FROM_ENVIRONMENT = process.env.MOCK_KEY_ENV === '1'
@@ -251,6 +288,13 @@ const sessions = new Map()
 const idpCodes = new Map()
 /** Nonces of sign-ins that completed: each is accepted once. */
 const usedNonces = new Set()
+/** deployment id → the secret values its document wrote as references: {env: {NAME: text}, basic_auth: {index: text}} */
+const references = new Map()
+/** The log archive: the output of container runs that ended, oldest first, each with its lines. */
+const logArchive = []
+/** container name → the time of the last line an entry already holds: the next entry of that container starts after it. */
+const archivedUntil = new Map()
+let nextArchiveId = 1
 
 function spec(name, image, extra = {}) {
   return {
@@ -585,7 +629,7 @@ function seed() {
       volumes: [{ name: 'data', path: '/var/lib/postgresql/data' }],
       publish: [{ port: 5432, host: 15432, address: '10.0.0.5', protocol: 'tcp' }],
       // Archived every night after a checkpoint; a week of them is kept.
-      backups: { schedule: '0 3 * * *', keep: 7, before: ['psql', '-U', 'postgres', '-c', 'CHECKPOINT'], ...(BEFORE_06 ? {} : { before_timeout: '2h0m0s' }) },
+      backups: { schedule: '0 3 * * *', keep: 7, before: ['psql', '-h', 'localhost', '-U', 'postgres', '-c', 'CHECKPOINT'], ...(BEFORE_06 ? {} : { before_timeout: '2h0m0s' }), ...(BEFORE_07 ? {} : { before_in: 'container' }) },
       deploy: { strategy: 'recreate' },
     })
     const dbActive = addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
@@ -878,11 +922,22 @@ function seed() {
   if (!BEFORE_06) seedAudit()
   if (IS_STANDBY && PROMOTING && !BEFORE_06) startPromotion(20 * SECOND)
 
+  // What the documents of these applications wrote as references to stored
+  // secrets; every other value of theirs was a literal, and is masked for good.
+  const refer = (name, env) => {
+    for (const d of deployments.values()) if (d.application === name) references.set(d.id, { env, basic_auth: {} })
+  }
+  refer('my-api', { DATABASE_URL: 'postgres://api:${POSTGRES_PASSWORD}@postgres:5432/api' })
+  refer('postgres', { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' })
+  refer('billing', { STRIPE_KEY: '${STRIPE_KEY}' })
+  if (!BEFORE_07 && LOG_ARCHIVE) seedLogArchive()
+
   if (EMPTY) {
     apps.clear()
     deployments.clear()
     appEvents.clear()
     audit.length = 0
+    logArchive.length = 0
     for (const run of [...backups.values()]) if (run.application === EXPORTS) backups.delete(run.id)
   }
 
@@ -1040,10 +1095,13 @@ function pushDeploymentEvent(d, type, message, level = 'info') {
  * dies at replica 2, after replica 1 was replaced, so the retired replica of
  * the previous version is restored: FAILED → ROLLBACK → RESTORING → ROLLED_BACK.
  */
-function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
+function startDeployment(app, sp, { kind, sourceId, by, files = null, refs = null }) {
   if (isStaticSpec(sp)) return startStaticDeployment(app, sp, files, { kind, sourceId, by })
   const previous = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
   const d = addDeployment(app, sp, { status: 'PENDING', startedAtMs: Date.now(), durationMs: null, kind, sourceId, by })
+  // A redeploy and a rollback start the values they find: the document they came from is still the one that wrote them.
+  const kept = refs ?? references.get(sourceId)
+  if (kept) references.set(d.id, kept)
   const tag = d.version
   const n = sp.replicas
   const failAt = tag === 'fail' ? 1 : tag === 'rollback' ? Math.min(2, n) : 0
@@ -1106,6 +1164,11 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
   const crash = (i) => {
     const reason = `replica ${i} exited with code 1 shortly after start`
     pushDeploymentEvent(d, 'log', `level=info msg="starting ${app.name}" version=${tag}\nlevel=info msg="loading configuration"\nlevel=fatal msg="config: FEATURE_FLAGS_URL is required"\nexit status 1`, 'error')
+    const died = app.containers.find(c => c.deployment_id === d.id && c.replica === i)
+    if (died) {
+      say(app, died, [['stdout', `level=info msg="starting ${app.name}" version=${tag}`], ['stdout', 'level=info msg="loading configuration"'], ['stderr', 'level=fatal msg="config: FEATURE_FLAGS_URL is required"']])
+      archiveContainer(app, { ...died, state: 'exited' }, 'deployment_failed', { exitCode: 1 })
+    }
     removeContainer(d.id, i)
     d.status = 'FAILED'
     d.error = reason
@@ -1152,6 +1215,7 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
         for (const c of app.containers) if (c.deployment_id === previous.id && c.health === 'starting') c.health = 'healthy'
         pushDeploymentEvent(d, 'step', readyMessage(previous.spec, Array.from({ length: i - 1 }, (_, k) => k + 1)))
         // Traffic is back on the restored replicas: only now do the new ones go.
+        for (const c of app.containers) if (c.deployment_id === d.id) archiveContainer(app, c, 'deployment_failed')
         app.containers = app.containers.filter(c => c.deployment_id !== d.id)
         pushDeploymentEvent(d, 'step', `Rolled back: ${app.name} is running ${previous.version} again`)
         state('ROLLED_BACK')
@@ -1172,7 +1236,11 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
         // stays listed, with the previous deployment's id, until it has exited.
         const last = app.containers.find(c => c.deployment_id === old.id && c.replica === i)
         if (i === n && last) draining.add(last.id)
-        else removeContainer(old.id, i)
+        else {
+          const retired = app.containers.find(c => c.deployment_id === old.id && c.replica === i)
+          if (retired) archiveContainer(app, retired, 'replaced', { exitCode: 0 })
+          removeContainer(old.id, i)
+        }
         pushDeploymentEvent(d, 'step', servingMessage(i, n, d.version, old.version))
       }
       else {
@@ -1210,6 +1278,7 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null }) {
       const gone = app.containers.filter(c => draining.has(c.id))
       for (const c of gone) draining.delete(c.id)
       if (apps.get(app.name) !== app || gone.length === 0) return
+      for (const c of gone) archiveContainer(app, c, 'replaced', { exitCode: ignoresSigterm ? 137 : 0 })
       app.containers = app.containers.filter(c => !gone.includes(c))
       if (ignoresSigterm) {
         const within = formatGoDuration(grace).replace(/(?<=\d[hm])0[ms]/g, '')
@@ -1340,6 +1409,315 @@ function tailLines(app, tail, perReplica) {
     out.push(line)
   }
   return out.reverse()
+}
+
+// ---------------------------------------------------------------------------
+// The log archive: the output of container runs that ended
+// ---------------------------------------------------------------------------
+
+/** What is kept of one run of a replica, and of a job. */
+const REPLICA_LINES = 2000
+const RUN_LINES = 10000
+
+/** What a container says last when it dies of each cause. */
+const LAST_WORDS = {
+  oom_killed: [
+    ['stdout', 'level=info msg="rendering report" rows=1840221'],
+    ['stderr', '<--- Last few GCs --->'],
+    ['stderr', '[1:0x7f2c4c000000]   412803 ms: Mark-Compact 498.2 (514.6) -> 497.9 (514.9) MB, 812.33 / 0.00 ms  (average mu = 0.112, current mu = 0.004) allocation failure; scavenge might not succeed'],
+    ['stderr', 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory'],
+  ],
+  unhealthy: [
+    ['stderr', 'level=error msg="queue connection failed" err="dial tcp 10.0.4.12:5672: connect: connection refused"'],
+    ['stderr', 'level=warn msg="readiness probe failing" reason="queue not connected"'],
+    ['stdout', 'level=info msg="received SIGTERM, shutting down"'],
+  ],
+  stopped: [
+    ['stdout', 'level=info msg="received SIGTERM, shutting down"'],
+    ['stdout', 'level=info msg="server closed" in_flight=0'],
+  ],
+  replaced: [
+    ['stdout', 'level=info msg="received SIGTERM, shutting down"'],
+    ['stdout', 'level=info msg="draining connections" in_flight=3'],
+    ['stdout', 'level=info msg="server closed" in_flight=0'],
+  ],
+}
+
+/** Writes lines as a container's output, now: into what is tailed and to whoever follows. */
+function say(app, container, said) {
+  const buffer = logBuffers.get(app.name)
+  if (!buffer) return
+  const now = Date.now()
+  for (const [i, [stream, message]] of said.entries()) {
+    const line = { replica: container.replica, container: container.name, stream, time: iso(now + i), message }
+    buffer.push(line)
+    for (const f of followers.get(app.name) ?? []) f.onLine(line)
+  }
+}
+
+/** Keeps `lines` as the output of one container run that ended. Nothing is kept by an agent before 0.7, or with the archive off. */
+function addArchive(app, { kind = 'replica', deployment = null, replica = 0, job = '', runId = null, container, reason, exitCode = null, oomKilled = false, endedAtMs = Date.now(), lines = [] }) {
+  if (BEFORE_07 || !LOG_ARCHIVE) return null
+  const limit = kind === 'run' ? RUN_LINES : REPLICA_LINES
+  const kept = lines.slice(-limit)
+  const bytes = kept.reduce((n, line) => n + Buffer.byteLength(line.message) + 1, 0)
+  const entry = {
+    id: nextArchiveId++,
+    application: app.name,
+    kind,
+    deployment_id: deployment?.id ?? null,
+    deployment: deployment?.sequence ?? 0,
+    version: deployment?.version ?? '',
+    replica,
+    job,
+    run_id: runId,
+    container,
+    reason,
+    exit_code: exitCode,
+    oom_killed: oomKilled,
+    ended_at: iso(endedAtMs),
+    first_line_at: kept[0]?.time ?? null,
+    last_line_at: kept[kept.length - 1]?.time ?? null,
+    lines: kept.length,
+    bytes,
+    stored_bytes: kept.length === 0 ? 0 : Math.round(bytes / 4.7) + 93,
+    truncated: lines.length > limit,
+    output: kept,
+  }
+  logArchive.push(entry)
+  if (logArchive.length > 3000) logArchive.splice(0, logArchive.length - 3000)
+  return entry
+}
+
+/** An entry as the list shows it: without its lines. */
+function archiveView(entry) {
+  const { output: _output, ...rest } = entry
+  return rest
+}
+
+/**
+ * Copies what a replica wrote since the last copy of the same container: a
+ * crash loop leaves one entry per attempt and no line is kept twice.
+ */
+function archiveContainer(app, container, reason, { exitCode = null, oomKilled = false } = {}) {
+  if (LAST_WORDS[reason] && container.state === 'running') say(app, container, LAST_WORDS[reason])
+  const since = archivedUntil.get(container.name) ?? ''
+  const lines = (logBuffers.get(app.name) ?? []).filter(line => line.container === container.name && line.time > since)
+  if (lines.length > 0) archivedUntil.set(container.name, lines[lines.length - 1].time)
+  return addArchive(app, { deployment: deployments.get(container.deployment_id) ?? null, replica: container.replica, container: container.name, reason, exitCode, oomKilled, lines: lines.map(line => ({ ...line })) })
+}
+
+/** A run's whole output, where its record keeps the last 200 lines. */
+function archiveRun(app, run, lines) {
+  const at = Date.parse(run.finished_at ?? run.started_at)
+  const container = `shipwick_${app.name}_job_${run.job}_${run.id}`
+  const output = lines ?? String(run.output ?? '').split('\n').filter(text => text !== '').map((message, i, all) => ({
+    replica: 0,
+    container,
+    stream: /error|fatal|exception|^\s+at /i.test(message) ? 'stderr' : 'stdout',
+    time: iso(at - (all.length - i) * 40),
+    message,
+  }))
+  return addArchive(app, { kind: 'run', deployment: deployments.get(run.deployment_id) ?? null, job: run.job, runId: run.id, container, reason: run.status, exitCode: run.exit_code, endedAtMs: at, lines: output })
+}
+
+/** `count` plausible lines of a container that ran until `endMs`, the newest of them `said`. */
+function pastLines(app, container, endMs, count, said = []) {
+  const lines = []
+  for (let i = count; i > 0; i--) {
+    const [stream, message] = messageFor(app, { ...container, health: 'healthy', crash_loop: false })
+    lines.push({ replica: container.replica, container: container.name, stream, time: iso(endMs - said.length * 3 - i * 850), message })
+  }
+  for (const [i, [stream, message]] of said.entries()) lines.push({ replica: container.replica, container: container.name, stream, time: iso(endMs - (said.length - i) * 3), message })
+  return lines
+}
+
+/** What the archive holds when the mock starts: the crashes, the failed deployments, the replaced replicas and the runs of the fixtures. */
+function seedLogArchive() {
+  const past = (name, d, replica, endedAgoMs, reason, { count = 40, said = LAST_WORDS[reason] ?? [], exitCode = null, oomKilled = false } = {}) => {
+    const app = apps.get(name)
+    const container = { replica, name: `shipwick_${name}_${d.sequence}_${replica}` }
+    const endMs = startedAt - endedAgoMs
+    const lines = pastLines(app, container, endMs, count, said)
+    archivedUntil.set(container.name, lines[lines.length - 1]?.time ?? iso(endMs))
+    return addArchive(app, { deployment: d, replica, container: container.name, reason, exitCode, oomKilled, endedAtMs: endMs, lines })
+  }
+  const of = name => [...deployments.values()].filter(d => d.application === name).sort((a, b) => a.id - b.id)
+  const lines = (container, replica, atMs, texts) => texts.split('\n').map((message, i, all) => ({ replica, container, stream: /error|fatal|not found|exited/i.test(message) ? 'stderr' : 'stdout', time: iso(atMs - (all.length - i) * 120), message }))
+
+  // Every run with its output, oldest first, as they ended.
+  const seededRuns = [...runs.values()].filter(r => r.finished_at).sort((a, b) => a.finished_at.localeCompare(b.finished_at))
+
+  const events = []
+  const myApi = of('my-api')
+  // Each deployment that was replaced left the output of its two replicas.
+  for (let i = 3; i < myApi.length - 1; i++) {
+    const d = myApi[i]
+    const next = myApi.slice(i + 1).find(n => n.status !== 'FAILED')
+    if (d.status !== 'SUPERSEDED' || !next) continue
+    for (const replica of [1, 2]) events.push([Date.parse(next.completed_at) + replica * 900, () => past('my-api', d, replica, startedAt - Date.parse(next.completed_at) - replica * 900, 'replaced', { count: 60, exitCode: 0 })])
+  }
+  // Three days ago replica 2 ran out of memory once.
+  events.push([startedAt - 3 * DAY, () => past('my-api', myApi[myApi.length - 3], 2, 3 * DAY, 'oom_killed', { count: 80, exitCode: 137, oomKilled: true })])
+
+  const web = of('web')
+  const webActive = web.find(d => d.status === 'ACTIVE')
+  const webBad = web.find(d => d.status === 'ROLLED_BACK')
+  events.push([Date.parse(webActive.completed_at), () => {
+    for (const replica of [1, 2, 3]) past('web', web[0], replica, startedAt - Date.parse(webActive.completed_at) - replica * 700, 'replaced', { count: 50, exitCode: 0 })
+  }])
+  // The rollout that died at its second replica: what that replica said, and the first one, which was running when it was removed.
+  events.push([Date.parse(webBad.completed_at), () => {
+    const at = Date.parse(webBad.completed_at)
+    addArchive(apps.get('web'), {
+      deployment: webBad, replica: 2, container: `shipwick_web_${webBad.sequence}_2`, reason: 'deployment_failed', exitCode: 1, endedAtMs: at - 2400,
+      lines: lines(`shipwick_web_${webBad.sequence}_2`, 2, at - 2400, '> web@2024.12.1 start\n> node server.js\n\nError: listen EADDRINUSE: address already in use :::3000\n    at Server.setupListenHandle [as _listen2] (node:net:1908:16)\n    at listenInCluster (node:net:1965:12)\nnpm error code 1'.replace('\n\n', '\n')),
+    })
+    past('web', webBad, 1, startedAt - at + 300, 'deployment_failed', { count: 9, said: [['stdout', 'level=info msg="received SIGTERM, shutting down"']] })
+  }])
+  // Replica 3 keeps running out of memory. The first time it had been up for days: only its last lines were kept.
+  events.push([startedAt - 9 * MINUTE, () => past('web', webActive, 3, 9 * MINUTE, 'oom_killed', { count: 2300, exitCode: 137, oomKilled: true })])
+  events.push([startedAt - 4 * MINUTE, () => past('web', webActive, 3, 4 * MINUTE, 'oom_killed', { count: 180, exitCode: 137, oomKilled: true })])
+  events.push([startedAt - 20 * SECOND, () => past('web', webActive, 3, 20 * SECOND, 'oom_killed', { count: 150, exitCode: 137, oomKilled: true })])
+
+  // The worker's second replica never turns healthy and is restarted for it, over and over.
+  const worker = of('worker').find(d => d.status === 'ACTIVE')
+  for (const [i, ago] of [12 * MINUTE, 11 * MINUTE + 20 * SECOND, 10 * MINUTE + 40 * SECOND, 9 * MINUTE + 55 * SECOND, 9 * MINUTE + 5 * SECOND, 34 * SECOND].entries()) {
+    events.push([startedAt - ago, () => past('worker', worker, 2, ago, 'unhealthy', { count: i === 0 ? 240 : 14 })])
+  }
+
+  // Stopped on request six days ago.
+  const docs = of('docs')[0]
+  events.push([startedAt - 6 * DAY, () => past('docs', docs, 1, 6 * DAY, 'stopped', { count: 30, exitCode: 0 })])
+
+  // Never deployed successfully: the replica of the second attempt died of a missing file, and said so.
+  const legacy = of('legacy-cron')[1]
+  events.push([Date.parse(legacy.completed_at), () => {
+    addArchive(apps.get('legacy-cron'), {
+      deployment: legacy, replica: 1, container: `shipwick_legacy-cron_${legacy.sequence}_1`, reason: 'deployment_failed', exitCode: 127, endedAtMs: Date.parse(legacy.completed_at) - 900,
+      lines: lines(`shipwick_legacy-cron_${legacy.sequence}_1`, 1, Date.parse(legacy.completed_at) - 900, 'Starting legacy-cron 8\n/entrypoint.sh: line 4: /usr/local/bin/cron-runner: not found'),
+    })
+  }])
+
+  for (const run of seededRuns) {
+    events.push([Date.parse(run.finished_at), () => {
+      // The failed reindex wrote far more than a run's record keeps.
+      if (run.job === 'run' && run.status === 'failed') {
+        const container = `shipwick_my-api_job_run_${run.id}`
+        const at = Date.parse(run.finished_at)
+        const body = Array.from({ length: 640 }, (_, i) => ({ replica: 0, container, stream: 'stdout', time: iso(at - (644 - i) * 125), message: `Reindexing customers... batch ${i + 1}/640 (${(i + 1) * 20} of 12,800)` }))
+        return archiveRun(apps.get(run.application), run, [...body, ...lines(container, 0, at, 'Reindexing customers... done (12,408)\nReindexing invoices...\nError: index invoices_v2 is read-only\nexit status 3')])
+      }
+      return archiveRun(apps.get(run.application), run)
+    }])
+  }
+
+  // Entries are numbered in the order their containers ended.
+  for (const [, add] of events.sort(([a], [b]) => a - b)) add()
+}
+
+/** What the archive holds and may hold: `log_archive` on GET /server. */
+function logArchiveStatus() {
+  if (!LOG_ARCHIVE) return { enabled: false, entries: 0, bytes: 0, max_bytes: 0, retention_days: 14 }
+  // The fixtures stand for a server that has been running for a while: what they add is small next to it.
+  return { enabled: true, entries: 248 + logArchive.length, bytes: 61 * 1024 ** 2 + logArchive.reduce((n, e) => n + e.stored_bytes, 0), max_bytes: 1024 ** 3, retention_days: 14 }
+}
+
+/** A positive number given as a query parameter; 0 when it is absent. */
+function idParam(url, name) {
+  const raw = url.searchParams.get(name)
+  if (raw === null || raw === '') return 0
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) throw new HttpError(400, 'INVALID_REQUEST', `${name} must be a positive number`)
+  return Number(raw)
+}
+
+/** A time given as a query parameter, in milliseconds; null when it is absent. */
+function timeParam(url, name) {
+  const raw = url.searchParams.get(name)
+  if (raw === null || raw === '') return null
+  const at = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(raw) ? Date.parse(raw) : Number.NaN
+  if (Number.isNaN(at)) throw new HttpError(400, 'INVALID_REQUEST', `${name} must be a time in RFC 3339, e.g. ${iso(Date.now()).replace(/\.\d+Z$/, 'Z')}`)
+  return at
+}
+
+/** `deployment`, `replica` and `run` of the two endpoints that narrow by where output came from. */
+function logSource(url, app) {
+  const deployment = idParam(url, 'deployment')
+  const replica = intParam(url, 'replica', 0, 1, 1000)
+  const run = idParam(url, 'run')
+  if (deployment !== 0 && deployments.get(deployment)?.application !== app.name) throw new HttpError(404, 'NOT_FOUND', 'not found')
+  return { deployment, replica, run }
+}
+
+/** How many containers' output one search request reads: what stands for the agent's bound of bytes. */
+const SEARCH_SOURCES = 6
+
+/**
+ * One page of a search: the replicas that exist, from the highest index down,
+ * then the archive from its newest entry; within each, the newest line first.
+ * A request that has read its share of sources stops and says where to go on,
+ * with whatever it found by then — nothing at all, sometimes.
+ */
+function searchLogs(app, { text, since, until, deployment, replica, run, limit, cursor }) {
+  const needle = text.toLowerCase()
+  const active = app.active_deployment_id
+  const sources = []
+  // A run, or a deployment that is not the active one, is in the archive only.
+  if (run === 0 && (deployment === 0 || deployment === active)) {
+    for (const c of [...app.containers].sort((a, b) => b.replica - a.replica || b.deployment_id - a.deployment_id)) {
+      if (replica !== 0 && c.replica !== replica) continue
+      if (deployment !== 0 && c.deployment_id !== deployment) continue
+      const d = deployments.get(c.deployment_id)
+      const from = archivedUntil.get(c.name) ?? ''
+      sources.push({ key: `r${c.deployment_id}-${c.replica}`, meta: { archive_id: null, deployment_id: d?.id ?? null, deployment: d?.sequence ?? 0, job: '', run_id: null }, lines: (logBuffers.get(app.name) ?? []).filter(line => line.container === c.name && line.time > from) })
+    }
+  }
+  for (const entry of logArchive.filter(e => e.application === app.name).sort((a, b) => b.id - a.id)) {
+    if (replica !== 0 && entry.replica !== replica) continue
+    if (deployment !== 0 && entry.deployment_id !== deployment) continue
+    if (run !== 0 && entry.run_id !== run) continue
+    sources.push({ key: `a${entry.id}`, meta: { archive_id: entry.id, deployment_id: entry.deployment_id, deployment: entry.deployment, job: entry.job, run_id: entry.run_id }, lines: entry.output })
+  }
+
+  let at = 0
+  let offset = 0
+  if (cursor !== '') {
+    const m = /^([ar][\d-]+)\.(\d+)$/.exec(cursor)
+    at = m ? sources.findIndex(s => s.key === m[1]) : -1
+    // The source a cursor names may have aged out since: the search goes on with what follows it.
+    if (m && at === -1 && m[1].startsWith('a')) at = sources.findIndex(s => s.key.startsWith('a') && Number(s.key.slice(1)) < Number(m[1].slice(1)))
+    if (!m) throw new HttpError(400, 'INVALID_REQUEST', 'cursor must be the next of an earlier answer')
+    if (at === -1) at = sources.length
+    else if (sources[at].key === m[1]) offset = Number(m[2])
+  }
+
+  const found = []
+  let read = 0
+  let bytes = 0
+  let next = ''
+  for (; at < sources.length; at++, offset = 0) {
+    if (read >= SEARCH_SOURCES) {
+      next = `${sources[at].key}.0`
+      break
+    }
+    const source = sources[at]
+    read++
+    bytes += source.lines.reduce((n, line) => n + Buffer.byteLength(line.message) + 1, 0)
+    const matches = source.lines
+      .filter(line => (needle === '' || line.message.toLowerCase().includes(needle)) && (since === null || Date.parse(line.time) >= since) && (until === null || Date.parse(line.time) <= until))
+      .reverse()
+    const room = limit - found.length
+    for (const line of matches.slice(offset, offset + room)) found.push({ ...line, ...source.meta })
+    if (matches.length - offset > room) {
+      next = `${source.key}.${offset + room}`
+      break
+    }
+    if (found.length >= limit && at + 1 < sources.length) {
+      next = `${sources[at + 1].key}.0`
+      break
+    }
+  }
+  return { lines: found, next, sources: read, bytes }
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,6 +1911,7 @@ function finishRun(app, run, outcome, timeout = '10m0s', hook = false) {
     run.output = `$ ${argv}\nstill working...`
     if (!hook) addAppEvent(app.name, 'warn', 'job', `${subject} timed out after ${timeout.replace(/(?<!\d)0[ms]/g, '') || timeout}`)
   }
+  archiveRun(app, run)
 }
 
 // --- cron, five fields, UTC ---------------------------------------------------
@@ -1785,6 +2164,9 @@ const AUDITED = {
   'POST /access/rules': ['access.grant'],
   'DELETE /access/rules/:p': ['access.revoke'],
   'DELETE /access/sessions/:p': ['access.signout', 1],
+  'POST /applications': ['deploy'],
+  'PUT /tokens/:p': ['token.update', 1],
+  'GET /audit/export': ['audit.export'],
 }
 
 function addAudit(entry) {
@@ -1824,7 +2206,8 @@ function auditWhenAnswered(req, res, route, segments, who) {
       actor: { kind: who.kind ?? 'token', name: who.name },
       ...addressesOf(req),
       action,
-      application: segments[0] === 'applications' ? segments[1] ?? '' : '',
+      // A document sent without a name in the address is recorded under the name it carries.
+      application: res.auditApplication ?? (segments[0] === 'applications' ? segments[1] ?? '' : ''),
       target: res.auditTarget ?? (targetAt !== undefined ? segments[targetAt] ?? '' : ''),
       outcome: status >= 200 && status < 300 ? 'ok' : status === 403 ? 'refused' : 'failed',
       status,
@@ -1847,7 +2230,7 @@ function parseSince(raw) {
 function seedAudit() {
   const at = minutesAgo => iso(startedAt - minutesAgo * MINUTE)
   const ci = { kind: 'token', name: 'ci' }
-  const ada = { kind: 'user', name: 'ada@example.com' }
+  const ada = { kind: 'user', name: BEFORE_07 ? 'ada@example.com' : personName('ada@example.com') }
   const office = '203.0.113.40'
   let deployment = 3
   // Older first: the nightly routine of a CI token, which fills the first pages.
@@ -1871,8 +2254,15 @@ function seedAudit() {
     [120, { actor: ci, action: 'job.run', application: 'my-api', target: 'cleanup-sessions', outcome: 'failed', status: 409, code: 'JOB_ALREADY_RUNNING', forwarded_for: '198.51.100.24' }],
     [62, { actor: ci, action: 'run', application: 'my-api', status: 202, forwarded_for: '198.51.100.24', detail: 'run 14' }],
     [14, { action: 'certificate.set', target: '*.example.com', status: 200, forwarded_for: office }],
+    // What 0.7 records on top: a token that was changed, and an export of this trail.
+    ...(BEFORE_07
+      ? []
+      : [
+          [840, { action: 'token.update', target: 'web-ci', status: 200, forwarded_for: office, detail: 'applications web -> landing web' }],
+          [44, { actor: ada, action: 'audit.export', status: 200, forwarded_for: office, detail: 'csv, outcome refused failed, since ' + iso(startedAt - 7 * DAY).replace(/\.\d+Z$/, 'Z') + ', 4 entries' }],
+        ]),
   ]
-  for (const [minutes, entry] of recent) addAudit({ at: at(minutes), ...entry })
+  for (const [minutes, entry] of recent.sort(([a], [b]) => b - a)) addAudit({ at: at(minutes), ...entry })
 }
 
 // ---------------------------------------------------------------------------
@@ -1888,14 +2278,25 @@ const IDP_ACCOUNTS = {
   'mallory@elsewhere.org': [],
 }
 
+/** Accounts the stand-in provider knows and the agent does not take, with why: what a sign-in as one of them is answered. */
+const IDP_REFUSED = {
+  'intern@contoso.example': 'tenant_not_allowed',
+  ...(NAME_CLAIM === 'email' ? {} : { 'scanner@example.com': 'name_missing' }),
+}
+
+/** The name the agent knows a person by: the address, or with another claim what that claim holds — here what stands before the @. */
+const personName = email => (NAME_CLAIM === 'email' ? email : email.slice(0, email.indexOf('@')))
+const isAddress = name => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(name)
+
 function seedAccess() {
   const add = (kind, subject, role, applications, daysAgo, by) => accessRules.push({ id: nextRuleId++, kind, subject, role, applications, created_at: ago(daysAgo * DAY), created_by: by })
-  add('email', 'ada@example.com', 'admin', [], 16, 'root')
+  if (NAME_CLAIM === 'email' || BEFORE_07) add('email', 'ada@example.com', 'admin', [], 16, 'root')
+  else add('name', 'ada', 'admin', [], 16, 'root')
   add('group', 'developers', 'deploy', ['my-api', 'web'], 16, 'root')
-  add('domain', 'example.com', 'read', [], 9, 'ada@example.com')
+  add('domain', 'example.com', 'read', [], 9, personName('ada@example.com'))
   // Somebody is signed in already, so that the list of sessions has a row.
-  const grace = resolveAccess('grace@example.com', IDP_ACCOUNTS['grace@example.com'])
-  sessions.set(newSessionValue(), { id: nextSessionId++, email: 'grace@example.com', groups: IDP_ACCOUNTS['grace@example.com'], role: grace.role, applications: grace.applications, created_at: ago(3 * HOUR), expires_at: iso(startedAt + 7 * HOUR), last_used_at: ago(12 * MINUTE), ended: null })
+  const grace = resolveAccess(personName('grace@example.com'), IDP_ACCOUNTS['grace@example.com'])
+  sessions.set(newSessionValue(), { id: nextSessionId++, email: personName('grace@example.com'), groups: IDP_ACCOUNTS['grace@example.com'], role: grace.role, applications: grace.applications, created_at: ago(3 * HOUR), expires_at: iso(startedAt + 7 * HOUR), last_used_at: ago(12 * MINUTE), ended: null })
 }
 
 const newSessionValue = () => `sws_${randomBytes(32).toString('base64url')}`
@@ -1905,8 +2306,12 @@ const newSessionValue = () => `sws_${randomBytes(32).toString('base64url')}`
  * then the groups (the highest role; limits add up, and a group without a
  * limit lifts it), then the domain. Null when no rule covers them.
  */
-function resolveAccess(email, groups) {
-  const own = accessRules.find(r => r.kind === 'email' && r.subject === email)
+function resolveAccess(name, groups) {
+  // A rule for the name itself comes first; rules by address and by domain apply to a name that reads as an address, in lowercase.
+  const named = accessRules.find(r => r.kind === 'name' && r.subject === name)
+  if (named) return { role: named.role, applications: named.applications }
+  const email = isAddress(name) ? name.toLowerCase() : ''
+  const own = email !== '' && accessRules.find(r => r.kind === 'email' && r.subject === email)
   if (own) return { role: own.role, applications: own.applications }
   const byGroup = accessRules.filter(r => r.kind === 'group' && groups.includes(r.subject))
   if (byGroup.length > 0) {
@@ -1915,9 +2320,12 @@ function resolveAccess(email, groups) {
     const unlimited = role !== 'deploy' || same.some(r => r.applications.length === 0)
     return { role, applications: unlimited ? [] : [...new Set(same.flatMap(r => r.applications))].sort() }
   }
-  const domain = accessRules.find(r => r.kind === 'domain' && email.endsWith(`@${r.subject}`))
+  const domain = email !== '' && accessRules.find(r => r.kind === 'domain' && email.endsWith(`@${r.subject}`))
   return domain ? { role: domain.role, applications: domain.applications } : null
 }
+
+/** How a rule for exactly this person is written for the CLI: the address itself, or `name:` and the name where it is not one. */
+const whoOf = name => (isAddress(name) ? name : `name:${name}`)
 
 const sameAccess = (a, b) => a.role === b.role && a.applications.join(' ') === b.applications.join(' ')
 
@@ -1927,7 +2335,7 @@ function identifySession(value) {
   if (!s) return null
   if (!s.ended) {
     const now = resolveAccess(s.email, s.groups)
-    if (!now) s.ended = { reason: 'rule_removed', message: `no rule on this server gives ${s.email} a role any more. An admin grants one with: shipwick access grant ${s.email} --role read` }
+    if (!now) s.ended = { reason: 'rule_removed', message: `no rule on this server gives ${s.email} a role any more. An admin grants one with: shipwick access grant ${whoOf(s.email)} --role read` }
     else if (!sameAccess(now, s)) s.ended = { reason: 'access_changed', message: `what ${s.email} may do on this server was changed. Sign in again` }
   }
   if (s.ended) throw new Ended('SESSION_ENDED', s.ended.message, { name: s.email, reason: s.ended.reason })
@@ -1947,7 +2355,7 @@ function liveSessions() {
   })
 }
 
-const subjectOf = rule => (rule.kind === 'group' ? `group:${rule.subject}` : rule.kind === 'domain' ? `*@${rule.subject}` : rule.subject)
+const subjectOf = rule => (rule.kind === 'group' ? `group:${rule.subject}` : rule.kind === 'domain' ? `*@${rule.subject}` : rule.kind === 'name' ? `name:${rule.subject}` : rule.subject)
 const grantDetail = rule => `role ${rule.role}${rule.applications.length ? `, limited to ${rule.applications.join(' ')}` : ''}`
 
 function signInConfig() {
@@ -1966,10 +2374,11 @@ function mockProvider(url, res) {
   }
   const account = q.get('login_hint') || IDP_USER
   if (!account) {
-    const rows = Object.entries(IDP_ACCOUNTS).map(([email, groups]) => {
+    const notes = { tenant_not_allowed: 'an account of another tenant', name_missing: `an account without a ${NAME_CLAIM} claim` }
+    const rows = [...Object.entries(IDP_ACCOUNTS), ...(BEFORE_07 ? [] : Object.keys(IDP_REFUSED).map(email => [email, []]))].map(([email, groups]) => {
       const next = new URL(url)
       next.searchParams.set('login_hint', email)
-      return `<li><a href="${next.pathname}${next.search.replace(/&/g, '&amp;')}">${email}</a> <small>${groups.length ? `groups: ${groups.join(', ')}` : 'no groups'}</small></li>`
+      return `<li><a href="${next.pathname}${next.search.replace(/&/g, '&amp;')}">${email}</a> <small>${notes[IDP_REFUSED[email]] ?? (groups.length ? `groups: ${groups.join(', ')}` : 'no groups')}</small></li>`
     }).join('')
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mock sign-in provider</title><body style="font: 15px/1.5 system-ui; max-width: 30rem; margin: 12vh auto; padding: 0 1rem"><h1 style="font-size: 1.1rem">Mock sign-in provider</h1><p>This page stands in for the company's sign-in. Choose who signs in:</p><ul style="padding-left: 1.2rem">${rows}</ul><p><a href="${redirect}?error=access_denied&amp;state=${encodeURIComponent(q.get('state'))}">Cancel</a></p>`)
@@ -2001,17 +2410,27 @@ function exchange(req, res, body) {
   if (usedNonces.has(body.nonce)) throw failed('nonce_reused', 'this sign-in was completed before. Sign in again')
   usedNonces.add(body.nonce)
 
-  const access = resolveAccess(known.email, known.groups)
-  const actor = { kind: 'user', name: known.email }
+  // What the provider's answer itself rules out, before any rule is looked at.
+  const refused = BEFORE_07 ? undefined : IDP_REFUSED[known.email]
+  if (refused === 'tenant_not_allowed') {
+    throw failed(refused, 'this account belongs to a Microsoft Entra tenant that may not sign in here. An operator adds the tenant\'s id to SHIPWICK_OIDC_TENANTS on the agent')
+  }
+  if (refused === 'name_missing') {
+    throw new HttpError(401, 'SIGN_IN_FAILED', `the provider's ID token has no ${NAME_CLAIM} claim Shipwick can name this account by: it is missing, or holds something other than letters, digits and punctuation without spaces. SHIPWICK_OIDC_NAME_CLAIM on the agent says which claim that is, and SHIPWICK_OIDC_SCOPES has to ask for it`, { reason: refused, claim: NAME_CLAIM })
+  }
+  const name = BEFORE_07 ? known.email : personName(known.email)
+  const access = resolveAccess(name, known.groups)
+  const actor = { kind: 'user', name }
   if (!access) {
     addAudit({ actor, ...addressesOf(req), action: 'signin', outcome: 'refused', status: 403, code: 'ACCESS_NOT_GRANTED' })
-    throw new HttpError(403, 'ACCESS_NOT_GRANTED', `${known.email} signed in, and no rule on this server gives that address a role. An admin grants one with: shipwick access grant ${known.email} --role read`, { email: known.email })
+    if (isAddress(name)) throw new HttpError(403, 'ACCESS_NOT_GRANTED', `${name} signed in, and no rule on this server gives that address a role. An admin grants one with: shipwick access grant ${name} --role read`, BEFORE_07 ? { email: name } : { email: name, name })
+    throw new HttpError(403, 'ACCESS_NOT_GRANTED', `${name} signed in, and no rule on this server gives that name a role. An admin grants one with: shipwick access grant name:${name} --role read`, { email: name, name })
   }
   const value = newSessionValue()
   const expiresAt = iso(Date.now() + SESSION_HOURS * HOUR)
-  sessions.set(value, { id: nextSessionId++, email: known.email, groups: known.groups, role: access.role, applications: access.applications, created_at: iso(Date.now()), expires_at: expiresAt, last_used_at: null, ended: null })
+  sessions.set(value, { id: nextSessionId++, email: name, groups: known.groups, role: access.role, applications: access.applications, created_at: iso(Date.now()), expires_at: expiresAt, last_used_at: null, ended: null })
   addAudit({ actor, ...addressesOf(req), action: 'signin', status: 200, detail: `role ${access.role}${access.applications.length ? `, limited to ${access.applications.join(' ')}` : ''}, expires ${expiresAt.replace(/\.\d+Z$/, 'Z')}` })
-  return sendJSON(res, 200, { session: value, identity: { name: known.email, role: access.role, kind: 'user', applications: access.applications, expires_at: expiresAt } })
+  return sendJSON(res, 200, { session: value, identity: { name, role: access.role, kind: 'user', applications: access.applications, expires_at: expiresAt } })
 }
 
 // ---------------------------------------------------------------------------
@@ -2310,7 +2729,16 @@ function parseSpec(name, body, { validating = false } = {}) {
         else beforeTimeout = formatGoDuration(limit)
       }
       else if (b.before && !BEFORE_06) beforeTimeout = '1h0m0s'
-      backupPlan = { schedule: String(b.schedule ?? ''), keep: b.keep ?? 7, ...(b.before ? { before: [].concat(b.before) } : {}), ...(beforeTimeout ? { before_timeout: beforeTimeout } : {}), ...(b.stop ? { stop: true } : {}) }
+      // Where the command runs: inside the replica unless the block says a container of its own.
+      let beforeIn
+      if (b.before_in !== undefined && b.before_in !== null && b.before_in !== '') {
+        const whereExample = 'replica (inside the running replica), container (in a container of its own, which can be ended)'
+        if (BEFORE_07) problem('backups', 'unknown field "before_in"', 'schedule, keep, before, before_timeout, stop')
+        else if (!b.before) problem('backups.before_in', 'needs backups.before: it says where that command runs', whereExample)
+        else if (b.before_in === 'container') beforeIn = 'container'
+        else if (b.before_in !== 'replica') problem('backups.before_in', `invalid value ${JSON.stringify(String(b.before_in))}`, whereExample)
+      }
+      backupPlan = { schedule: String(b.schedule ?? ''), keep: b.keep ?? 7, ...(b.before ? { before: [].concat(b.before) } : {}), ...(beforeTimeout ? { before_timeout: beforeTimeout } : {}), ...(beforeIn ? { before_in: beforeIn } : {}), ...(b.stop ? { stop: true } : {}) }
     }
   }
 
@@ -2354,6 +2782,15 @@ function parseSpec(name, body, { validating = false } = {}) {
     }
   }
 
+  // What validation finds comes first, as in the agent, where the document is
+  // validated before its secrets are looked at; then the mask, which is what
+  // the server shows in the place of a value and never a value; then the
+  // secrets a reference names and the server does not hold.
+  if (fields.some(f => !f.expected?.startsWith('shipwick secret set '))) throw configError(fields)
+  const masks = BEFORE_07 ? [] : maskedFields(body)
+  if (masks.length > 0) {
+    throw configError(masks.map(field => ({ field, message: `${MASK} is what the server shows in the place of this value, not the value`, expected: 'the value itself, or ${NAME} with the value stored by shipwick secret set NAME' })))
+  }
   if (fields.length > 0) throw configError(fields)
   const routing = { ...(path ? { path } : {}), ...(proxy ? { proxy } : {}) }
   const deploy = { strategy: body.deploy?.strategy ?? 'rolling', ...(stopTimeout ? { stop_timeout: stopTimeout } : {}) }
@@ -2898,19 +3335,21 @@ function startImport({ source, stopped, overwrite }) {
     error: '',
   }
   lastImport = run
+  // An import that has ended, because its upload broke off, changes nothing more.
   const step = (delay, fn) => setTimeout(() => {
-    if (lastImport === run) fn()
+    if (lastImport === run && run.status === 'running') fn()
   }, delay).unref()
   step(1200, () => {
     run.exported_at = iso(Date.now() - 12 * MINUTE)
     run.applications = names.map(name => ({ name, status: 'pending', version: deployments.get(apps.get(name).active_deployment_id).version, deployment_id: null, volumes: [], message: '' }))
-    if (!overwrite) run.warnings = [...secrets.keys()].sort().map(name => `${name}: a secret by that name exists on this server and was kept; --overwrite replaces it`)
+    if (overwrite) Object.assign(run, { secrets: secrets.size, registries: registries.size, certificates: certificates.size })
+    else run.warnings = [...secrets.keys()].sort().map(name => `${name}: a secret by that name exists on this server and was kept; --overwrite replaces it`)
   })
   names.forEach((name, i) => {
-    step(1200 + i * 1500 + 300, () => {
+    step(1200 + i * IMPORT_MS + 300, () => {
       run.applications[i].status = 'importing'
     })
-    step(1200 + (i + 1) * 1500, () => {
+    step(1200 + (i + 1) * IMPORT_MS, () => {
       const app = apps.get(name)
       const entry = run.applications[i]
       const active = app && deployments.get(app.active_deployment_id)
@@ -2919,11 +3358,14 @@ function startImport({ source, stopped, overwrite }) {
         Object.assign(entry, { status: 'imported', deployment_id: active.id, volumes: (active.spec.volumes ?? []).map(v => v.name) })
       }
       else if (stopped) Object.assign(entry, { status: 'skipped', message: 'it runs on this server, which was promoted or deployed to since; a stopped import replaces only what is stopped' })
+      // Replacing what exists: here the application is the one the export was written from, so it stays as it is and is reported as taken over.
+      else if (overwrite && active && !inFlight(name)) Object.assign(entry, { status: 'imported', deployment_id: active.id, volumes: (active.spec.volumes ?? []).map(v => v.name) })
+      else if (overwrite) Object.assign(entry, { status: 'failed', message: `another operation is in progress for ${name}` })
       else Object.assign(entry, { status: 'skipped', message: 'it exists on this server and was left as it is; import with --overwrite to replace it and its volumes' })
     })
   })
-  step(1200 + names.length * 1500 + 400, () => {
-    Object.assign(run, { status: 'succeeded', completed_at: iso(Date.now()) })
+  step(1200 + names.length * IMPORT_MS + 400, () => {
+    Object.assign(run, { status: run.applications.some(a => a.status === 'failed') ? 'failed' : 'succeeded', completed_at: iso(Date.now()) })
   })
   return run
 }
@@ -2947,6 +3389,7 @@ function startBackground() {
     const app = apps.get('worker')
     const c = app?.containers.find(x => x.crash_loop)
     if (!app || !c || app.desired_state !== 'running') return
+    archiveContainer(app, c, 'unhealthy')
     c.restarts++
     c.started_at = iso(Date.now())
     addAppEvent('worker', 'warn', 'supervisor', `Replica ${c.replica} did not become healthy within 30s of starting: HTTP 503`)
@@ -2958,6 +3401,7 @@ function startBackground() {
     const c = app?.containers.find(x => x.replica === 3)
     if (!app || !c || app.desired_state !== 'running') return
     if (c.state === 'running') {
+      archiveContainer(app, c, 'oom_killed', { exitCode: 137, oomKilled: true })
       Object.assign(c, { state: 'exited', exit_code: 137, oom_killed: true, health: 'unhealthy' })
       addAppEvent('web', 'warn', 'supervisor', 'Replica 3 exited with code 137 (out of memory); restarting in 5s')
     }
@@ -3157,7 +3601,111 @@ function requireActive(app) {
 
 const IMAGE_PATTERN = /^[a-z0-9]+([._\-/:][a-z0-9]+)*(:[\w][\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$/i
 
+/** `update` on GET /server: what the agent heard from GitHub when it last asked, once a day. */
+function updateStatus() {
+  const checkedAt = iso(startedAt - 5 * HOUR).replace(/\.\d+Z$/, 'Z')
+  if (UPDATE === 'off') return { enabled: false, latest_version: '', checked_at: null, available: false }
+  if (UPDATE === 'unknown') return { enabled: true, latest_version: '', checked_at: null, available: false }
+  if (UPDATE === 'current') return { enabled: true, latest_version: VERSION, checked_at: checkedAt, available: false }
+  return { enabled: true, latest_version: 'v0.7.1', checked_at: checkedAt, available: true }
+}
+
+/** `?static=` of a deployment: the digest PUT …/static answered, or null. */
+function staticDigest(url) {
+  const digest = url.searchParams.get('static')
+  if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new HttpError(400, 'INVALID_REQUEST', 'static: must be the digest PUT …/static answered, sha256:<64 hex characters>')
+  return digest
+}
+
+/**
+ * The application a document sent without a name in the address is about: its
+ * own `name`. A limited token is held to it, and to a document that names
+ * none; for everybody else a missing name is what validation reports.
+ */
+function documentName(who, body) {
+  const name = typeof body.name === 'string' && APPLICATION_NAME.test(body.name) ? body.name : ''
+  const limits = who.role === 'deploy' ? who.applications ?? [] : []
+  if (limits.length > 0 && name === '') {
+    throw new HttpError(403, 'TOKEN_LIMITED', `this ${credential(who)} is limited to ${nameList(limits)}, and the document does not name an application`, { applications: limits })
+  }
+  if (limits.length > 0 && !limits.includes(name)) {
+    throw new HttpError(403, 'TOKEN_LIMITED', `this ${credential(who)} is limited to ${nameList(limits)}; it can read ${name} and not change it`, { applications: limits, application: name })
+  }
+  return name
+}
+
+/** Deploys a document under `name`: what POST /applications/:name/deploy and POST /applications both do. */
+function deployDocument(name, body, digest, who) {
+  const sp = parseSpec(name, body)
+  let files = null
+  if (isStaticSpec(sp)) {
+    if (digest === null) throw new HttpError(400, 'INVALID_REQUEST', `static: the folder ${sp.static.dir}/ has not been uploaded for this deployment; upload it with PUT /applications/${name}/static first and pass its digest as ?static=`)
+    files = uploads.get(name)?.digest === digest ? uploads.get(name) : null
+    if (!files) throw new HttpError(404, 'NOT_FOUND', 'no files were uploaded for this deployment: run shipwick deploy from the project')
+  }
+  else if (digest !== null) {
+    throw new HttpError(400, 'INVALID_REQUEST', 'static: this deploy.yaml describes a container; ?static= is for a static application')
+  }
+  const app = apps.get(name) ?? addApp(name, iso(Date.now()))
+  requireIdle(app)
+  checkConflicts(app, sp)
+  return startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name, files, refs: referencesOf(body) })
+}
+
+/** The filters GET /audit and its export share, with the agent's refusals; `described` is how an export's entry in the trail names them. */
+function auditFilter(url) {
+  const q = url.searchParams
+  const several = name => [...new Set(q.getAll(name).flatMap(v => v.split(',')).map(v => v.trim()).filter(v => v !== ''))]
+  const application = q.get('application') ?? ''
+  if (application !== '' && !APPLICATION_NAME.test(application)) throw new HttpError(400, 'INVALID_REQUEST', 'application: lowercase letters, digits and dashes only')
+  const actor = q.get('actor') ?? ''
+  if (actor.length > 320) throw new HttpError(400, 'INVALID_REQUEST', 'actor is the name of a token or the address of a person, e.g. actor=ci')
+  // An agent before 0.7 does not know the next three and ignores them.
+  const actorKind = BEFORE_07 ? '' : q.get('actor_kind') ?? ''
+  if (actorKind !== '' && actorKind !== 'token' && actorKind !== 'user') throw new HttpError(400, 'INVALID_REQUEST', `actor_kind: invalid kind of actor ${JSON.stringify(actorKind)}: use token or user`)
+  const actions = BEFORE_07 ? [] : several('action')
+  if (actions.length > 20) throw new HttpError(400, 'INVALID_REQUEST', 'action: at most 20 at once; the start of a family covers all of it, e.g. action=backup.')
+  for (const action of actions) {
+    if (!/^[a-z]{1,20}(\.[a-z]{1,20})?$|^[a-z]{1,20}\.$/.test(action)) throw new HttpError(400, 'INVALID_REQUEST', `invalid action ${JSON.stringify(action)}: use one as the trail shows it, or the start of a family with its dot, e.g. deploy, token.create or backup.`)
+  }
+  const outcomes = BEFORE_07 ? [] : several('outcome')
+  for (const outcome of outcomes) {
+    if (!['ok', 'refused', 'failed'].includes(outcome)) throw new HttpError(400, 'INVALID_REQUEST', `invalid outcome ${JSON.stringify(outcome)}: use ok, refused or failed`)
+  }
+  const since = q.get('since') ? parseSince(q.get('since')) : null
+  const before = q.get('before') ?? ''
+  if (before !== '' && (!/^\d+$/.test(before) || Number(before) < 1)) throw new HttpError(400, 'INVALID_REQUEST', 'before must be the id of an audit entry')
+  const described = [
+    application && `application ${application}`,
+    actor && `actor ${actor}`,
+    actorKind && `actor_kind ${actorKind}`,
+    actions.length > 0 && `action ${actions.join(' ')}`,
+    outcomes.length > 0 && `outcome ${outcomes.join(' ')}`,
+    since !== null && `since ${iso(since).replace(/\.\d+Z$/, 'Z')}`,
+  ].filter(Boolean).join(', ')
+  const matches = e => (application === '' || e.application === application)
+    && (actor === '' || e.actor.name === actor)
+    && (actorKind === '' || e.actor.kind === actorKind)
+    && (actions.length === 0 || actions.some(a => (a.endsWith('.') ? e.action.startsWith(a) : e.action === a)))
+    && (outcomes.length === 0 || outcomes.includes(e.outcome))
+    && (since === null || Date.parse(e.at) >= since)
+    && (before === '' || e.id < Number(before))
+  return { matches, described }
+}
+
 const COLLECTIONS = ['applications', 'deployments', 'tokens', 'secrets', 'volumes', 'registries', 'certificates', 'exports']
+
+// What 0.7 added.
+const ROUTES_07 = {
+  'GET /applications/:p/logs/archive': 'read',
+  'GET /applications/:p/logs/archive/:x': 'read',
+  'GET /applications/:p/logs/search': 'read',
+  'GET /applications/:p/config': 'deploy',
+  'POST /applications': 'deploy',
+  'POST /validate': 'deploy',
+  'PUT /tokens/:p': 'admin',
+  'GET /audit/export': 'admin',
+}
 
 // What 0.6 added. `none`: answered without a token, to whoever asks.
 const ROUTES_06 = {
@@ -3247,6 +3795,7 @@ const ROUTES = {
   'DELETE /volumes/:p': 'admin',
   ...(OLD_AGENT ? {} : ROUTES_05),
   ...(BEFORE_06 ? {} : ROUTES_06),
+  ...(BEFORE_07 ? {} : ROUTES_07),
 }
 
 /** The route a request is looked up under: names and ids replaced by :p, :x and :y. */
@@ -3256,6 +3805,7 @@ function routeOf(method, segments) {
   if (s[0] === 'applications') {
     if (s.length > 3 && ['volumes', 'runs', 'jobs', 'backups'].includes(s[2])) s[3] = ':x'
     if (s.length > 5 && s[2] === 'backups' && s[4] === 'volumes') s[5] = ':y'
+    if (s.length > 4 && s[2] === 'logs' && s[3] === 'archive') s[4] = ':x'
   }
   if (s[0] === 'server' && s[1] === 'backups' && s.length > 2 && s[2] !== 'adopt') s[2] = ':x'
   if (s[0] === 'access' && s.length > 2) s[2] = ':p'
@@ -3281,6 +3831,11 @@ async function handle(req, res) {
   const param = segments[1]
   const required = ROUTES[route]
 
+  // An agent before 0.7 knows the path of a token for DELETE only: net/http answers the method itself, without the envelope.
+  if (BEFORE_07 && method === 'PUT' && segments[0] === 'tokens' && segments.length === 2) {
+    res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', 'allow': 'DELETE', 'x-content-type-options': 'nosniff' })
+    return res.end('Method Not Allowed\n')
+  }
   if (!required) {
     // The agent has no such operation, as opposed to NOT_FOUND: unknown application or deployment.
     return sendError(res, 404, 'ENDPOINT_NOT_FOUND', `no such endpoint: ${method} ${path}`)
@@ -3324,7 +3879,9 @@ async function handle(req, res) {
   if (!roleCovers(who.role, required)) {
     return sendError(res, 403, 'FORBIDDEN', forbiddenMessage(who, required), { role: who.role, required })
   }
-  if (!BEFORE_06) refuseLimited(who, required, segments)
+  // A document names its application itself: a limited token is held to that name once the document has been read.
+  const document = route === 'POST /applications' || route === 'POST /validate'
+  if (!BEFORE_06 && !document) refuseLimited(who, required, segments)
   // Stop/start events name the actor unless it is root, as the agent does.
   const byWho = who.name === 'root' ? '' : ` by ${who.name}`
 
@@ -3352,9 +3909,151 @@ async function handle(req, res) {
               network: NETWORK
                 ? { proxy: 'proxy.corp.example:3128', docker_proxy: false, ca_file: true, dns_resolvers: ['system'], acme_directory: 'https://ca.corp.example/acme/acme/directory' }
                 : { proxy: '', docker_proxy: false, ca_file: false, dns_resolvers: [], acme_directory: '' },
-              sign_in: { configured: SIGN_IN, issuer: signInConfig().issuer },
+              sign_in: { configured: SIGN_IN, issuer: signInConfig().issuer, ...(BEFORE_07 ? {} : { name_claim: SIGN_IN ? NAME_CLAIM : '' }) },
             }),
+        ...(BEFORE_07 ? {} : { log_archive: logArchiveStatus(), update: updateStatus() }),
       })
+    }
+
+    case 'GET /applications/:p/logs/archive': {
+      const app = requireApp(param)
+      const kind = url.searchParams.get('kind') ?? ''
+      if (kind !== '' && kind !== 'replica' && kind !== 'run') throw new HttpError(400, 'INVALID_REQUEST', 'kind must be replica or run')
+      const source = logSource(url, app)
+      const before = idParam(url, 'before')
+      const limit = intParam(url, 'limit', 50, 1, 500)
+      const list = logArchive
+        .filter(e => e.application === app.name && (kind === '' || e.kind === kind) && (source.deployment === 0 || e.deployment_id === source.deployment)
+          && (source.replica === 0 || e.replica === source.replica) && (source.run === 0 || e.run_id === source.run) && (before === 0 || e.id < before))
+        .sort((a, b) => b.id - a.id)
+        .slice(0, limit)
+      return sendJSON(res, 200, list.map(archiveView))
+    }
+
+    case 'GET /applications/:p/logs/archive/:x': {
+      const app = requireApp(param)
+      if (!/^\d+$/.test(segments[4] ?? '') || Number(segments[4]) < 1) throw new HttpError(400, 'INVALID_REQUEST', 'archive id must be a positive number')
+      const tail = intParam(url, 'tail', 0, 1, 10000)
+      const entry = logArchive.find(e => e.id === Number(segments[4]) && e.application === app.name)
+      if (!entry) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      return sendJSON(res, 200, { ...entry, output: tail === 0 ? entry.output : entry.output.slice(-tail) })
+    }
+
+    case 'GET /applications/:p/logs/search': {
+      const app = requireApp(param)
+      const text = url.searchParams.get('q') ?? ''
+      const cursor = url.searchParams.get('cursor') ?? ''
+      if (Buffer.byteLength(text) > 256) throw new HttpError(400, 'INVALID_REQUEST', 'q must be at most 256 bytes')
+      // eslint-disable-next-line no-control-regex
+      if (/[\r\n\x00]/.test(text)) throw new HttpError(400, 'INVALID_REQUEST', 'q must be one line: a search looks inside lines')
+      if (cursor.length > 64) throw new HttpError(400, 'INVALID_REQUEST', 'cursor must be the next of an earlier answer')
+      const since = timeParam(url, 'since')
+      const until = timeParam(url, 'until')
+      if (since !== null && until !== null && until < since) throw new HttpError(400, 'INVALID_REQUEST', 'until must not be before since')
+      const source = logSource(url, app)
+      const limit = intParam(url, 'limit', 200, 1, 1000)
+      return sendJSON(res, 200, searchLogs(app, { text, since, until, ...source, limit, cursor }))
+    }
+
+    case 'GET /applications/:p/config': {
+      const escape = boolParam(url, 'escape')
+      const app = requireApp(param)
+      const active = requireActive(app)
+      const written = documentOf(active.spec, references.get(active.id))
+      return sendJSON(res, 200, {
+        application: app.name,
+        deployment_id: active.id,
+        sequence: active.sequence,
+        version: active.version,
+        // With escape a literal ${NAME} outside the secret values is written $${NAME}, for a file the CLI reads.
+        document: escape ? written.document.replace(/^((?:entrypoint|command|user|image|domain|path):.*)$/gm, line => line.replace(/(?<!\$)\$\{/g, '$$${')) : written.document,
+        masked: written.masked,
+        ...(active.static ? { static_digest: active.static.digest } : {}),
+      })
+    }
+
+    case 'POST /validate': {
+      const body = await readConfig(req)
+      const name = documentName(who, body)
+      const sp = parseSpec(name, body, { validating: true })
+      checkConflicts(apps.get(name) ?? null, sp)
+      return sendJSON(res, 200, { valid: true })
+    }
+
+    case 'POST /applications': {
+      const digest = staticDigest(url)
+      const body = await readConfig(req)
+      const name = documentName(who, body)
+      if (name !== '') res.auditApplication = name
+      const d = deployDocument(name, body, digest, who)
+      return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
+    }
+
+    case 'PUT /tokens/:p': {
+      if (param === 'root') throw new HttpError(400, 'INVALID_REQUEST', 'the root token is the one the agent is configured with: it is admin, has no end, and is changed on the agent, not here')
+      if (!TOKEN_NAME.test(param ?? '')) throw new HttpError(400, 'INVALID_REQUEST', `invalid token name ${JSON.stringify(param)}: use lowercase letters, digits and dashes (max 40 characters), e.g. ci`)
+      const body = await readJSON(req, ['applications', 'expires_at', 'never_expires'])
+      const applications = body.applications ?? null
+      const expiresAt = body.expires_at ?? null
+      const never = body.never_expires === true
+      if (applications === null && expiresAt === null && !never) {
+        throw new HttpError(400, 'INVALID_REQUEST', 'nothing to change: name the applications, the end, or both, e.g. {"applications": ["my-api", "web"]} or {"expires_at": "2027-01-31T00:00:00Z"}')
+      }
+      if (expiresAt !== null && never) throw new HttpError(400, 'INVALID_REQUEST', 'expires_at and never_expires contradict each other: send one')
+      let expiresAtMs = null
+      if (expiresAt !== null) {
+        expiresAtMs = typeof expiresAt === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(expiresAt) ? Date.parse(expiresAt) : Number.NaN
+        if (Number.isNaN(expiresAtMs)) throw new HttpError(400, 'INVALID_REQUEST', 'invalid JSON body: expires_at must be an RFC 3339 time, e.g. 2027-01-31T23:59:59Z')
+        if (expiresAtMs <= Date.now()) throw new HttpError(400, 'INVALID_REQUEST', `expires_at is in the past. To stop a token now, revoke it: DELETE /tokens/${param}`)
+      }
+      const t = tokens.get(param)
+      if (!t) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      const before = { applications: t.applications ?? [], expires_at: t.expires_at ?? null }
+      if (applications !== null) {
+        const limits = validateLimits(t.role, applications)
+        if (limits === null) throw new HttpError(400, 'INVALID_REQUEST', 'only a deploy token can be limited to applications: a read token changes nothing, and admin is for the whole server')
+        t.applications = limits
+      }
+      // Kept in UTC, to the second.
+      if (never) t.expires_at = null
+      else if (expiresAtMs !== null) t.expires_at = iso(Math.floor(expiresAtMs / 1000) * 1000)
+      const list = names => (names.length === 0 ? 'all' : names.join(' '))
+      const end = at => (at === null ? 'never' : at.replace(/\.\d+Z$/, 'Z'))
+      const changes = []
+      if (before.applications.join(' ') !== t.applications.join(' ')) changes.push(`applications ${list(before.applications)} -> ${list(t.applications)}`)
+      if (end(before.expires_at) !== end(t.expires_at)) changes.push(`expires ${end(before.expires_at)} -> ${end(t.expires_at)}`)
+      res.auditDetail = changes.length > 0 ? changes.join(', ') : 'nothing changed'
+      return sendJSON(res, 200, tokenView(t))
+    }
+
+    case 'GET /audit/export': {
+      const format = url.searchParams.get('format') ?? ''
+      if (format !== 'csv' && format !== 'json') throw new HttpError(400, 'INVALID_REQUEST', 'format is required: csv, or json for one entry per line')
+      if (url.searchParams.has('limit') || url.searchParams.has('before')) {
+        throw new HttpError(400, 'INVALID_REQUEST', 'an export is everything that matches, not a page: leave limit and before out, and narrow it with since, application, actor, action or outcome')
+      }
+      const filter = auditFilter(url)
+      const list = audit.filter(filter.matches).sort((a, b) => b.id - a.id)
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
+      res.auditDetail = [format, ...(filter.described ? [filter.described] : []), `${list.length} entries`].join(', ')
+      res.writeHead(200, {
+        'content-type': format === 'json' ? 'application/x-ndjson' : 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="shipwick-audit-${stamp}.${format === 'json' ? 'ndjson' : 'csv'}"`,
+        'trailer': 'X-Shipwick-Export-Error',
+      })
+      if (format === 'json') {
+        for (const e of list) res.write(`${JSON.stringify(e)}\n`)
+        return res.end()
+      }
+      // A cell a spreadsheet would run as a formula is written as text.
+      const safe = value => (/^[=+\-@\t\r]/.test(value) ? `'${value}` : value)
+      const cell = value => (/[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value)
+      res.write('id,at,actor_kind,actor,address,forwarded_for,action,application,target,outcome,status,code,detail\n')
+      for (const e of list) {
+        const row = [String(e.id), e.at.replace(/\.\d+Z$/, 'Z'), ...[e.actor.kind, e.actor.name, e.address, e.forwarded_for, e.action, e.application, e.target, e.outcome].map(safe), String(e.status), safe(e.code), safe(e.detail)]
+        res.write(`${row.map(cell).join(',')}\n`)
+      }
+      return res.end()
     }
 
     case 'GET /applications/:p/traffic': {
@@ -3523,17 +4222,15 @@ async function handle(req, res) {
     }
 
     case 'GET /audit': {
-      const application = url.searchParams.get('application') ?? ''
-      if (application !== '' && !APPLICATION_NAME.test(application)) throw new HttpError(400, 'INVALID_REQUEST', 'application: lowercase letters, digits and dashes only')
-      const actor = url.searchParams.get('actor') ?? ''
-      const since = url.searchParams.get('since') ? parseSince(url.searchParams.get('since')) : null
+      const filter = auditFilter(url)
       const limit = intParam(url, 'limit', 50, 1, 500)
-      const before = intParam(url, 'before', 0, 0, Number.MAX_SAFE_INTEGER)
-      const list = audit
-        .filter(e => (application === '' || e.application === application) && (actor === '' || e.actor.name === actor) && (since === null || Date.parse(e.at) >= since) && (before === 0 || e.id < before))
-        .sort((a, b) => b.id - a.id)
-        .slice(0, limit)
-      return sendJSON(res, 200, list)
+      // One more than asked for is read, to know whether older entries match.
+      const list = audit.filter(filter.matches).sort((a, b) => b.id - a.id).slice(0, limit + 1)
+      if (BEFORE_07) return sendJSON(res, 200, list.slice(0, limit))
+      // `more` stands next to `data`, not inside it.
+      const body = JSON.stringify({ data: list.slice(0, limit), more: list.length > limit })
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
+      return res.end(body)
     }
 
     case 'GET /standby/promotion':
@@ -3570,7 +4267,11 @@ async function handle(req, res) {
         // eslint-disable-next-line no-control-regex
         if (subject.length > 256 || subject !== subject.trim() || /[\x00-\x1F\x7F]/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', 'invalid group: use the name as the provider sends it, at most 256 characters')
       }
-      else throw new HttpError(400, 'INVALID_REQUEST', `invalid kind ${JSON.stringify(body.kind)}: use email, group or domain`)
+      else if (body.kind === 'name' && !BEFORE_07) {
+        // Exactly as the claim holds it: case kept, nothing normalised.
+        if (subject.length > 254 || !/^[A-Za-z0-9._%+'@|:=#~-]+$/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', 'not a name the provider\'s claim can hold: at most 254 letters, digits and . _ % + \' @ | : = # ~ -, without spaces')
+      }
+      else throw new HttpError(400, 'INVALID_REQUEST', `invalid kind ${JSON.stringify(body.kind)}: use email, group${BEFORE_07 ? ' or domain' : ', domain or name'}`)
       const applications = validateLimits(body.role, body.applications)
       if (applications === null) throw new HttpError(400, 'INVALID_REQUEST', 'only the deploy role can be limited to applications: read changes nothing, and admin is for the whole server')
       const existing = accessRules.find(r => r.kind === body.kind && r.subject === subject)
@@ -3599,8 +4300,10 @@ async function handle(req, res) {
       return sendJSON(res, 200, liveSessions().map(({ id, email, role, applications, created_at, expires_at, last_used_at }) => ({ id, email, role, applications, created_at, expires_at, last_used_at })))
 
     case 'DELETE /access/sessions/:p': {
-      const email = String(segments[2] ?? '').toLowerCase()
-      if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new HttpError(400, 'INVALID_REQUEST', 'not an e-mail address; use one like ada@example.com')
+      // The name as the sessions hold it: an address in lowercase with the email claim, otherwise exactly what the claim held.
+      const byAddress = BEFORE_07 || NAME_CLAIM === 'email'
+      const email = byAddress ? String(segments[2] ?? '').toLowerCase() : String(segments[2] ?? '')
+      if (byAddress && !/^[^\s@]+@[^\s@]+$/.test(email)) throw new HttpError(400, 'INVALID_REQUEST', 'not an e-mail address; use one like ada@example.com')
       const mine = liveSessions().filter(s => s.email === email)
       for (const s of mine) s.ended = { reason: 'signed_out', message: 'an admin ended this session. Sign in again' }
       res.auditDetail = plural(mine.length, 'session')
@@ -3623,14 +4326,44 @@ async function handle(req, res) {
     }
 
     case 'POST /export': {
-      // The real answer is the whole server, encrypted with the passphrase; here it is a file that starts like one.
-      const body = await readJSON(req, ['passphrase', 'applications'], 64 * 1024, '{"passphrase": "…"}')
-      if (typeof body.passphrase !== 'string' || body.passphrase.length < 12) throw new HttpError(400, 'INVALID_REQUEST', 'passphrase: at least 12 characters; the export holds every secret of the server')
-      for (const name of body.applications ?? []) if (!apps.has(name)) throw new HttpError(404, 'NOT_FOUND', `no application named ${JSON.stringify(name)}`)
+      // The real answer is the whole server, encrypted with the passphrase; here it is a file that starts like one, sent in pieces as the real one is.
+      let body
+      try {
+        body = await readJSON(req, ['passphrase', 'applications'], 64 * 1024, '{"passphrase": "…"}')
+      }
+      catch {
+        // The body holds a passphrase: the error says nothing of its content.
+        throw new HttpError(400, 'INVALID_REQUEST', 'the body must be JSON: {"passphrase": "…"}')
+      }
+      if (typeof body.passphrase !== 'string' || body.passphrase.length < 12) throw new HttpError(400, 'INVALID_REQUEST', 'passphrase must be at least 12 characters long: it is all that protects every secret of the server')
+      const chosen = Array.isArray(body.applications) ? body.applications : []
+      for (const name of chosen) if (typeof name !== 'string' || !APPLICATION_NAME.test(name)) throw new HttpError(400, 'INVALID_REQUEST', 'applications: name: lowercase letters, digits and dashes only')
+      for (const name of chosen) if (!apps.has(name)) throw new HttpError(404, 'NOT_FOUND', `no application named ${JSON.stringify(name)}`)
+      const busy = [...apps.values()].find(a => a.active_deployment_id && inFlight(a.name) && (chosen.length === 0 || chosen.includes(a.name)))
+      if (busy) throw new HttpError(409, 'DEPLOYMENT_IN_PROGRESS', `another operation is in progress for ${busy.name}`)
+      if (chosen.length > 0) res.auditDetail = `applications ${chosen.join(' ')}`
       const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
-      const file = Buffer.concat([Buffer.from('SWBACKUP'), randomBytes(1016)])
-      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="shipwick-export-${stamp}.swexport"` })
-      return res.end(file)
+      // Chunked: the length is not known beforehand. The trailer is announced, and set only when the export breaks off.
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="shipwick-export-${stamp}.swexport"`, 'trailer': 'X-Shipwick-Export-Error' })
+      const piece = randomBytes(64 * 1024)
+      let sent = 0
+      const write = chunk => new Promise((resolve) => {
+        if (res.destroyed) return resolve()
+        if (res.write(chunk)) resolve()
+        else res.once('drain', resolve)
+      })
+      await write(Buffer.from('SWBACKUP'))
+      while (sent < EXPORT_BYTES && !res.destroyed) {
+        if (EXPORT_FAILS && sent >= EXPORT_BYTES / 2) {
+          // Half-way: the file is left without its last chunk. The agent says why in the trailer; a connection that is cut says nothing.
+          if (EXPORT_FAILS === 'breaks') return res.destroy()
+          res.addTrailers({ 'X-Shipwick-Export-Error': 'archive volume data of postgres: read /var/lib/docker/volumes/shipwick_postgres_data: input/output error' })
+          return res.end()
+        }
+        await write(piece)
+        sent += piece.length
+      }
+      return res.end()
     }
 
     case 'GET /exports':
@@ -3656,13 +4389,40 @@ async function handle(req, res) {
       const stopped = boolParam(url, 'stopped')
       const overwrite = boolParam(url, 'overwrite')
       requireNoPromotion()
-      if (!req.headers['x-shipwick-passphrase']) throw new HttpError(400, 'INVALID_REQUEST', 'the passphrase of the export is sent base64-encoded in the X-Shipwick-Passphrase header')
+      const passphrase = Buffer.from(String(req.headers['x-shipwick-passphrase'] ?? ''), 'base64').toString('utf8')
+      if (passphrase === '' || !/^[A-Za-z0-9+/]+=*$/.test(String(req.headers['x-shipwick-passphrase']))) throw new HttpError(400, 'INVALID_REQUEST', 'the passphrase of the export is sent base64-encoded in the X-Shipwick-Passphrase header')
       requireNoImport()
-      const chunks = []
-      for await (const chunk of req) if (chunks.length < 4) chunks.push(chunk)
-      if (!Buffer.concat(chunks).subarray(0, 8).equals(Buffer.from('SWBACKUP'))) throw new HttpError(400, 'INVALID_EXPORT', 'this is not an export: it does not start like a file shipwick export writes')
+      res.auditDetail = `stopped ${stopped}, overwrite ${overwrite}`
+      // The file is imported as it arrives and nothing of it is kept: its first
+      // bytes say whether it is an export and whether the passphrase opens it.
+      const body = req[Symbol.asyncIterator]()
+      let head = Buffer.alloc(0)
+      let received = 0
+      while (head.length < 8) {
+        const { value, done } = await body.next()
+        if (done) break
+        received += value.length
+        head = Buffer.concat([head, value])
+      }
+      if (!head.subarray(0, 8).equals(Buffer.from('SWBACKUP'))) throw new HttpError(400, 'INVALID_EXPORT', 'this is not an export: it does not start like a file shipwick export writes')
+      // What stands for a passphrase that does not open the file.
+      if (passphrase.startsWith('wrong')) throw new HttpError(400, 'INVALID_EXPORT', 'the passphrase does not match this backup, or the file is damaged')
       // The request stays open for the whole import and answers at the end; GET /import follows it meanwhile.
       const run = startImport({ source: 'upload', stopped, overwrite })
+      let complete = true
+      try {
+        for (let next = await body.next(); !next.done; next = await body.next()) received += next.value.length
+      }
+      catch {
+        complete = false
+      }
+      const declared = Number(req.headers['content-length'] ?? received)
+      if (!complete || received < declared) {
+        // The upload broke off: what was imported until then stays, and the import says so.
+        Object.assign(run, { status: 'failed', completed_at: iso(Date.now()), error: 'the export breaks off: the upload ended before the file did' })
+        lastImport = run
+        throw new HttpError(400, 'INVALID_EXPORT', 'the export breaks off: the upload ended before the file did')
+      }
       await new Promise((resolve) => {
         const timer = setInterval(() => {
           if (run.status !== 'running') {
@@ -3788,28 +4548,16 @@ async function handle(req, res) {
       uploads.delete(app.name)
       for (const d of [...deployments.values()]) if (d.application === app.name) deployments.delete(d.id)
       for (const r of [...runs.values()]) if (r.application === app.name) runs.delete(r.id)
+      // Its kept output goes with it.
+      for (let i = logArchive.length - 1; i >= 0; i--) if (logArchive[i].application === app.name) logArchive.splice(i, 1)
       res.writeHead(204)
       return res.end()
     }
 
     case 'POST /applications/:p/deploy': {
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
-      const digest = url.searchParams.get('static')
-      if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new HttpError(400, 'INVALID_REQUEST', 'static: must be the digest PUT …/static answered, sha256:<64 hex characters>')
-      const sp = parseSpec(param, await readConfig(req))
-      let files = null
-      if (isStaticSpec(sp)) {
-        if (digest === null) throw new HttpError(400, 'INVALID_REQUEST', `static: the folder ${sp.static.dir}/ has not been uploaded for this deployment; upload it with PUT /applications/${param}/static first and pass its digest as ?static=`)
-        files = uploads.get(param)?.digest === digest ? uploads.get(param) : null
-        if (!files) throw new HttpError(404, 'NOT_FOUND', 'no files were uploaded for this deployment: run shipwick deploy from the project')
-      }
-      else if (digest !== null) {
-        throw new HttpError(400, 'INVALID_REQUEST', 'static: this deploy.yaml describes a container; ?static= is for a static application')
-      }
-      const app = apps.get(param) ?? addApp(param, iso(Date.now()))
-      requireIdle(app)
-      checkConflicts(app, sp)
-      const d = startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name, files })
+      const digest = staticDigest(url)
+      const d = deployDocument(param, await readConfig(req), digest, who)
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -3862,6 +4610,7 @@ async function handle(req, res) {
       requireActive(app)
       if (app.desired_state !== 'stopped') {
         app.desired_state = 'stopped'
+        for (const c of app.containers) if (c.state === 'running') archiveContainer(app, c, 'stopped', { exitCode: 0 })
         for (const c of app.containers) Object.assign(c, { state: 'exited', exit_code: 0, oom_killed: false, crash_loop: false })
         app.updated_at = iso(Date.now())
         addAppEvent(app.name, 'info', 'app', `Application stopped${byWho}`)
@@ -4153,6 +4902,9 @@ const server = createServer((req, res) => {
     sendError(res, 500, 'INTERNAL_ERROR', String(error?.message ?? error))
   })
 })
+
+// The agent gives an archive or an export as long as its upload takes, and only a read that stalls ends it; Node's five minutes for a whole request would cut a large one.
+server.requestTimeout = 0
 
 server.listen(PORT, HOST, () => {
   console.log(`Shipwick mock agent on http://${HOST}:${PORT}/api/v1`)

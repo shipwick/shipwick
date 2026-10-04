@@ -10,13 +10,21 @@ const props = defineProps<{ error: AgentError | null, updatedAt: number | null }
 
 const now = useNow()
 const age = computed(() => (props.updatedAt === null ? '' : formatRelativeTime(new Date(props.updatedAt).toISOString(), now.value)))
+
+// Said once when the data goes stale and once when it is live again. The
+// notice counts the seconds: as a live region it would be read at every one.
+const { announce } = useAnnounce()
+watch(() => (props.error ? (props.error.unreachable ? 'unreachable' : 'failed') : null), (state, before) => {
+  if (state === 'unreachable') announce('Agent unreachable. Showing the last data, retrying.')
+  else if (state === 'failed') announce('Refresh failed. Showing the last data, retrying.')
+  else if (before) announce('Connected again: the data is live.')
+}, { immediate: true })
 </script>
 
 <template>
   <div
     v-if="props.error"
     class="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-sm border border-warn-line bg-warn-bg px-3 py-2 text-xs text-warn"
-    role="status"
   >
     <UiIcon name="alert" :size="14" />
     <span class="font-medium">{{ props.error.unreachable ? 'Agent unreachable.' : 'Refresh failed.' }}</span>

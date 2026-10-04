@@ -28,6 +28,8 @@ type fakeGitHub struct {
 	binary      []byte // the linux/amd64 asset of the release
 	checksums   string // checksums.txt; defaults to the binary's real hash
 	requests    []string
+	// extra are other assets of the release, by name.
+	extra map[string][]byte
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -61,6 +63,10 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		case "shipwick_linux_amd64":
 			w.Write(g.binary)
 		default:
+			if content, ok := g.extra[r.PathValue("asset")]; ok {
+				w.Write(content)
+				return
+			}
 			http.NotFound(w, r)
 		}
 	})

@@ -407,5 +407,7 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		Disk:          e.Disk(),
 		Backups:       e.BackupStatus(ctx),
 		Network:       e.networkStatus(info),
+		LogArchive:    e.logArchiveStatus(ctx),
+		Update:        e.updateStatus(),
 	}, nil
 }

@@ -27,7 +27,7 @@ function open(app: Application, event: MouseEvent) {
 }
 
 function replicaTone(app: Application): string {
-  if (app.replicas.desired === 0) return 'text-fg-faint'
+  if (app.replicas.desired === 0) return 'text-fg-subtle'
   // Stopped on request: zero healthy replicas is the intended state, not an alarm.
   if (app.status === 'STOPPED') return 'text-fg-muted'
   if (app.replicas.healthy >= app.replicas.desired) return 'text-fg'
@@ -72,7 +72,7 @@ function replicaTone(app: Application): string {
         </EmptyState>
         <EmptyState v-else-if="rows.length === 0" :title="`No application matches “${query.trim()}”`" />
         <div v-else class="overflow-x-auto">
-          <table class="data-table stack">
+          <table class="data-table stack" aria-label="Applications">
             <thead>
               <tr>
                 <th>Name</th>
@@ -91,7 +91,7 @@ function replicaTone(app: Application): string {
                   <NuxtLink :to="`/applications/${app.name}`" class="mono font-medium hover:underline">{{ app.name }}</NuxtLink>
                 </td>
                 <td data-label="Status">
-                  <span class="inline-flex flex-wrap items-center gap-x-2 gap-y-1 max-sm:justify-end">
+                  <span class="inline-flex flex-wrap items-center gap-x-2 gap-y-1 cards:justify-end">
                     <StatusBadge v-bind="applicationStatusDisplay(app.status)" :raw="app.status" />
                     <ApplicationMarks :application="app" />
                     <template v-if="app.deploying">
@@ -124,10 +124,10 @@ function replicaTone(app: Application): string {
                     target="_blank"
                     rel="noopener noreferrer"
                     class="mono inline-flex items-center gap-1 text-fg-muted hover:text-fg hover:underline"
-                  >{{ addressOf(app.domain, app.path) }}<UiIcon name="external" :size="12" /></a>
+                  >{{ addressOf(app.domain, app.path) }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></a>
                   <!-- A wildcard is a pattern, not an address to open. -->
                   <span v-else-if="app.domain" class="mono text-fg-muted" title="Every name one label below is served alike">{{ addressOf(app.domain, app.path) }}</span>
-                  <span v-else class="text-fg-faint">—</span>
+                  <span v-else class="text-fg-subtle">—</span>
                 </td>
                 <td data-label="Updated" class="right text-fg-muted">
                   <TimeAgo :time="app.updated_at" />

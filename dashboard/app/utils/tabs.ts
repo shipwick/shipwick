@@ -71,3 +71,14 @@ export function activeTab(tabs: readonly Tab[], path: string): Tab | null {
   }
   return best
 }
+
+/**
+ * The title of a page with tabs: the first tab is the page itself, another is
+ * named before it ('Metrics · my-api'), so that the tabs of one page differ
+ * in the browser's tab, in its history, and in what a screen reader says when
+ * the page changes.
+ */
+export function tabTitle(tabs: readonly Tab[], path: string, page: string): string {
+  const tab = activeTab(tabs, path)
+  return !tab || tab === tabs[0] ? page : tab.label + ' · ' + page
+}

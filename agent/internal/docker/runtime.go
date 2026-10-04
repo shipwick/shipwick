@@ -61,6 +61,10 @@ type ContainerSpec struct {
 	// Init runs the daemon's init process as PID 1, with the image's process
 	// as its child.
 	Init bool
+	// Beside is set for a container that runs next to a running one and
+	// shares its network namespace instead of having one of its own: see
+	// runtime_beside.go.
+	Beside *BesideSpec
 }
 
 // PortBinding publishes a container port on the host.
@@ -114,6 +118,11 @@ type Container struct {
 	// network existed. ServiceNames are the names it answers to there.
 	OnServicesNetwork bool
 	ServiceNames      []string
+	// FinishedAt is when the container last stopped, nil if it never has; it
+	// keeps saying so while the container runs again. RunID is the run of a
+	// one-off container (LabelRun). See runtime_logs.go.
+	FinishedAt *time.Time
+	RunID      int64
 }
 
 type LogEntry struct {
@@ -382,9 +391,14 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 	if spec.Job != nil {
 		name = configureJob(spec, cfg)
 	}
+	configureBeside(spec, cfg, host)
 	res, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Name: name, Config: cfg, HostConfig: host})
 	if err != nil {
 		return "", "", fmt.Errorf("create container %s: %w", name, err)
+	}
+	if spec.Beside != nil {
+		// Its network is the other container's, services network included.
+		return res.ID, name, nil
 	}
 	// On the services network from birth, nameless: the replica can find other
 	// applications while it starts, and nobody can find it until it is ready.
@@ -479,6 +493,7 @@ func (r *Runtime) InspectContainer(ctx context.Context, id string) (Container, e
 			t = t.UTC()
 			c.StartedAt = &t
 		}
+		c.FinishedAt = finishedAt(in.State.FinishedAt)
 	}
 	if in.NetworkSettings != nil {
 		if ep := in.NetworkSettings.Networks[r.network]; ep != nil && ep.IPAddress.IsValid() {
@@ -545,6 +560,7 @@ func (c *Container) applyLabels(labels map[string]string) {
 	c.DeploymentID, _ = strconv.ParseInt(labels[LabelDeployment], 10, 64)
 	c.Replica, _ = strconv.Atoi(labels[LabelReplica])
 	c.Job = labels[LabelJob]
+	c.RunID, _ = strconv.ParseInt(labels[LabelRun], 10, 64)
 }
 
 // Logs returns the last `tail` log lines of a container, oldest first.

@@ -130,3 +130,24 @@ export function timeTicks(start: number, end: number, range: MetricsRange): numb
   for (let t = Math.ceil(start / every) * every; t <= end; t += every) ticks.push(t)
   return ticks
 }
+
+export interface PointFigures {
+  samples: number
+  min: number | null
+  avg: number | null
+  max: number | null
+  latest: number | null
+}
+
+/** What a line of a chart says in numbers: the row of its table, the plot's alternative in text. */
+export function pointFigures(segments: readonly (readonly ChartPoint[])[]): PointFigures {
+  const values = segments.flat().map(p => p.value)
+  const n = values.length
+  return {
+    samples: n,
+    min: n ? Math.min(...values) : null,
+    avg: n ? values.reduce((a, b) => a + b, 0) / n : null,
+    max: n ? Math.max(...values) : null,
+    latest: n ? values[n - 1]! : null,
+  }
+}

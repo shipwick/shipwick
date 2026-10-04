@@ -568,7 +568,43 @@ removes it; the three differ in who starts it and who waits.
 | **The scheduler is the supervisor's ticker.** Once a minute it compares each running application's jobs with the minutes since it last looked at that application, and starts what fell due — once, however many minutes went by. | A busy application (being deployed) keeps its window and is looked at next tick, so a firing during a deployment is run after it, not lost. The first look after a start considers only the current minute: what fell due while the agent was down is not caught up. |
 | **Job containers carry `com.shipwick.managed` and `com.shipwick.app`**, plus `com.shipwick.job` and `com.shipwick.run` instead of a replica index. | They are the agent's to clean up, so `ListContainers` returns them; everything that manages replicas skips containers with a job label, and `delete` removes them with the rest. |
 | **On restart**, runs still `running` become `interrupted` and their containers are removed with the other leftovers; a job restarted by hand or by its schedule runs again as new. | The goroutine that waited on the container died with the old process; re-attaching would mean a second bookkeeping for one case. Shutdown does the same, deliberately: a run is marked `interrupted`, its container stopped and removed. |
-| **A run keeps the tail of its output** (200 lines, 64 KB) and nothing else of the container. | The container is gone; the output is what someone reading "exit 1" needs. A failed hook's last 20 lines also go into the deployment's events, next to the error. Successful jobs record no event: they run often. |
+| **A timeout ends the command, not only the wait.** At its limit the container is stopped — `SIGTERM`, then `SIGKILL` after the agent's stop timeout — and removed, and the run is `timed_out`. | A container is something the daemon can stop, which is the reason hooks and jobs are containers and not commands started inside a replica. Seen on a real daemon for a job and for a hook: nothing of either was left. |
+| **A run keeps the tail of its output** (200 lines, 64 KB) in its record; the log archive keeps more of it (below). | The container is gone; the output is what someone reading "exit 1" needs. A failed hook's last 20 lines also go into the deployment's events, next to the error. Successful jobs record no event: they run often. |
+
+## The log archive
+
+What a container printed lives in Docker's log of that container and is gone
+when the container is: a replica that a rollout replaced, the replicas of a
+deployment that failed, a job that finished. A replica that crashes and is
+started again keeps its container, and its log, only until the driver rotates
+it away. `agent/internal/deploy/logarchive.go` copies the end of every run
+of a container out before that happens; `logsearch.go` reads it back.
+
+| Decision | Why |
+|---|---|
+| **The unit is a run of a container**: from a start to the stop after it. Every copy begins where the last copy of the same container ended — the later of that run's end and of its last line, read back from the entry — and an in-place copy ends at the container's `FinishedAt`. | It is what makes "without storing a line twice" hold without bookkeeping of its own: a crash loop leaves one entry per attempt, a stop followed by a start and a rollout leaves two, and the removal of a container whose runs are all archived leaves none. The mark is in the database, so it survives the agent. |
+| **One place where output enters** (`archiveLogs`), called where a run ends: by the supervisor when it finds a replica down or restarts an unhealthy one, by `Stop`, and by `removeContainer` and `collectJob` before they remove a container. | Removal has one path for replicas and one for jobs; hooking those two catches the rollout, the failed deployment, the rollback, the leftover and the interrupted job without naming them. The reason is worked out from where the container's deployment stands, not passed down through six callers. |
+| **A container that stays is copied in the background; one that goes, by whoever removes it.** | The copy has to precede the removal, so it cannot be deferred there — but a rollout retires replicas in the background already (drain.go), so no deployment waits for it and no lock is held. Where the lock is held — a failed deployment being cleaned up — the cost is one bounded read: measured at 5 to 18 ms for a replica, 50 ms for a job's 10,000 lines. The supervisor never reads under the lock. |
+| **Bounded three ways**: the last 2,000 lines and 1 MB of a replica's run, 10,000 lines and 4 MB of a job's; a line is cut at 16 KB. The daemon is asked for the tail, and lines pass through a ring. | Never more memory than the bound, whatever the container wrote. The crash is at the end of the log; the hour of requests before it is not what the archive is for. A job's output is its result, and gets more room. The run's own record keeps its 200-line tail, so `GET …/runs/:id` answers as before. |
+| **A run that printed nothing is an entry only when it died**: exit code other than 0, or killed for memory, by itself. | "It exited 139 and said nothing" is the answer to "why did it die"; an empty entry for every quiet replica a rollout replaced is noise. A code the agent's own stop produced (143, 137) is not a death. |
+| **Files, not rows.** One gzip file per entry under `<data>/logs/<application id>/<entry id>.log.gz`; the database has a row per entry (`log_archives`) saying what it is. | The database is one file behind one connection. Output in it would be copied by every backup of the agent's state — seven a week — would not give its space back when removed without a `VACUUM`, and a search reading 300 MB of it would hold the connection every deployment and request needs. A full disk fails one write of one file, logged and dropped, instead of a transaction of the engine's. The path is made of two numbers the database assigned: nothing a request or an application named is in it. |
+| **The file is written before its row, and renamed after**, under a lock the housekeeping shares. | An entry is never listed before it can be read; a crash in between leaves a temporary file, which the next start removes. Housekeeping also removes files without a row (an application deleted during a copy) and rows without a file (a database restored from a backup, which has no files). |
+| **gzip, plain lines**: `<time> <o\|e> <message>`. | 4.7 times smaller on the measured output, in the standard library, and readable on the server with `zcat` when the agent is not. |
+| **Search reads; there is no index.** The database rules out entries by application, deployment, replica, run and time; the rest is decompressed and compared, case-folded, a line at a time. A request stops at 128 MiB or at its `limit` and returns a cursor. | Measured on a developer's machine with this driver's standard build, which does include FTS5: a trigram index (what a substring search needs) answered in 1 to 140 ms, but took 130 MiB for 29 MiB of lines — 4.5 times the text, 25 times the gzip — and 79 µs of the one connection for every line added (200,000 lines in 15.8 s). Reading: 2.5 million lines in 257 entries, 301 MB, in 1.3 s on the development stack, over three requests of at most 0.6 s. A single server's week of last-lines is of that size; the index would cost more disk than the logs. |
+| **A search also reads the replicas that exist**, from where their last copy ended, their last 50,000 lines. | The question is "where did this happen", not "where in the archive". Starting after the last copy is what keeps a line from being found twice. |
+| **Retention by age and by size**, enforced at every copy and hourly: 14 days, 1 GiB. Over the size, the application that holds the most loses its oldest entries. | A size alone lets one chatty job evict what a quiet application printed when it crashed; oldest-first across applications does exactly that. Taking from the largest holder keeps the archive useful for the application that is not the problem. |
+| **While the disk is at its alert's threshold the archive does not grow**: a new entry removes at least its own size first. | The agent must not be what fills the last of a disk it is warning about. The newest output is still the most useful, so it replaces the oldest rather than being dropped. |
+| **Deleted with the application; in no backup and no export.** | It is output, not state: nothing needs it back. Volumes and backups survive a delete because the application may return for its data. |
+| **Read with the role that reads logs, and written nowhere else.** No line reaches an event, a notification, the audit trail or the agent's own log; the request log has the path without the query. Not encrypted at rest. | It is exactly as sensitive as the live log, which Docker keeps in clear next to it; sealing one and not the other would be decoration. |
+| **`ReadLogs` is an optional interface** of the runtime, not a method of `Runtime`. | A runtime without it archives nothing and everything else works; the fake implements it, with a log per container and a stop time, so the engine's tests cover every path without a daemon. |
+
+What it cannot do: a container removed by something else while the agent was
+down is gone with its output; a run whose copy the agent could not finish
+before it was stopped itself is copied at the next start, and if its replica
+is running again by then the entry is `restarted`, without an exit code; a
+logging driver that
+keeps nothing the daemon can read leaves nothing to copy, and the copy fails
+quietly.
 
 ## Backups
 
@@ -590,7 +626,9 @@ any other, owned by `_agent` instead of an application.
 | **An archive larger than one part, 64 MiB, is a multipart upload**: created, sent part by part from the file, completed. Each part is read twice, once for its hash and once for the request, and sent up to three times. Parts grow past 64 MiB only when 10,000 of them would not hold the file. | One `PUT` ends at 5 GB. The file is on the server already, so a part needs no buffer: memory does not grow with the archive, and the second read comes from the page cache. The hash is not optional, because the signature covers the payload. Parts go one after the other because the disk and the line are the limit, and because an upload with one request in flight is one that can be aborted cleanly. What remains is the service's limit for an object, 5 TiB on S3. Smaller archives stay a single `PUT`, signed with the hash taken while the file was written. |
 | **An upload that does not complete is aborted by whoever started it**, with a context of its own; completing is checked in the body, where S3 reports a failure after answering `200`. | Parts of an unfinished upload are in no listing and on every invoice. The upload's context is often what ended it, so the abort cannot use it. |
 | **An agent that died in the middle leaves a note**: `<file>.upload` next to the file being sent, holding the upload's id, written before the first part and removed when the upload is over. The next agent aborts what the notes name once the bucket is known to be its own and before its own first upload, then asks the bucket for unfinished uploads under its prefix and aborts those whose keys have the shape `<owner>/<id>/<file>`. | Asking the bucket alone is not enough: S3 lists unfinished uploads by prefix, MinIO only under an exact key, which was found against a real one. A note names the upload on every service. The listing is for the server whose disk went with the agent, where it is answered. The shape is checked because a bucket shared without a prefix has other people's uploads in it. It happens with the first use of the bucket rather than at start, because nothing is removed from a bucket before it is known to be this installation's; an agent that died over a backup finds that backup `running` at its start and uses the bucket to clean up after it. |
-| **`backups.before_timeout` bounds the wait, not the process.** | The Docker Engine API starts a command in a container and cannot end it. The agent stops reading at the limit, fails the backup and frees the application's lock; a command that hangs is the container's until it exits or the container is replaced. Saying "stopped" would be saying something that is not checked. |
+| **Inside the replica, `backups.before_timeout` bounds the wait, not the process.** | The Docker Engine API starts a command in a container and cannot end it. The agent stops reading at the limit, fails the backup and frees the application's lock; a command that hangs is the container's until it exits or the container is replaced. Saying "stopped" would be saying something that is not checked. The ways around it were looked at and left: the process id the daemon reports is the host's, and signalling it takes the host's process namespace, which the agent will not ask for; a command started with a terminal ends when the terminal hangs up, but a terminal changes what commands do — `psql` under one waited in a pager. |
+| **`backups.before_in: container` runs the command in a container of its own, which is ended at the limit**: the replica's image, environment, user and limits, the application's volumes at their paths, the replica's network namespace, an init process in front, no entrypoint. It is stopped and removed like a job, also when the agent shuts down under it. | A container is what the daemon can stop. Sharing the network namespace makes `localhost` the replica, so a dump over TCP and `redis-cli` work as they did; the volumes are where a dump is written. It mounts volumes a replica is writing, which a job never may: here the command is the application's own way of making those files fit to copy, and it runs under the application's lock. The entrypoint is left out because the command stands for one that would have been started inside the replica, where no entrypoint runs. The init process is there because a command that is its container's first process never sees `SIGTERM` unless it handles it. |
+| **The replica stays the default.** | The container does not have the rest of the replica's filesystem, nor its processes. A socket under the replica's `/var/run` or `/tmp` is not there, and that is where `pg_dump` and `mysqldump` look unless they are told a host: tried against a real PostgreSQL, the documented `pg_dump -U postgres …` failed in the container and worked with `-h localhost`. Sharing the process namespace as well does not reach the socket (`/proc/1/root` is refused). A configuration that works today must go on working, so the application asks for the container, and its documentation says what to change. |
 | **Adoption writes records from files** (`POST /server/backups/adopt`): the run id from the path, the volumes from the names, the time from the newest file, the size from the stored size, with the trigger `adopted`. An encrypted file's plaintext size is computed, not read: the format adds a 33-byte header and 16 bytes per chunk. The ids the database knows are read before the destinations are listed, and the insert leaves an existing id alone. | A database restored from yesterday has forgotten today's backups, whose files sit under ids it will not hand out again. There is no manifest to read, and none is needed for what the API promises: `Content-Length` of a download is the plaintext size, which the size of the file determines. Reading the ids first means a backup pruned meanwhile is not adopted as a ghost, and one started meanwhile has a record the insert respects. What files cannot say is whether an application's backup was finished; the state's two files and an export's one are known, and a run that lacks one is reported instead of adopted. Owner and file names come from a bucket's keys, which anybody with the credentials can choose: they are checked before they can become a path. |
 | **No SDK for S3.** Put, get, list, delete and the multipart upload, path-style, signed with Signature Version 4 using the standard library alone, tested against the vectors AWS publishes, against a fake that verifies every signature and implements multipart, and against a real server — once with a file over 5 GB. | No dependency where the standard library will do, and a handful of signed requests are within its reach. Path-style addressing is what every S3-compatible service accepts; virtual-hosted buckets would need DNS the endpoint may not have. |
 | **Encryption is the agent's, not the bucket's**, and applies to the directory as well. | Server-side encryption protects against the provider's disks, not against whoever holds the bucket's credentials. Encrypting before the first write means one rule: without the passphrase, nothing the agent wrote can be read. |
@@ -665,7 +703,8 @@ key.
 ```text
 export.json                                  format, time, version; secrets, registry
                                              credentials and certificates; application names in order
-applications/<name>/app.json                 name, version, the spec in clear, stopped?, what follows
+applications/<name>/app.json                 name, version, the spec in clear, its references,
+                                             stopped?, what follows
 applications/<name>/image.tar.0000 …         `docker save` of a shipwick.local image
 applications/<name>/static.tar.0000 …        the folder, as PUT …/static takes it
 applications/<name>/volumes/<volume>.tar.0000 …   as GET …/volumes/:volume/archive answers it
@@ -1370,7 +1409,7 @@ close Docker client and database. A second signal kills immediately.
 | Limits | `resources.cpu` → `NanoCPUs`; `resources.memory` → `Memory`, with `MemorySwap` equal to it so the limit is a hard cap. |
 | Hardening | Never privileged; `no-new-privileges`; no host mounts (named volumes only); nothing from `deploy.yaml` ever runs on the server itself. |
 | Process | `entrypoint`, `command` and `user` go to Docker as `Entrypoint`, `Cmd` and `User`: argv as written, nothing split, joined or passed through a shell. Unset means the image's own. They change what runs inside the container, which the image always decided anyway; the container's boundaries are the same. |
-| Logs | `json-file` driver capped at 3 × 10 MB per container, so a chatty app cannot fill the disk. `logging` selects another driver, whose options reach the daemon as written; the caps stay for `json-file` and `local` unless the application sets its own, and a collector address must be `scheme://host:port` — a socket, or a certificate file, is a path on the server, and no application gets to name one. `shipwick logs` reads what the daemon keeps locally, which for a remote driver is its dual-logging cache. |
+| Logs | `json-file` driver capped at 3 × 10 MB per container, so a chatty app cannot fill the disk. `logging` selects another driver, whose options reach the daemon as written; the caps stay for `json-file` and `local` unless the application sets its own, and a collector address must be `scheme://host:port` — a socket, or a certificate file, is a path on the server, and no application gets to name one. `shipwick logs` reads what the daemon keeps locally, which for a remote driver is its dual-logging cache, and so does the log archive when a container ends. |
 | Job containers | `shipwick_<app>_job_<job>_<run id>`, e.g. `shipwick_my-api_job_nightly-report_42`; labels `com.shipwick.job` and `.run` instead of `.replica`. Same image, env, limits, networks and hardening as a replica; no volumes, no published ports, the image's entrypoint unless `entrypoint` overrides it, the job's command as the command. Removed when the run ends. See Jobs. |
 
 ## Storage
@@ -1388,9 +1427,14 @@ minute with requests: counts and a latency histogram), `job_runs` (one row
 per run of a hook, job or one-off command, with the tail of its output; the
 last 50 per job are kept), `secrets` (name, sealed value, timestamps),
 `registries` (registry, username, sealed password), `certificates`
-(hostname, chain, sealed key), `backup_runs` (one row per backup, with what
-was done with it since) and `backup_installation` (one row: the name this
-installation marks its bucket with).
+(hostname, chain, sealed key), `deployment_references` (for a deployment
+whose document referred to stored secrets: those values as the document
+wrote them, sealed; see [Configuration as the API](#configuration-as-the-api)),
+`backup_runs` (one row per backup, with what
+was done with it since), `backup_installation` (one row: the name this
+installation marks its bucket with) and `log_archives` (one row per ended
+run of a container whose output was kept; the lines are files, see
+[The log archive](#the-log-archive)).
 Migrations are an append-only list tracked in `PRAGMA user_version`.
 Timestamps are fixed-width UTC text, so they sort lexicographically.
 A static deployment records `static_digest`, `static_files` and `static_bytes`
@@ -1468,9 +1512,22 @@ daemon holds no registry credentials, every pull carries its own.
   401, 403, 404 or 500. `docker.pullDenied` therefore also reads the text,
   and the engine turns a refusal into one sentence that names
   `shipwick registry login <registry>`.
-- Credential helpers are not supported: a helper is a program
-  on the host that the Docker CLI executes. The agent's container does not
-  have it, and the agent executes nothing.
+- Credential helpers are not supported, and will not be: a helper is a
+  program on the host that the Docker CLI executes. The agent's container
+  does not have it, and the agent executes nothing. The daemon is no way
+  around that. It pulls with the credential the request carries: asked
+  through the Engine API without one, Docker 29 refused an image of a
+  registry that the CLI on the same machine was logged in to through a
+  `credsStore`, and pulled it when the request carried the credential. And
+  a `config.json` with a `credsStore` holds the registries' names without
+  their passwords, so there is nothing in it to read. What helpers are used
+  for in practice — Amazon ECR and Google Artifact Registry — is a token
+  that expires, and that is a matter of who renews it: `shipwick registry
+  login` reads a password from standard input, so the cloud's own CLI can
+  be piped into it wherever that CLI is signed in. Running a helper for the
+  operator, on their machine or in a job of the agent's, would add a
+  program and its cloud credentials to what Shipwick has to keep safe, for
+  one line of shell.
 
 **The key can be rotated while the agent runs** (`store/rotation.go`).
 
@@ -1600,15 +1657,51 @@ wrong. A test walks the route table and fails for an application route the
 prefix does not catch, and sends every `deploy` route a request for an
 application the token does not have.
 
+A route that takes a document and no name (`documentRoutes`: `POST
+/applications`, `POST /validate`) is a third kind, not an exception to the
+second. Before `authorize` runs, the name is read out of the body
+(`spec.DocumentName`: the top-level `name`, held to the pattern of a name,
+nothing else of the document judged) and becomes the request's `{name}`; the
+body is put back for the handler. From there the route is an application
+route: the same comparison, the same refusal, the same audit entry. A
+document whose name cannot be read is about no application, and a limited
+caller is refused as for an endpoint about none. The handler then insists
+that the document it parses has the name that was checked, so the check and
+the deployment cannot be about two different applications even if the two
+ways of reading a name ever disagreed. The same test sends each such route
+the document of another application, of the token's own, and documents
+without a name.
+
 **Expiry is checked after the token is known**, never instead: the answer
 `TOKEN_EXPIRED` goes only to a caller who presented the token itself, so it
 gives nothing to someone guessing, and it is neither counted by the rate
 limit nor subject to it — a CI job that keeps trying with last quarter's
 token must not lock the dashboard out, and must keep being told why it
 fails. An expired token stays in the table: deleting it would turn the clear
-answer into "invalid token". There is no renewal, for the reason there is no
-editing of a token's role: a token is a value someone holds, and what it may
-do should not change under them.
+answer into "invalid token".
+
+**A token's applications and its end can be changed; its role and its value
+cannot** (`PUT /tokens/:name`, `handlers_token_update.go`). 0.6 allowed
+neither, on the principle that what a value someone holds may do should not
+change under them. Two things spoke against keeping it whole. Widening a
+limit by one application meant a new value in every place the old one was
+stored, which is the work that makes people create tokens without a limit.
+And an end that cannot be moved has the same effect on ends: the pipeline
+that went red on its date gets a token that never expires. So both are
+editable, by `admin`, each change recorded with what was there before
+(`applications a -> a b`, `expires … -> …`) under the name of whoever made
+it. The role stays fixed because it is the one change that turns a token
+into a different kind of thing: `read` to `admin` by an edit is how a token
+handed out for looking ends up deleting. An end moves into the future only,
+also for a token that has expired — `TOKEN_EXPIRED` is answered from the
+row, so the next request with the old value simply works — and what that
+gives up is said in the handbook: the value that had until its date to leak
+has longer. The update reads the row, validates against the role it finds
+(`ValidateTokenApplications`, as creation does) and writes in one
+transaction; the store's `UpdateToken` writes the list and the end and
+nothing else, whatever its callback returns. Nothing is cached about a
+token between requests except when its use was last written down, so the
+change holds from the next request without anything to invalidate.
 
 ### The audit trail
 
@@ -1628,7 +1721,9 @@ the answer. A handler adds to it only where the path does not say what was
 acted on: the name and the permissions of a token being created, the options
 of an import. The body is never read for it, so a secret cannot get in by
 accident; a test sends every audited endpoint a body full of a marker and
-looks for it in the table.
+looks for it in the table. The one thing a body gives the trail is the name
+of the application a document is about, on the routes that have no name in
+their address, and only when it has the form of a name.
 
 The outcome is the HTTP answer's, which for a deployment means "accepted".
 How it went on is in the deployment's own record, and the entry names it;
@@ -1644,6 +1739,45 @@ Retention is a year and 100,000 entries, enforced in the transaction that
 writes an entry: two indexed deletes that almost always delete nothing. A
 separate pruning loop would be one more thing running for a table that
 changes when a person or a pipeline does something.
+
+**Searching.** `GET /audit` filters by application, actor, kind of actor,
+time, action and outcome. An action filter is an exact action or the start
+of a family up to its dot (`token.`), several of either; that is all the
+structure the action names have, and it spares a list of every action in
+every client. The filters become one `WHERE` clause (`AuditFilter.conditions`)
+with every value bound. There is no index by action: the table is bounded
+at 100,000 rows, and a filter that an index would serve is still ordered by
+id.
+
+**Whether there is more** is answered by reading one entry beyond the page
+and saying so next to `data` (`"more"`). A full page says nothing about the
+next one, and a client that guessed from it offered an empty page whenever
+the count came out even. The field sits beside `data` rather than in it so
+that a client from before reads the list as it always did; a client that
+finds no `more` is talking to an older agent, which is also how the CLI
+learns that its newer filters were ignored and refuses to show an
+unfiltered trail as if it were the answer.
+
+**Export** (`GET /audit/export`, `audit_search.go`) streams everything that
+matches as CSV or as one JSON object per line. The store has one connection
+to SQLite, so a cursor held open while a slow reader takes the response
+would stall every other request; the trail is read in pages of 500 by id
+instead (`EachAuditEntry`), each page a query that is over before its rows
+are written out. Memory is one page whatever the trail's size, and what is
+written during an export is newer than where it started and not part of
+it. A failure after the first byte is said in the trailer the server export
+uses, and the entry is recorded as failed. The export is audited like the
+downloads of volumes and backups — a `GET` that hands out what only admin
+may have — with the format, the filters and the count.
+
+**CSV cells are made safe for spreadsheets at the export, not in the
+trail.** The trail records what was asked, including the name in a path
+that was refused, and a name can begin with `=`. A spreadsheet runs such a
+cell as a formula. `api.SpreadsheetSafe` puts an apostrophe before a cell
+that begins with `=`, `+`, `-`, `@`, a tab or a carriage return; it is
+applied to every text column of the CSV and to nothing else, because the
+JSON export and the API are read by programs, for which the apostrophe
+would be a corruption.
 
 ### People: signing in with an OpenID Connect provider
 
@@ -1786,6 +1920,67 @@ no authenticated request for the wrapper to record: the person the provider
 vouched for is the actor, admitted or not. A sign-in that failed before
 that has no actor and goes to the log.
 
+**The name is a claim of the operator's choice** (`SHIPWICK_OIDC_NAME_CLAIM`,
+default `email`). Everything downstream of the sign-in knows a person by one
+string — rules, sessions, the audit trail, `by` — so the claim is chosen in
+one place and nothing else changes. What changes is what the string may be.
+An address was validated as one; a `sub` or a user name is whatever the
+provider issues, so `api.ValidatePersonName` bounds it to 254 characters of
+letters, digits and `. _ % + ' @ | : = # ~ -`: enough for Entra's base64url
+identifiers and Auth0's `provider|id`, and nothing that breaks a log line
+or a table. A value outside that is refused and not repeated. Only the
+`email` claim is brought to lowercase; another claim is kept as issued,
+because subject identifiers are case-sensitive by specification and
+lowering them could make two people one. `email_verified` is consulted for
+the `email` claim alone.
+
+Rules follow from that. `email` and `domain` rules match a name that reads
+as an address, compared in lowercase — which keeps every 0.6 rule working
+and makes them useful with `upn`. A fourth kind, `name`, matches the string
+exactly and decides first. It exists because the alternative, letting an
+`email` rule hold a non-address, would have made one kind mean two
+comparisons depending on configuration the rule cannot see. Rules can be
+written before a provider is configured, so the agent accepts every kind
+whatever the claim is, and the CLI says when a rule cannot match under the
+claim in use.
+
+A session records the claim its name was read from (migration 21), and
+`identifySession` ends a session whose claim is no longer the agent's: its
+name is not the name the rules are now written for. Sessions from 0.6 are
+`email` by the column's default and carry on.
+
+**Entra's multi-tenant issuers are accepted as far as they can be checked**
+(`oidc/tenants.go`). The discovery document at `…/organizations/v2.0` names
+`https://login.microsoftonline.com/{tenantid}/v2.0` as its issuer, which
+the rule "the document must name the configured issuer" refuses, rightly:
+a document that names someone else describes someone else's keys. The
+exception is as narrow as it can be made. The configured issuer's path must
+be `/organizations/v2.0` or `/common/v2.0`, and the document's issuer must
+be that same origin with `{tenantid}` in the first segment — computed from
+the configuration and compared whole, not "any issuer containing a
+placeholder". A token's `iss` must then equal the template with the token's
+own `tid` substituted, and `tid` must be a GUID, so the substitution cannot
+smuggle a path. Where a key in the key set names the issuer it signs for,
+as Entra's do, the token must be from that issuer; that keeps the key of
+the personal-accounts tenant, which `common` publishes, from signing for a
+company. The keys still come from the configured origin over TLS, which is
+what made the single-issuer case trustworthy too.
+
+None of that says which tenants should get in, and every Microsoft
+customer is one. `SHIPWICK_OIDC_TENANTS` is therefore required with such an
+issuer, at start, and checked after the nonce so that only the sign-in it
+belongs to learns that a tenant is refused. `*` is accepted only with the
+name claim `sub`: addresses and user names are chosen by each tenant's
+administrators, and with every tenant admitted anyone could name an account
+after the subject of a rule. For the same reason the groups claim is
+dropped when every tenant is admitted. With a list, the tenants on it are
+trusted as a single tenant is. The tenant is stored with the session, and
+a session whose tenant has left the list ends with its next request, like
+one whose rule was removed. Rules per tenant were considered and left out:
+a list in the environment answers "who may sign in at all", the rules
+answer "as what", and a rule kind that mixed both would need the tenant in
+every other rule to be safe.
+
 Rules, sessions and the audit trail are the server's own and are not part of
 an export, like tokens.
 
@@ -1834,6 +2029,38 @@ not make it fail, and its answer is advice — `deploy` checks again under the
 lock, which is the answer that counts. It exists to be asked before the CLI
 builds an image and uploads it, so it is lenient exactly there: `build`
 without `image` passes, and a static application names no upload.
+
+**The document, given back.** `GET /applications/:name/config` writes the
+active deployment as a deploy.yaml (`spec.Document`), so that a configuration
+can be edited where it is shown and a lost file can be had again. The record
+cannot simply be turned around, because it holds values where the document
+had references. Three decisions follow from that:
+
+| Decision | Why |
+|---|---|
+| **The references are kept next to the record, not in it**: a table of their own, `deployment_references`, one sealed row per deployment that had any — the text of each secret value as the document wrote it, placeholders in place. A redeploy and a rollback copy the row of the deployment they re-use; an export carries it in `app.json`, and an import checks it like the spec. | The record stays what it is, the values the containers were started with, and nothing that reads a spec learns a new field: `spec.App` is what the API returns, what an export carries and what `spec.Validate` rewrites, and a field of it that is not a key of deploy.yaml would have to be explained to each. A row of its own is written in the transaction that writes the record, goes when the record goes, and is one more entry in the list a key rotation walks. It is sealed because the text around a reference is whatever the document said there. |
+| **A value that arrived as a literal is not returned, and says so.** The document has `"********"` in its place, a comment on the line, and the answer lists the fields. | The agent sees no difference between a value typed into the file and one the CLI filled in from the environment: both arrive as text. It cannot tell a password from a log level, so it hands out neither; guessing would be right until the day it mattered. A document with fewer masks is one click away for the user — store the value as a secret and refer to it. |
+| **The mask is refused wherever a document arrives** (`resolveSecrets`, which `Deploy`, `DeployStatic` and `Validate` share), by exact comparison and before any secret is filled in. | A document that can be fetched will be sent back, and a mask deployed as a value takes an application down with a password of eight asterisks. Refusing it in the one function every document passes covers the document of this endpoint, a spec copied out of `GET /applications/:name`, and whatever else is pasted. The price is that `********` cannot be an env value; a stored secret may still hold it, since the comparison is with what the document wrote. |
+
+It takes the `deploy` role, not `read`. The text around a reference —
+`postgres://app:…@db:5432/app` — is more than `GET /applications/:name` shows,
+and a value in which the CLI filled in one placeholder and left another to the
+server arrives with the first as a literal in that text. Whoever may deploy an
+application can read its whole environment with `shipwick run`, so the
+document tells them nothing new; a reader it would.
+
+The document comes in two spellings because two programs read it. The agent
+fills in `${NAME}` in secret values only, the CLI everywhere, and unescapes
+`$${NAME}` everywhere else. A literal `${NAME}` in a `command` is therefore
+written as it is for `POST /applications` and as `$${NAME}` for a file
+(`?escape=true`, which `shipwick config` asks for). The agent does the
+escaping rather than the CLI because it wrote the document and knows which
+scalars are which.
+
+`POST /applications` and `POST /validate` take a document without a name in
+the address, for a client that has a document and no parser for it. They are
+the handlers of `deploy` and `validate` behind a different way of finding the
+name: see [Who may do what](#who-may-do-what).
 
 ## Installing from the laptop
 
@@ -1944,11 +2171,117 @@ Encrypt and ZeroSSL for anything.
 command of the CLI rather than a script because the machine with the
 connection is a laptop, often Windows. It verifies the release's files as
 `upgrade` does and calls `docker pull --platform` and `docker save`, as an
-argv. The images are the ones the registry serves under the release's tags —
-the trust an installation over the network has — and the archive's checksum,
-written into the bundle, guards the copy, not the origin. The installer is
+argv. The images are pulled under the release's tags and held against the
+digests the release published, as described below; the archive's checksum,
+written into the bundle, guards the copy. The installer is
 the same script in both modes: with a bundle, `fetch_release_asset` copies
 instead of downloading and verifies against the bundle's `checksums.txt`, and
 `docker load` stands where `docker compose pull` was. The release publishes
 `install.sh` for this, so that a bundle holds the installer of its own
 release and not that of `main`.
+
+**The images of a bundle are proven by the release, not by the registry.**
+The release publishes `image-digests.txt`: for each of the three images the
+digest of the manifest list its tag points at and, for `linux/amd64` and
+`linux/arm64`, the digest of the platform's manifest and of its
+configuration. The file is written from the registry after the push
+(`scripts/image-digests.sh`, `docker buildx imagetools inspect`), not from
+the build's output: it says what a pull is given. It is added to
+`checksums.txt` in the job that publishes, the one file of a release that
+cannot exist before its images do, so the chain is one: `checksums.txt` →
+`image-digests.txt` → manifest or configuration → layers, each link a
+SHA-256.
+
+Three digests for an image, because what can be compared depends on who holds
+it. `docker save` writes what the daemon has. With the containerd image
+store that is what the registry served — the platform's manifest, the
+configuration, the compressed layers — and the published manifest digest
+settles it. With the classic store the layers are unpacked and the manifest
+is one Docker writes on the spot, so no digest of the registry's survives
+except the configuration's; but the configuration lists every layer by the
+digest of its unpacked content, which is what the archive then holds. The
+CLI reads the archive itself rather than asking the daemon (`docker image
+inspect`): it hashes every file, requires the published configuration, then
+either the published manifest with all its layers or every layer the
+configuration lists, and requires that `manifest.json` and `index.json` —
+the two tables a `docker load` goes by, depending on the store — name that
+image and no other by the release's tag. Pulling by digest would prove the
+pull and not the bytes that end up in the bundle.
+
+On the server there is no Go, only `sh` and Docker. The installer loads the
+archive and compares each image's ID with the same file: the classic store's
+ID is the configuration's digest, the containerd store's the digest of the
+manifest it loaded by. That manifest is the registry's unless the bundle was
+made with the classic store; then the installer reads it out of the archive
+by its digest and checks which configuration it names. An image that fails
+is untagged again before the installer stops. All four combinations of
+stores were tried with the images of 0.6.0. The check runs after `docker
+load` because nothing short of loading says what the daemon will make of an
+archive, and before the compose file is replaced because that is the point
+of no return.
+
+What this does not do: a bundle brings its own `checksums.txt`, so on the
+server the checks catch damage and mix-ups, not a bundle rebuilt with intent.
+Both ends print that file's SHA-256 to compare by eye. `--no-pull` proves
+nothing, by definition, and leaves `image-digests.txt` out of the bundle,
+which is how the installer knows to say so.
+
+## Releases and packages
+
+**The agent asks about new releases; the dashboard does not.** The notice
+belongs in the dashboard and in `shipwick server status`, and neither should
+need a way out of its own: the dashboard's server may be a container behind
+the same firewall, the CLI a laptop on another network, and the agent is the
+one place that already has the operator's proxy and certificate authorities
+(`pkg/outbound`). So the agent asks, and `GET /server` carries the answer.
+
+It asks the website's `/releases/latest`, whose redirect names the release,
+rather than the API: no limit of requests per address, which servers behind
+one address would share, and no body to parse. The request is a `HEAD` with
+the `User-Agent` `shipwick-agent` and nothing else. A version in it would
+tell GitHub which servers run what; nobody on this side reads GitHub's logs,
+so it would buy nothing. Once a day, counted from the last attempt whether it
+was answered or not, and the attempt is kept in a file in the data directory
+so that an agent that restarts in a loop asks once. Failure is a debug line:
+a server without a way to GitHub is a normal server. There is no migration
+for this: one small JSON file that may be deleted at any time is not worth a
+table.
+
+**A package of the agent, and what it cannot be.** The agent is one static
+binary and packages as one: binary, unit, settings file, data directory. The
+rest of an installation does not. Caddy must stand on the two Docker networks
+to find replicas by name (`Backends` are names Docker's DNS resolves), its
+container is where static applications are copied to and its output is where
+requests are counted, and the agent finds it by its compose labels; a Caddy
+of the host can do none of that, and making it possible would mean a second
+way to route. The dashboard needs Node. So the package ships a compose file
+for those two and says so, instead of pretending to be a whole installation
+without containers.
+
+Three things follow from the agent being outside while the proxy is inside.
+The admin socket is shared through a directory of the host mounted at the
+same path in the container, because the agent repeats the admin address in
+every configuration it loads and Caddy binds what it is told. The API must
+listen where a container can reach it — the Docker bridge's address — when
+it is to be served at a hostname or used by the dashboard; loopback stays the
+default, and the settings file says which line to change. And the agent
+reads certificates at `127.0.0.1:443`, the proxy's published port, not at
+`caddy:443`. None of this needed a change to the agent.
+
+It runs as root. A user of its own would need the Docker socket, which is
+root by another name, and the unit would then promise an isolation that is
+not there. The unit removes what root does not need instead
+(`NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome=read-only`,
+`PrivateTmp`). The package starts and enables nothing on installation — the
+agent needs Docker and settings, and starting what was just installed would
+start an agent that fails or, worse, one nobody configured — and restarts an
+agent that runs on upgrade. The settings file is not a file of the package
+but written once by its script, with a generated token and mode `0600`: a
+package manager must never have an opinion about a file that holds a
+credential.
+
+The packages are built from the compiled binary by `dpkg-deb` and
+`rpmbuild` in containers (`scripts/build-packages.sh`), with no packaging
+tool as a dependency of the repository and the two maintainer scripts shared
+between both formats. The files travel in and out as a tar stream, so the
+build needs no mount and runs the same on a developer's Windows machine.

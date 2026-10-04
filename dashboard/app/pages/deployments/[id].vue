@@ -4,6 +4,7 @@ import { deriveProgress } from '~/utils/deploymentProgress'
 import { durationBetween, formatAbsoluteUtc, formatBytes, formatCores, formatDuration } from '~/utils/format'
 import { describeBackupPlan } from '~/utils/backups'
 import { tidyDuration } from '~/utils/jobs'
+import { archiveSupported, logsPath } from '~/utils/logArchive'
 import { deniedRegistry } from '~/utils/registries'
 import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatHostname, formatPathRedirect, formatPublish, hostnamesOf } from '~/utils/spec'
 import { deploymentStatusDisplay } from '~/utils/status'
@@ -51,6 +52,16 @@ const proxyLines = computed(() => {
   for (const account of s.proxy?.basic_auth ?? []) lines.push({ label: 'Account', value: `${account.username} for ${account.path || s.path || 'every path'}` })
   for (const redirect of s.proxy?.redirects ?? []) lines.push({ label: 'Redirect', value: formatPathRedirect(redirect) })
   return lines
+})
+/**
+ * A deployment that failed took its replicas with it; from 0.7 on the agent
+ * keeps what they wrote. The way to it, for a deployment that had replicas.
+ */
+const server = useServerInfo()
+const replicaOutput = computed(() => {
+  const dep = d.value
+  if (!dep || !dep.completed_at || dep.static || !archiveSupported(server.data.value)) return null
+  return dep.status === 'FAILED' || dep.status === 'ROLLED_BACK' ? logsPath(dep.application, { view: 'archive', deployment: dep.id }) : null
 })
 /** The registry a refused pull names: the way to the form that stores a credential for it. */
 const registry = computed(() => deniedRegistry(d.value?.error ?? ''))
@@ -128,7 +139,7 @@ const crumbs = computed(() => [
         </EmptyState>
       </div>
 
-      <div v-else-if="deployment.loading.value && !d" class="space-y-3" aria-busy="true" aria-label="Loading">
+      <div v-else-if="deployment.loading.value && !d" class="space-y-3" role="progressbar" aria-busy="true" aria-label="Loading">
         <span class="skeleton h-6 w-48" />
         <span class="skeleton w-32" />
         <span class="skeleton w-72" />
@@ -169,6 +180,10 @@ const crumbs = computed(() => [
           <p v-if="d.error" class="mt-3 flex items-start gap-2 rounded-sm border border-danger-line bg-danger-bg px-3 py-2 font-medium text-danger">
             <UiIcon name="x-circle" :size="14" class="mt-[3px]" />
             <span class="min-w-0 break-words">{{ d.error }}</span>
+          </p>
+          <p v-if="replicaOutput" class="mt-1.5 text-fg-muted">
+            What its containers wrote before they were removed is kept:
+            <NuxtLink :to="replicaOutput" class="link">Output of its replicas</NuxtLink>.
           </p>
           <p v-if="registry" class="mt-1.5 text-fg-muted">
             If the image is private, the server needs a credential for <span class="mono text-fg">{{ registry }}</span>:
@@ -331,7 +346,7 @@ const crumbs = computed(() => [
             </div>
             <div v-if="proxyLines.length > 0" class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
-                Proxy <span class="normal-case tracking-normal text-fg-faint">passwords are never returned by the agent</span>
+                Proxy <span class="normal-case tracking-normal text-fg-subtle">passwords are never returned by the agent</span>
               </dt>
               <dd class="mt-0.5 space-y-0.5">
                 <div v-for="line in proxyLines" :key="`${line.label}/${line.value}`" class="flex gap-2">
@@ -377,7 +392,7 @@ const crumbs = computed(() => [
             </div>
             <div v-if="d.spec.jobs?.length" class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
-                Jobs <span class="normal-case tracking-normal text-fg-faint">schedules in UTC</span>
+                Jobs <span class="normal-case tracking-normal text-fg-subtle">schedules in UTC</span>
               </dt>
               <dd class="mt-0.5 space-y-0.5">
                 <div v-for="job in d.spec.jobs" :key="job.name" class="mono break-all">
@@ -406,13 +421,13 @@ const crumbs = computed(() => [
             </div>
             <div v-if="!d.spec.static" class="bg-bg px-4 py-2.5 sm:col-span-2 lg:col-span-4">
               <dt class="label">
-                Environment <span class="normal-case tracking-normal text-fg-faint">values are never returned by the agent</span>
+                Environment <span class="normal-case tracking-normal text-fg-subtle">values are never returned by the agent</span>
               </dt>
               <dd class="mt-1.5">
                 <ul v-if="envNames.length > 0" class="grid gap-x-8 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
                   <li v-for="key in envNames" :key="key" class="mono flex items-baseline justify-between gap-3 border-b border-dotted border-line pb-1">
                     <span class="min-w-0 truncate" :title="key">{{ key }}</span>
-                    <span class="select-none text-fg-faint" aria-label="masked">••••••••</span>
+                    <span class="select-none text-fg-subtle"><span aria-hidden="true">••••••••</span><span class="sr-only">masked</span></span>
                   </li>
                 </ul>
                 <span v-else class="mono text-fg-muted">No variables</span>

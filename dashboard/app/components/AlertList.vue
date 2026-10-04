@@ -25,7 +25,6 @@ const FRAME = { warn: 'border-warn-line bg-warn-bg text-warn', danger: 'border-d
       :key="`${alert.kind}/${alert.application}/${alert.replica}`"
       class="flex flex-wrap items-start gap-x-3 gap-y-1.5 rounded-sm border px-3 py-2 text-xs"
       :class="FRAME[alertTone(alert)]"
-      role="status"
     >
       <UiIcon :name="alert.severity === 'critical' ? 'x-circle' : 'alert'" :size="14" class="mt-px" />
       <div class="min-w-0 flex-1 basis-64">
@@ -33,7 +32,7 @@ const FRAME = { warn: 'border-warn-line bg-warn-bg text-warn', danger: 'border-d
           <span class="font-medium">{{ alert.severity === 'critical' ? 'Critical' : 'Warning' }} · {{ alertKindLabel(alert) }}</span>
           <NuxtLink v-if="props.linkApplication && alert.application" :to="`/applications/${alert.application}`" class="mono underline underline-offset-2">{{ alertSubject(alert) }}</NuxtLink>
           <span v-else class="mono">{{ alertSubject(alert) }}</span>
-          <span class="opacity-80">since <TimeAgo :time="alert.since" /></span>
+          <span>since <TimeAgo :time="alert.since" /></span>
         </p>
         <p class="mt-0.5 break-words">
           {{ alert.message }}

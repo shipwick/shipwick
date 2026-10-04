@@ -37,7 +37,7 @@ function open(d: Deployment, event: MouseEvent) {
 </script>
 
 <template>
-  <table class="data-table stack">
+  <table class="data-table stack" aria-label="Deployments">
     <thead>
       <tr>
         <th class="w-16">
@@ -63,18 +63,18 @@ function open(d: Deployment, event: MouseEvent) {
       <tr v-for="d in props.deployments" :key="d.id" class="clickable" @click="open(d, $event)">
         <td data-primary>
           <NuxtLink :to="`/deployments/${d.id}`" class="mono link" :aria-label="`Deployment ${d.sequence} of ${d.application}`">#{{ d.sequence }}</NuxtLink>
-          <span v-if="props.showApplication" class="mono ml-2 sm:hidden">{{ d.application }}</span>
+          <span v-if="props.showApplication" class="mono ml-2 rows:hidden">{{ d.application }}</span>
         </td>
-        <td v-if="props.showApplication" class="max-sm:!hidden">
+        <td v-if="props.showApplication" class="cards:!hidden">
           <NuxtLink :to="`/applications/${d.application}`" class="mono hover:underline">{{ d.application }}</NuxtLink>
         </td>
         <td data-label="Version" class="mono">
           {{ d.version || '—' }}
         </td>
-        <td :data-label="hasOrigin(d) ? 'Origin' : undefined" :class="hasOrigin(d) ? '' : 'max-sm:!hidden'">
+        <td :data-label="hasOrigin(d) ? 'Origin' : undefined" :class="hasOrigin(d) ? '' : 'cards:!hidden'">
           <DeploymentOrigin :deployment="d" :known="props.known ?? props.deployments" />
         </td>
-        <td v-if="anyBy" :data-label="d.by ? 'By' : undefined" class="mono text-fg-muted" :class="d.by ? '' : 'max-sm:!hidden'">
+        <td v-if="anyBy" :data-label="d.by ? 'By' : undefined" class="mono text-fg-muted" :class="d.by ? '' : 'cards:!hidden'">
           {{ d.by ?? '' }}
         </td>
         <td data-label="Status">
@@ -86,8 +86,8 @@ function open(d: Deployment, event: MouseEvent) {
         <td data-label="Duration" class="mono right text-fg-muted">
           {{ duration(d) }}
         </td>
-        <td :data-label="d.error ? 'Error' : undefined" class="max-w-0 text-fg-muted max-sm:max-w-none" :class="d.error ? '' : 'max-sm:!hidden'">
-          <span v-if="d.error" class="block truncate text-danger max-sm:whitespace-normal" :title="d.error">{{ d.error }}</span>
+        <td :data-label="d.error ? 'Error' : undefined" class="max-w-0 text-fg-muted cards:max-w-none" :class="d.error ? '' : 'cards:!hidden'">
+          <span v-if="d.error" class="block truncate text-danger cards:whitespace-normal" :title="d.error">{{ d.error }}</span>
         </td>
       </tr>
     </tbody>

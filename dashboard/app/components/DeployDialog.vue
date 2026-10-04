@@ -90,8 +90,9 @@ async function submit() {
           autofocus
           required
           :aria-invalid="error?.code === 'INVALID_CONFIG' || undefined"
+          :aria-describedby="error ? 'deploy-image-help deploy-error' : 'deploy-image-help'"
         >
-        <p class="mt-1.5 text-xs text-fg-muted">
+        <p id="deploy-image-help" class="mt-1.5 text-xs text-fg-muted">
           <template v-if="unchanged">
             Re-deploys <span class="mono text-fg">{{ props.application.version || 'the current image' }}</span> with the current configuration: the image is pulled again and all replicas are replaced.
           </template>
@@ -103,7 +104,7 @@ async function submit() {
       <p v-if="!isStatic" class="text-xs text-fg-muted">
         The running version keeps serving until the new replicas are healthy. To change anything other than the image, use <span class="mono text-fg">shipwick deploy</span><template v-if="!buildOrigin">, or <NuxtLink :to="{ path: '/deploy', query: { application: props.application.name } }" class="link" @click="emit('close')">paste the changed deploy.yaml</NuxtLink></template>.
       </p>
-      <InlineError :error="error" />
+      <InlineError id="deploy-error" :error="error" />
     </form>
     <template #footer>
       <UiButton :disabled="pending" @click="emit('close')">

@@ -124,7 +124,7 @@ function closeRemove() {
             Public images need none. For a private image, log the server in to its registry below<template v-if="!mayAdmin"> with an admin token</template>, or run <span class="mono text-fg">shipwick registry login ghcr.io --username NAME</span>.
           </EmptyState>
           <div v-else class="overflow-x-auto">
-            <table class="data-table stack">
+            <table class="data-table stack" aria-label="Registries">
               <thead>
                 <tr>
                   <th>Registry</th>
@@ -152,7 +152,7 @@ function closeRemove() {
                     <span v-else title="Never replaced since it was stored">never</span>
                   </td>
                   <td v-if="mayAdmin" class="right">
-                    <UiButton variant="danger" size="sm" @click="removing = r">
+                    <UiButton variant="danger" size="sm" :aria-label="`Log out of ${r.registry}`" @click="removing = r">
                       Log out
                     </UiButton>
                   </td>

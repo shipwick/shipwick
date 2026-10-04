@@ -24,6 +24,9 @@ type route struct {
 	role   api.Role
 	// application is set for the endpoints under /applications/{name}.
 	application bool
+	// document is set for the endpoints that take a deploy.yaml and act on
+	// the application it names: see documentRoutes.
+	document bool
 	// audit is nil for an endpoint that changes nothing.
 	audit *auditedRoute
 }
@@ -32,6 +35,7 @@ func newRoute(pattern string, role api.Role) route {
 	method, path, _ := strings.Cut(pattern, " ")
 	rt := route{method: method, path: path, role: role}
 	rt.application = path == applicationPrefix || strings.HasPrefix(path, applicationPrefix+"/")
+	rt.document = documentRoutes[pattern]
 	if a, ok := auditedRoutes[pattern]; ok {
 		rt.audit = &a
 	}
@@ -53,7 +57,10 @@ type refusal struct {
 // checked against the name in the path — which is also the name of an
 // application a deployment would create — and an endpoint that is not about
 // one application is refused, because nothing says which of them it would
-// touch. Reading is never limited, and neither is admin.
+// touch. An endpoint that takes a document is about the application the
+// document names (see documentRoutes), and is checked against that name; a
+// document that names none is refused like an endpoint about none. Reading
+// is never limited, and neither is admin.
 func authorize(who api.TokenIdentity, rt route, r *http.Request) *refusal {
 	if !who.Role.Covers(rt.role) {
 		return &refusal{api.CodeForbidden, forbiddenMessage(who, rt.role), map[string]any{"role": who.Role, "required": rt.role}}
@@ -62,10 +69,13 @@ func authorize(who api.TokenIdentity, rt route, r *http.Request) *refusal {
 		return nil
 	}
 	limit := "this " + credential(who) + " is limited to " + englishList(who.Applications)
-	if !rt.application {
+	if !rt.application && !rt.document {
 		return &refusal{api.CodeTokenLimited, limit + ", and this is not about one application", map[string]any{"applications": who.Applications}}
 	}
 	name := r.PathValue("name")
+	if rt.document && name == "" {
+		return &refusal{api.CodeTokenLimited, limit + ", and the document does not name an application", map[string]any{"applications": who.Applications}}
+	}
 	if who.Allows(name) {
 		return nil
 	}
@@ -77,6 +87,9 @@ func authorize(who api.TokenIdentity, rt route, r *http.Request) *refusal {
 // changes something — a refusal included — and handed to its handler with
 // the caller in the context.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, rt route, who api.TokenIdentity, next http.Handler) {
+	if rt.document {
+		nameDocument(r)
+	}
 	ctx := deploy.WithActor(context.WithValue(r.Context(), principalKey{}, who), who.Name)
 	if rt.audit != nil {
 		rec := s.beginAudit(w, r, rt, who)

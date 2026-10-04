@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Import, ImportedApplication, Standby } from '../app/types/api'
 import { importLabel } from '../app/utils/deployments'
-import { PROMOTE_WORD, describePull, importOutcome, importProgress, importStored, importedDisplay, isStandby, promotedDisplay, recordValue } from '../app/utils/transfer'
+import { MIN_PASSPHRASE_LENGTH, OVERWRITE_WORD, PROMOTE_WORD, describePull, encodePassphrase, exportBase, importOutcome, importProgress, importStored, importedDisplay, isStandby, looksLikeExport, passphraseProblem, passphraseReady, promotedDisplay, recordValue } from '../app/utils/transfer'
 
 const now = Date.parse('2026-03-01T04:30:00Z')
 
@@ -94,6 +94,50 @@ describe('the standby', () => {
 
   it('is confirmed with the word the CLI asks for', () => {
     expect(PROMOTE_WORD).toBe('promote')
+  })
+})
+
+describe('the passphrase of an export', () => {
+  it('must be twelve characters, typed twice the same', () => {
+    expect(MIN_PASSPHRASE_LENGTH).toBe(12)
+    expect(passphraseReady('correct horse', 'correct horse')).toBe(true)
+    expect(passphraseReady('correct horse', 'correct hors')).toBe(false)
+    expect(passphraseReady('short', 'short')).toBe(false)
+    expect(passphraseReady('', '')).toBe(false)
+  })
+
+  it('says what is wrong while it is typed, and nothing before', () => {
+    expect(passphraseProblem('', '')).toBe('')
+    expect(passphraseProblem('short', '')).toBe('At least 12 characters: it is all that protects every secret of the server.')
+    expect(passphraseProblem('correct horse', '')).toBe('')
+    expect(passphraseProblem('correct horse', 'correct hors')).toBe('The two passphrases differ.')
+    expect(passphraseProblem('correct horse', 'correct horse')).toBe('')
+  })
+
+  it('travels base64-encoded, as the bytes of its UTF-8 text', () => {
+    expect(encodePassphrase('correct horse battery')).toBe('Y29ycmVjdCBob3JzZSBiYXR0ZXJ5')
+    expect(encodePassphrase('şifre—ünïcödé')).toBe(Buffer.from('şifre—ünïcödé', 'utf8').toString('base64'))
+  })
+})
+
+describe('an export file', () => {
+  const bytes = (text: string) => new TextEncoder().encode(text)
+
+  it('starts like one, or is refused before it is uploaded', () => {
+    expect(looksLikeExport(bytes('SWBACKUP\u0001rest'))).toBe(true)
+    expect(looksLikeExport(bytes('SWBACKUP'))).toBe(true)
+    expect(looksLikeExport(bytes('SWBACKU'))).toBe(false)
+    expect(looksLikeExport(bytes('PK\u0003\u0004zipfile'))).toBe(false)
+    expect(looksLikeExport(new Uint8Array())).toBe(false)
+  })
+
+  it('is fetched next to the proxy to the same agent', () => {
+    expect(exportBase('/api/agent')).toBe('/api/export')
+    expect(exportBase('/api/servers/staging/agent')).toBe('/api/servers/staging/export')
+  })
+
+  it('is replaced over what exists only after the word was typed', () => {
+    expect(OVERWRITE_WORD).toBe('overwrite')
   })
 })
 

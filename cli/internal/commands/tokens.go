@@ -30,13 +30,14 @@ deploy token and keep admin tokens for people. Managing tokens needs admin.
 A deploy token can be limited to applications with --app: it deploys, stops
 and runs commands in those, reads everything like any token, and is refused
 whatever is not about one of its applications. A token can be given an end
-with --expires; from then on it is refused, and says that it expired.
+with --expires; from then on it is refused, and says that it expired. Both
+can be changed later with "shipwick token update"; the role cannot.
 
 The token the agent is configured with (SHIPWICK_AGENT_TOKEN, or the one it
 generated on first start) is "root": admin, not listed here, not revocable
 here — change it on the agent.`,
 	}
-	token.AddCommand(c.tokenCreateCommand(), c.tokenListCommand(), c.tokenRevokeCommand())
+	token.AddCommand(c.tokenCreateCommand(), c.tokenListCommand(), c.tokenRevokeCommand(), c.tokenUpdateCommand())
 	return []*cobra.Command{token}
 }
 
@@ -162,7 +163,7 @@ func (c *cli) tokenListCommand() *cobra.Command {
 			c.ui.Table([]string{"NAME", "ROLE", "APPLICATIONS", "EXPIRES", "CREATED", "LAST USED"}, rows)
 			if len(lapsing) > 0 {
 				c.ui.Println()
-				c.ui.Println("Expired, or expiring within 14 days: " + strings.Join(lapsing, ", ") + ". A token cannot be extended: create a new one, hand it over, then revoke the old one.")
+				c.ui.Println("Expired, or expiring within 14 days: " + strings.Join(lapsing, ", ") + ". Move an end with: shipwick token update <name> --expires 90d")
 			}
 			return nil
 		},

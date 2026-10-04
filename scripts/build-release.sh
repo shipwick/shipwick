@@ -2,6 +2,8 @@
 # Builds the files attached to a GitHub release into ./dist:
 #
 #   shipwick_<os>_<arch>[.exe]   the CLI, for every supported platform
+#   shipwick-agent_<arch>.deb     the agent as a plain binary with a systemd unit,
+#   shipwick-agent_<arch>.rpm     for amd64 and arm64 (scripts/build-packages.sh)
 #   compose.production.yml        with the three images pinned to this version
 #   install.sh                    the installer as it was when the release was cut
 #   checksums.txt                 SHA-256 of all of the above
@@ -9,7 +11,12 @@
 #   sh scripts/build-release.sh v0.1.0
 #
 # The release workflow runs exactly this; run it yourself to see what a release
-# would contain. The names are a contract with scripts/install.sh.
+# would contain. The names are a contract with scripts/install.sh. The packages
+# are put together in containers: it needs Docker as well as Go.
+#
+# image-digests.txt, the digests of the release's images, is not written here:
+# the images do not exist yet. The release workflow adds it, and its line in
+# checksums.txt, once they are pushed (scripts/image-digests.sh).
 
 set -eu
 
@@ -25,7 +32,7 @@ cd "$(dirname "$0")/.."
 rm -rf dist
 mkdir dist
 
-for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
     os="${target%/*}"
     arch="${target#*/}"
     out="dist/shipwick_${os}_${arch}"
@@ -53,6 +60,8 @@ echo "pinned images to $IMAGE_TAG in dist/compose.production.yml"
 # `shipwick server bundle` puts the installer in the bundle it makes for a
 # server with no connection, and verifies it like every other file here.
 cp scripts/install.sh dist/install.sh
+
+sh scripts/build-packages.sh "$VERSION"
 
 cd dist
 if command -v sha256sum >/dev/null 2>&1; then

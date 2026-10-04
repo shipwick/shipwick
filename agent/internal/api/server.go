@@ -101,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	s.prometheusRoutes(routes)
 	s.exportRoutes(routes)
 	s.auditRoutes(routes)
+	s.configRoutes(routes)
+	s.logRoutes(routes)
 	s.signInRoutes(mux, routes)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -261,6 +263,7 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 	var badCertificate *deploy.InvalidCertificateError
 	var wildcard *deploy.WildcardError
 	var unusableSecret *deploy.UnusableSecretError
+	var maskedValues *deploy.MaskedValuesError
 	switch {
 	case errors.As(err, &conflict):
 		// Shaped like a validation error, because to the user it is one: a
@@ -324,6 +327,8 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": wildcard.Fields()})
 	case errors.Is(err, deploy.ErrTrafficUnavailable):
 		writeError(w, http.StatusConflict, api.CodeTrafficUnavailable, err.Error(), nil)
+	case errors.As(err, &maskedValues):
+		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": maskedValues.Fields()})
 	default:
 		// Callers are authenticated operators, so the cause is more useful
 		// to them than an opaque message. Errors never contain env values.

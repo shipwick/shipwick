@@ -79,6 +79,8 @@ type bundleDocker struct {
 	// oldSave makes it a Docker from before `save --platform`.
 	oldSave bool
 	fail    string // "pull" or "save": that command fails
+	// saved is the archive save writes; nil: a line that names the images.
+	saved []byte
 }
 
 func (d *bundleDocker) run(_ context.Context, _ string, argv []string, out io.Writer) error {
@@ -96,6 +98,9 @@ func (d *bundleDocker) run(_ context.Context, _ string, argv []string, out io.Wr
 			return errors.New("exit status 125")
 		}
 		if arg == "--output" {
+			if d.saved != nil {
+				return os.WriteFile(argv[i+1], d.saved, 0o644)
+			}
 			return os.WriteFile(argv[i+1], []byte("images: "+strings.Join(argv[i+2:], " ")), 0o644)
 		}
 	}

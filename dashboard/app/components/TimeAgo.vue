@@ -11,5 +11,5 @@ const absolute = computed(() => formatAbsoluteUtc(props.time))
 
 <template>
   <time v-if="props.time" :datetime="props.time" :title="absolute" class="mono tight whitespace-nowrap">{{ props.prefix }}{{ relative }}</time>
-  <span v-else class="text-fg-faint">—</span>
+  <span v-else class="text-fg-subtle">—</span>
 </template>

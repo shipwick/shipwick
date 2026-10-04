@@ -58,6 +58,15 @@ describe('describeBackupPlan', () => {
     expect(describeBackupPlan({ schedule: '0 3 * * *', keep: 3, before: ['psql', '-c', 'CHECKPOINT'], stop: true }))
       .toBe('daily at 03:00 UTC, 3 kept, after psql -c CHECKPOINT, with the application stopped')
   })
+
+  it('says how long the command gets when that is not the hour, and where it runs when that is not the replica', () => {
+    const before = ['pg_dump', '-h', 'localhost']
+    expect(describeBackupPlan({ schedule: '0 3 * * *', keep: 7, before, before_timeout: '2h0m0s' })).toBe('daily at 03:00 UTC, 7 kept, after pg_dump -h localhost (2h at most)')
+    expect(describeBackupPlan({ schedule: '0 3 * * *', keep: 7, before, before_timeout: '1h0m0s', before_in: 'container' })).toBe('daily at 03:00 UTC, 7 kept, after pg_dump -h localhost (in a container of its own)')
+    expect(describeBackupPlan({ schedule: '0 3 * * *', keep: 7, before, before_timeout: '2h0m0s', before_in: 'container' })).toBe('daily at 03:00 UTC, 7 kept, after pg_dump -h localhost (2h at most, in a container of its own)')
+    // Without a command there is nothing to run anywhere.
+    expect(describeBackupPlan({ schedule: '0 3 * * *', keep: 7, before_in: 'container' })).toBe('daily at 03:00 UTC, 7 kept')
+  })
 })
 
 describe('a backup row', () => {

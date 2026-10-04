@@ -117,6 +117,13 @@ describe('what the sign-in page says when a sign-in did not complete', () => {
     expect(describeFailure(401, 'SIGN_IN_FAILED', 'the provider says the address ada@example.com has not been verified', { reason: 'email_not_verified' }).message).toContain('has not been verified')
   })
 
+  it('passes on what is wrong with an account that has no name, or belongs to a tenant that may not sign in, to be forwarded', () => {
+    const missing = 'the provider\'s ID token has no preferred_username claim Shipwick can name this account by'
+    expect(describeFailure(401, 'SIGN_IN_FAILED', missing, { reason: 'name_missing', claim: 'preferred_username' })).toEqual({ title: 'The provider did not say who you are in a way this server can use.', message: missing, copy: true })
+    const tenant = 'this account belongs to a Microsoft Entra tenant that may not sign in here. An operator adds the tenant\'s id to SHIPWICK_OIDC_TENANTS on the agent'
+    expect(describeFailure(401, 'SIGN_IN_FAILED', tenant, { reason: 'tenant_not_allowed' })).toEqual({ title: 'Your account belongs to an organization that may not sign in to this server.', message: tenant, copy: true })
+  })
+
   it('has a sentence for a provider that is down, an agent without one, a rate limit and a redirect that does not match', () => {
     expect(describeFailure(502, 'SIGN_IN_UNAVAILABLE', 'the sign-in provider could not be reached').title).toBe('The sign-in provider cannot be used right now.')
     expect(describeFailure(409, 'SIGN_IN_NOT_CONFIGURED', '').title).toBe('This server takes API tokens only.')

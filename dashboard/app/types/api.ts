@@ -102,6 +102,8 @@ export type ApiErrorCode =
   | 'SERVER_REQUIRED'
   /** The request named a server the dashboard was not configured with; details: {servers}. */
   | 'UNKNOWN_SERVER'
+  /** An export that was started for a download was not fetched in time, or was fetched already. */
+  | 'DOWNLOAD_EXPIRED'
 
 /** What a token may do. A role includes the ones below it: read < deploy < admin. */
 export type Role = 'read' | 'deploy' | 'admin'
@@ -272,6 +274,12 @@ export interface SpecBackups {
   before_timeout?: string
   /** The application is stopped while the archive is taken, and started again. */
   stop?: boolean
+  /**
+   * Where `before` runs: "container" for a container of its own beside the
+   * replica, which is ended at `before_timeout`; absent for inside the
+   * replica. Absent on agents before 0.7.
+   */
+  before_in?: 'container' | string
 }
 
 export interface AppSpec {
@@ -516,21 +524,28 @@ export interface Server {
   network?: NetworkStatus
   /** Whether people can sign in through an OpenID Connect provider. Absent on agents before 0.6. */
   sign_in?: SignInStatus
+  /** What the log archive holds and how much it may. Absent on agents before 0.7. */
+  log_archive?: LogArchiveStatus
+  /** Whether a newer release exists, as the agent last heard. Absent on agents before 0.7: treated as a check that is off. */
+  update?: UpdateStatus
 }
 
 export interface SignInStatus {
   configured: boolean
   /** The provider's issuer URL; "" when none is configured. */
   issuer: string
+  /** The ID token claim people are named by; "" when sign-in is not configured. Absent on agents before 0.7, which name people by `email`. */
+  name_claim?: string
 }
 
-export type AccessRuleKind = 'email' | 'group' | 'domain'
+/** `name`: one person by the name the provider's claim holds, for accounts without an address. From 0.7. */
+export type AccessRuleKind = 'email' | 'group' | 'domain' | 'name'
 
-/** Who gets which role when they sign in through the provider: an address, a group of the provider's, or a whole domain. */
+/** Who gets which role when they sign in through the provider: an address, a group of the provider's, a whole domain, or a name. */
 export interface AccessRule {
   id: number
   kind: AccessRuleKind | string
-  /** The address, the group's name as the provider sends it, or the domain without "*@". */
+  /** The address, the group's name as the provider sends it, the domain without "*@", or the name exactly as the claim holds it. */
   subject: string
   role: Role
   /** For the deploy role; [] means every application. */
@@ -551,6 +566,7 @@ export interface GrantAccessRequest {
 /** One session of a person who signed in and would be served right now: GET /access/sessions. */
 export interface PersonSession {
   id: number
+  /** The person's name: an address with the `email` claim, otherwise the claim's value as issued. */
   email: string
   role: Role
   applications: string[]
@@ -730,6 +746,18 @@ export interface CreateTokenRequest {
   expires_at?: string
 }
 
+/**
+ * Body of PUT /tokens/:name: only what changes. `applications: []` lifts the
+ * limit; `never_expires` takes the end away and cannot stand next to
+ * `expires_at`. The role, the name and the value never change.
+ */
+export interface UpdateTokenRequest {
+  applications?: string[]
+  /** RFC 3339, in the future; a token that has expired works again. */
+  expires_at?: string
+  never_expires?: true
+}
+
 /** The answer to POST /tokens: the one time the token value itself is shown. */
 export interface CreatedToken {
   id: number
@@ -771,6 +799,17 @@ export interface AuditEntry {
   /** "deployment 12", "run 3", "role deploy, limited to a b", … */
   detail: string
 }
+
+/**
+ * GET /audit as it is answered: `more` stands next to `data`, not inside it.
+ * Absent on agents before 0.7, where a full page is the only hint of another.
+ */
+export interface AuditPage {
+  data: AuditEntry[]
+  more?: boolean
+}
+
+export type AuditExportFormat = 'csv' | 'json'
 
 /**
  * running · succeeded (exit 0) · failed (any other exit code, or the container
@@ -924,7 +963,7 @@ export interface SetCertificateRequest {
   key: string
 }
 
-/** The answer to POST /applications/:name/validate for a document a deployment would accept. */
+/** The answer to POST /validate and POST /applications/:name/validate for a document a deployment would accept. */
 export interface Validation {
   valid: boolean
 }
@@ -1105,4 +1144,122 @@ export interface BackupAdoption {
 /** Body of POST /server/backups/adopt; without an application, everything that is found. */
 export interface BackupAdoptRequest {
   application?: string
+}
+
+/** Body of POST /export: the passphrase encrypts the file and is kept nowhere. */
+export interface ExportRequest {
+  passphrase: string
+  /** Limits the export to these; left out for every application. */
+  applications?: string[]
+}
+
+/**
+ * GET /applications/:name/config: the deploy.yaml of the active deployment,
+ * for those who may deploy the application. A value that referred to a stored
+ * secret comes back as that reference; every other env value and basic-auth
+ * password is "********", and a document that still holds one is refused.
+ */
+export interface ApplicationConfig {
+  application: string
+  deployment_id: number
+  sequence: number
+  version: string
+  /** YAML text, in the order and style `shipwick init` writes. */
+  document: string
+  /** The fields whose value is the mask, in document order: `env.<NAME>`, `proxy.basic_auth[<i>].password`. Always an array. */
+  masked: string[]
+  /** Only for a static application: what POST /applications?static= takes to serve the same folder again. */
+  static_digest?: string
+}
+
+export type LogKind = 'replica' | 'run'
+
+/** The output of one container run that ended, as the archive lists it: without its lines. */
+export interface LogArchiveEntry {
+  id: number
+  application: string
+  kind: LogKind | string
+  /** Null once the deployment is gone from the history. */
+  deployment_id: number | null
+  /** The deployment's sequence (#N); 0 when it is gone. */
+  deployment: number
+  /** "" when the deployment is gone. */
+  version: string
+  /** 0 for a run. */
+  replica: number
+  /** "" for a replica; "pre-deploy" and "run" included. */
+  job: string
+  run_id: number | null
+  container: string
+  /**
+   * For a replica: crashed, exited, oom_killed, unhealthy, stopped, replaced,
+   * deployment_failed, removed, restarted. For a run its status: succeeded,
+   * failed, timed_out, interrupted.
+   */
+  reason: string
+  /** Null when the container was still running when it was removed, or its exit was not seen. */
+  exit_code: number | null
+  oom_killed: boolean
+  ended_at: string
+  /** Null when `lines` is 0. */
+  first_line_at: string | null
+  last_line_at: string | null
+  lines: number
+  /** Size of the text kept. */
+  bytes: number
+  /** On disk, compressed. */
+  stored_bytes: number
+  /** The run printed more; these are its last lines. */
+  truncated: boolean
+}
+
+/** GET …/logs/archive/:id: the entry with its lines, oldest first. */
+export interface LogArchiveDetail extends LogArchiveEntry {
+  output: LogLine[]
+}
+
+/** One line a search found, with where it was read from. */
+export interface LogMatch extends LogLine {
+  /** Null for a line read from a container that exists. */
+  archive_id: number | null
+  deployment_id: number | null
+  deployment: number
+  job: string
+  run_id: number | null
+}
+
+/**
+ * One page of GET …/logs/search. Ordered by source, newest first, and within
+ * a source newest line first. A page may hold fewer lines than asked for, even
+ * none, and still name a `next`: ask again with `cursor` until it is "".
+ */
+export interface LogSearchResult {
+  lines: LogMatch[]
+  next: string
+  /** Containers whose output this request read. */
+  sources: number
+  /** Bytes of output this request read. */
+  bytes: number
+}
+
+/** The `log_archive` object of GET /server. */
+export interface LogArchiveStatus {
+  /** False when SHIPWICK_LOG_RETENTION_SIZE is 0: nothing is kept. */
+  enabled: boolean
+  entries: number
+  bytes: number
+  max_bytes: number
+  retention_days: number
+}
+
+/** The `update` object of GET /server: what the agent heard about newer releases. The dashboard never asks itself. */
+export interface UpdateStatus {
+  /** False when SHIPWICK_UPDATE_CHECK is off. */
+  enabled: boolean
+  /** A tag with its v, never a pre-release; "" until the question was answered once. */
+  latest_version: string
+  /** When it was last answered; a failed attempt does not move it. */
+  checked_at: string | null
+  /** `latest_version` is newer than the agent's own. */
+  available: boolean
 }

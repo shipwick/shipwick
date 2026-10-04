@@ -132,7 +132,7 @@ function openRow(r: Run, event: MouseEvent) {
         Add a <span class="mono text-fg">jobs</span> list to deploy.yaml to run commands on a schedule. One-off commands run from here with <span class="text-fg">Run command</span>.
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Jobs">
           <thead>
             <tr>
               <th>Job</th>
@@ -155,12 +155,12 @@ function openRow(r: Run, event: MouseEvent) {
               </td>
               <td data-label="Last run">
                 <template v-if="job.last_run">
-                  <button type="button" class="inline-flex flex-wrap items-center gap-x-2 text-left hover:underline" @click="openRunId = job.last_run.id">
+                  <button type="button" class="inline-flex flex-wrap items-center gap-x-2 text-left hover:underline" :aria-label="`${describeRunOutcome(job.last_run)}: the last run of ${job.name}`" @click="openRunId = job.last_run.id">
                     <StatusBadge :tone="runStatusDisplay(job.last_run.status).tone" :label="describeRunOutcome(job.last_run)" :raw="job.last_run.status" />
                     <TimeAgo :time="job.last_run.started_at" class="text-fg-muted" />
                   </button>
                 </template>
-                <span v-else class="text-fg-faint">never</span>
+                <span v-else class="text-fg-subtle">never</span>
               </td>
               <td data-label="Next run" class="text-fg-muted" :title="job.next_run_at ?? undefined">
                 {{ formatNextRun(job.next_run_at, now) }}
@@ -171,6 +171,7 @@ function openRow(r: Run, event: MouseEvent) {
                   :disabled="!props.mayDeploy || props.busy || job.last_run?.status === 'running'"
                   :pending="startingJob === job.name"
                   :title="runTitleFor(job)"
+                  :aria-label="`Run now: ${job.name}`"
                   @click="runNow(job)"
                 >
                   <UiIcon name="play" :size="12" />
@@ -206,7 +207,7 @@ function openRow(r: Run, event: MouseEvent) {
           Runs of the pre-deploy hook, of scheduled jobs and of one-off commands are listed here, newest first.
         </EmptyState>
         <div v-else class="overflow-x-auto">
-          <table class="data-table stack">
+          <table class="data-table stack" aria-label="Runs">
             <thead>
               <tr>
                 <th class="w-16">
@@ -225,9 +226,9 @@ function openRow(r: Run, event: MouseEvent) {
               <tr v-for="r in runs.data.value" :key="r.id" class="clickable" @click="openRow(r, $event)">
                 <td data-primary>
                   <button type="button" class="mono link" :aria-label="`Run ${r.id}, ${runTitle(r)}`" @click="openRunId = r.id">#{{ r.id }}</button>
-                  <span class="mono ml-2 sm:hidden">{{ runTitle(r) }}</span>
+                  <span class="mono ml-2 rows:hidden">{{ runTitle(r) }}</span>
                 </td>
-                <td class="mono max-sm:!hidden" :title="formatArgv(r.command)">
+                <td class="mono cards:!hidden" :title="formatArgv(r.command)">
                   <span class="block max-w-md truncate">{{ runTitle(r) }}</span>
                 </td>
                 <td data-label="Started by" class="text-fg-muted">

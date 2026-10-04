@@ -161,6 +161,12 @@ func (c *cli) status(ctx context.Context, name string, verbose bool) error {
 		}
 		c.ui.Table([]string{"WHEN", "EVENT"}, rows)
 	}
+	// A replica that died, or a deployment that failed, took its output with
+	// it; where the agent kept it, the command that shows it closes the page.
+	if hints := c.deathHints(ctx, cl, app, history); len(hints) > 0 {
+		c.ui.Println()
+		c.ui.Fields(hints)
+	}
 	return nil
 }
 

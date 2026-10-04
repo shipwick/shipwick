@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BackupRun, Import, Promotion, Standby } from '~/types/api'
+import type { Application, BackupRun, Import, Promotion, Standby } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { AgentError as AgentFailure, toAgentError } from '~/utils/agentError'
 import { durationBetween, formatBytes, formatDuration } from '~/utils/format'
@@ -11,8 +11,10 @@ import { PROMOTE_WORD, describePull, importOutcome, importProgress, importStored
  * Moving a server, and a second one kept ready: the import that is running or
  * ran last, exports written to the backup destination, and what a standby
  * holds until it is promoted. Every part is hidden on an agent that has no
- * such endpoint. The export file itself is the CLI's: it is written with a
- * passphrase typed where `shipwick export` runs, and is not downloaded here.
+ * such endpoint. An export as a file of one's own is downloaded here, with a
+ * passphrase typed for it, and such a file is imported here: both streamed
+ * through the dashboard's server, which keeps neither the file nor the
+ * passphrase.
  */
 const props = defineProps<{ admin: boolean }>()
 
@@ -85,6 +87,28 @@ async function exportNow() {
 }
 
 const took = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetween(r.started_at, r.completed_at)) : '…')
+
+// --- a file of one's own ------------------------------------------------------------
+
+/** The applications an export can be limited to; asked for only once the dialog is wanted. */
+const downloadOpen = ref(false)
+const applications = usePolling<Application[]>(signal => agent.get<Application[]>('/applications', { signal }), { interval: 60_000, enabled: () => props.admin && downloadOpen.value })
+
+const importOpen = ref(false)
+
+/** The upload has begun: the import is followed closely from now on, and its banner shows. */
+function onImportStarted() {
+  dismissedAt.value = null
+  importing.value = true
+  void lastImport.refresh()
+}
+
+/** The agent's answer at the end is the import as it ended: shown at once, without waiting for the next poll. */
+function onImportDone(run: Import) {
+  lastImport.data.value = run
+  dismissedAt.value = null
+  void exports.refresh()
+}
 
 // --- the standby --------------------------------------------------------------------
 
@@ -248,7 +272,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
         {{ importRun.error }}
       </p>
       <div v-if="importRun.applications.length > 0" class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Applications of the last import">
           <thead>
             <tr>
               <th>Application</th>
@@ -272,10 +296,10 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
               <td data-label="Outcome">
                 <StatusBadge v-bind="importedDisplay(a)" :raw="a.status" />
               </td>
-              <td :data-label="a.volumes.length ? 'Volumes' : undefined" class="mono text-fg-muted" :class="a.volumes.length ? '' : 'max-sm:!hidden'">
+              <td :data-label="a.volumes.length ? 'Volumes' : undefined" class="mono text-fg-muted" :class="a.volumes.length ? '' : 'cards:!hidden'">
                 {{ a.volumes.join(', ') }}
               </td>
-              <td class="break-words text-fg-muted" :class="[a.status === 'failed' ? '!text-danger' : '', a.message ? 'max-sm:!block max-sm:!text-left' : 'max-sm:!hidden']">
+              <td class="break-words text-fg-muted" :class="[a.status === 'failed' ? '!text-danger' : '', a.message ? 'cards:!block cards:!text-left' : 'cards:!hidden']">
                 {{ a.message }}
               </td>
             </tr>
@@ -317,7 +341,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
         Applications appear once an export has been imported stopped: by the schedule, with <span class="text-fg">Import newest now</span>, or with <span class="mono text-fg">shipwick import --stopped</span>.
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Applications waiting to be promoted">
           <thead>
             <tr>
               <th>Application</th>
@@ -341,7 +365,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
                 <span v-if="a.hostnames.length > 0" class="block">
                   <span v-for="host in a.hostnames" :key="host" class="block break-words">{{ host }}</span>
                 </span>
-                <span v-else class="text-fg-faint">—</span>
+                <span v-else class="text-fg-subtle">—</span>
               </td>
             </tr>
           </tbody>
@@ -356,6 +380,10 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
   <!-- Admin only: the list and the request are refused to every other role. -->
   <UiPanel v-if="props.admin && exportsSupported" title="Export">
     <template #actions>
+      <UiButton size="sm" title="One encrypted file with everything this server runs, saved by your browser" @click="downloadOpen = true">
+        <UiIcon name="download" :size="12" />
+        Download an export…
+      </UiButton>
       <UiButton size="sm" :disabled="anyExporting" :pending="exporting" :title="anyExporting ? 'An export is being written' : 'Writes an export of every application to where backups are kept'" @click="exportNow">
         <UiIcon name="upload" :size="12" />
         Export to backups
@@ -375,7 +403,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
         An export is everything another server needs to run what this one runs: every application's configuration, the stored secrets, registry credentials and certificates, images built by the CLI, static folders and the volumes. Write one now, or on a schedule with <span class="mono text-fg">SHIPWICK_EXPORT_SCHEDULE</span> on the agent.
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Exports">
           <thead>
             <tr>
               <th class="w-16">
@@ -422,10 +450,26 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
         </table>
       </div>
       <p class="px-4 py-2 text-xs text-fg-subtle">
-        These are written encrypted with the agent's backup passphrase, for a standby to fetch or for <span class="mono">shipwick import</span> on another server. An export as a file of your own is the CLI's: <span class="mono">shipwick export</span> asks for a passphrase where it runs and streams the file there; the dashboard does not download one.
+        These are written encrypted with the agent's backup passphrase, for a standby to fetch. A file of your own, with a passphrase of your own, is what <span class="text-fg-muted">Download an export</span> gives you, and <span class="mono">shipwick export</span> in a terminal: the file to import on another server.
       </p>
     </div>
   </UiPanel>
+
+  <!-- The other end of a move: what an export file holds, deployed here. -->
+  <UiPanel v-if="props.admin && exportsSupported" title="Import">
+    <template #actions>
+      <UiButton size="sm" :disabled="importing || promotionActive" :title="importing ? 'An import is running' : promotionActive ? 'A promotion is running' : 'Deploys what an export file holds on this server'" @click="importOpen = true">
+        <UiIcon name="upload" :size="12" />
+        Import a file…
+      </UiButton>
+    </template>
+    <p class="px-4 py-3 text-fg-muted">
+      An export of another server, deployed here: its secrets, registry credentials and certificates are stored, then each application gets its image and its volumes and is deployed like any deployment. What exists here under the same name is left alone unless you say otherwise.
+    </p>
+  </UiPanel>
+
+  <ExportDownloadDialog :open="downloadOpen" :applications="applications.data.value ?? []" @close="downloadOpen = false" />
+  <ImportFileDialog :open="importOpen" @close="importOpen = false" @started="onImportStarted" @done="onImportDone" />
 
   <UiDialog :open="promoteOpen" title="Promote this standby" size="md" :busy="promoting" @close="promoteOpen = false">
     <form v-if="standby.data.value" id="promote-form" class="space-y-4" @submit.prevent="promote">

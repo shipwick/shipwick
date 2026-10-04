@@ -16,6 +16,21 @@ import (
 // the same document differently. Errors are written here; ok says whether
 // app is a document to go on with.
 func (s *Server) readConfig(w http.ResponseWriter, r *http.Request, name string) (app spec.App, ok bool) {
+	app, ok = s.parseConfig(w, r)
+	if !ok {
+		return app, false
+	}
+	if app.Name != name {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest,
+			fmt.Sprintf("the config describes application %q but the URL names %q", app.Name, name), nil)
+		return app, false
+	}
+	return app, true
+}
+
+// parseConfig is readConfig up to the name: the document, read and held to
+// the rules of a deploy.yaml.
+func (s *Server) parseConfig(w http.ResponseWriter, r *http.Request) (app spec.App, ok bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, spec.MaxConfigBytes))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -36,11 +51,6 @@ func (s *Server) readConfig(w http.ResponseWriter, r *http.Request, name string)
 			return app, false
 		}
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, err.Error(), nil)
-		return app, false
-	}
-	if app.Name != name {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest,
-			fmt.Sprintf("the config describes application %q but the URL names %q", app.Name, name), nil)
 		return app, false
 	}
 	return app, true

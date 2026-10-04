@@ -46,6 +46,8 @@ const (
 	SignInNonceReused      = "nonce_reused"       // this sign-in was completed before
 	SignInEmailMissing     = "email_missing"      // the ID token names no usable e-mail address
 	SignInEmailNotVerified = "email_not_verified" // the provider says the address is not verified
+	SignInNameMissing      = "name_missing"       // the ID token lacks the claim the agent names people by, or it is not usable
+	SignInTenantNotAllowed = "tenant_not_allowed" // the account's tenant is not among the ones the agent accepts
 )
 
 // Why a session was ended, in the details of CodeSessionEnded.
@@ -53,10 +55,14 @@ const (
 	SessionEndedRuleRemoved   = "rule_removed"   // no rule gives the person access any more
 	SessionEndedAccessChanged = "access_changed" // the rules give the person something else now
 	SessionEndedSignedOut     = "signed_out"     // an admin ended it
+	// The agent names people by another claim than at the sign-in, or no
+	// longer accepts the tenant the person signed in from.
+	SessionEndedSignInChanged = "sign_in_changed"
 )
 
 // ActorUser is the kind of caller a signed-in person is; the name is the
-// e-mail address.
+// e-mail address, or what the claim of the operator's choice says (see
+// DefaultNameClaim).
 const ActorUser = "user"
 
 // SessionPrefix starts every session the agent issues, as TokenPrefix starts
@@ -104,6 +110,10 @@ type SignedIn struct {
 type SignInStatus struct {
 	Configured bool   `json:"configured"`
 	Issuer     string `json:"issuer"`
+	// NameClaim is the ID token claim people are named by: "email" unless
+	// the operator chose another. "" on an agent without sign-in, and absent
+	// from agents older than 0.7, which knew only "email".
+	NameClaim string `json:"name_claim"`
 }
 
 // Kinds of access rule, the most specific first.
@@ -111,6 +121,10 @@ const (
 	AccessEmail  = "email"  // one address: ada@example.com
 	AccessGroup  = "group"  // a group the provider names in the ID token
 	AccessDomain = "domain" // every address at a domain: example.com
+	// AccessName is one person by exactly what the name claim says: the kind
+	// for names that are not addresses. It is as specific as AccessEmail and
+	// decides before it.
+	AccessName = "name"
 )
 
 // MaxAccessRules is how many rules the table holds. They are read on every
@@ -173,21 +187,37 @@ func (g Grant) Equal(other Grant) bool {
 // than their group has, as well as more. Of several groups the highest role
 // counts; where that is deploy, a group without a limit lifts it, and limits
 // add up. Nobody without a matching rule gets anything.
-func ResolveAccess(rules []AccessRule, email string, groups []string) (Grant, bool) {
-	_, domain, _ := strings.Cut(email, "@")
+//
+// name is the person as the session holds them. Where it is not the e-mail
+// claim's value it is whatever the operator's claim said, and then the rules
+// by address and by domain apply only if it reads as an address — compared
+// without regard to case, as addresses are — while a rule by name wants it
+// character for character, and decides first.
+func ResolveAccess(rules []AccessRule, name string, groups []string) (Grant, bool) {
+	email, domain := "", ""
+	if address, err := NormalizeEmail(name); err == nil {
+		email = address
+		_, domain, _ = strings.Cut(address, "@")
+	}
 	var (
+		byEmail  *AccessRule
 		byGroup  []AccessRule
 		byDomain *AccessRule
 	)
 	for i, r := range rules {
 		switch {
-		case r.Kind == AccessEmail && r.Subject == email:
+		case r.Kind == AccessName && r.Subject == name:
 			return grantOf(r), true
+		case r.Kind == AccessEmail && email != "" && r.Subject == email:
+			byEmail = &rules[i]
 		case r.Kind == AccessGroup && slices.Contains(groups, r.Subject):
 			byGroup = append(byGroup, r)
-		case r.Kind == AccessDomain && r.Subject == domain:
+		case r.Kind == AccessDomain && domain != "" && r.Subject == domain:
 			byDomain = &rules[i]
 		}
+	}
+	if byEmail != nil {
+		return grantOf(*byEmail), true
 	}
 	if len(byGroup) > 0 {
 		best := grantOf(byGroup[0])
@@ -272,22 +302,30 @@ func ValidateAccessSubject(kind, subject string) (string, error) {
 			return "", fmt.Errorf("invalid group: use the name as the provider sends it, at most %d characters", maxGroupName)
 		}
 		return subject, nil
+	case AccessName:
+		if err := ValidatePersonName(subject); err != nil {
+			return "", err
+		}
+		return subject, nil
 	}
-	return "", fmt.Errorf("invalid kind %q: use email, group or domain", kind)
+	return "", fmt.Errorf("invalid kind %q: use email, group, domain or name", kind)
 }
 
 // ParseAccessSubject reads who a rule is for as the CLI writes it:
-// "ada@example.com", "*@example.com" or "group:platform".
+// "ada@example.com", "*@example.com", "group:platform" or, for a person
+// whose name is not an address, "name:248289761001".
 func ParseAccessSubject(s string) (kind, subject string, err error) {
 	switch {
 	case strings.HasPrefix(s, "group:"):
 		kind, subject = AccessGroup, strings.TrimPrefix(s, "group:")
+	case strings.HasPrefix(s, "name:"):
+		kind, subject = AccessName, strings.TrimPrefix(s, "name:")
 	case strings.HasPrefix(s, "*@"):
 		kind, subject = AccessDomain, strings.TrimPrefix(s, "*@")
 	case strings.Contains(s, "@"):
 		kind, subject = AccessEmail, s
 	default:
-		return "", "", fmt.Errorf("%q is neither an address, a domain nor a group: use ada@example.com, *@example.com or group:platform", s)
+		return "", "", fmt.Errorf("%q is neither an address, a domain, a group nor a name: use ada@example.com, *@example.com, group:platform or name:%s", s, s)
 	}
 	subject, err = ValidateAccessSubject(kind, subject)
 	return kind, subject, err
@@ -300,6 +338,55 @@ func (r AccessRule) Who() string {
 		return "group:" + r.Subject
 	case AccessDomain:
 		return "*@" + r.Subject
+	case AccessName:
+		return "name:" + r.Subject
 	}
 	return r.Subject
+}
+
+// DefaultNameClaim is the ID token claim people are named by unless the
+// operator chooses another (SHIPWICK_OIDC_NAME_CLAIM).
+const DefaultNameClaim = "email"
+
+// maxPersonName is an address's length: no claim worth naming people by is
+// longer.
+const maxPersonName = 254
+
+// What a name from a claim other than email is made of: the characters of
+// addresses, of the user names directories hold, and of the subject
+// identifiers providers issue (Microsoft's are base64url, Auth0's carry a
+// bar). No space and nothing invisible: the name ends up in the audit trail,
+// in logs and in a deployment's "by".
+var personNamePattern = regexp.MustCompile(`^[A-Za-z0-9._%+'@|:=#~-]+$`)
+
+// ValidatePersonName checks a name as a claim other than email gives it. It
+// is taken as the provider wrote it, capitals included: two subject
+// identifiers that differ only by case are two people.
+func ValidatePersonName(name string) error {
+	if name == "" || len(name) > maxPersonName || !personNamePattern.MatchString(name) {
+		return fmt.Errorf("not a name the provider's claim can hold: at most %d letters, digits and . _ %% + ' @ | : = # ~ -, without spaces", maxPersonName)
+	}
+	return nil
+}
+
+// PersonName returns the name a person is known by, from the value of the
+// claim the agent is configured with: an address in lowercase for the email
+// claim, and for any other claim the value itself.
+func PersonName(claim, value string) (string, error) {
+	if claim == DefaultNameClaim || claim == "" {
+		return NormalizeEmail(value)
+	}
+	if err := ValidatePersonName(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// WhoOf is how a rule for exactly this person is written for the CLI:
+// the address itself, or "name:" and the name where it is not one.
+func WhoOf(name string) string {
+	if address, err := NormalizeEmail(name); err == nil && address == name {
+		return name
+	}
+	return "name:" + name
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { NAV_GROUPS, activeItem, isActive, movedPath } from '../app/utils/navigation'
-import { activeTab, applicationPath, applicationTabs, serverTabs } from '../app/utils/tabs'
+import { accessTabs, activeTab, applicationPath, applicationTabs, serverTabs, tabTitle } from '../app/utils/tabs'
 
 describe('the navigation', () => {
   it('lists every page once', () => {
@@ -102,5 +102,24 @@ describe('the tabs of the server', () => {
   it('marks the standby tab with what waits there', () => {
     expect(serverTabs({ waiting: 3 }).find(t => t.key === 'transfer')?.badge).toBe(3)
     expect(serverTabs().find(t => t.key === 'transfer')?.badge).toBeNull()
+  })
+})
+
+describe('the title of a page with tabs', () => {
+  const tabs = applicationTabs({ name: 'my-api', static: false, volumes: true })
+
+  it('is the page itself on its first tab', () => {
+    expect(tabTitle(tabs, '/applications/my-api', 'my-api')).toBe('my-api')
+    expect(tabTitle(serverTabs(), '/servers', 'Server')).toBe('Server')
+  })
+
+  it('names another tab before the page, so that two tabs of one page differ', () => {
+    expect(tabTitle(tabs, '/applications/my-api/metrics', 'my-api')).toBe('Metrics · my-api')
+    expect(tabTitle(serverTabs(), '/servers/transfer', 'Server')).toBe('Export and standby · Server')
+    expect(tabTitle(accessTabs(), '/settings/access/audit', 'Access')).toBe('Audit trail · Access')
+  })
+
+  it('is the page when the address is none of its tabs', () => {
+    expect(tabTitle(tabs, '/applications/other', 'my-api')).toBe('my-api')
   })
 })

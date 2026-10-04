@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { TrafficRange } from '~/types/api'
 import type { ChartPoint } from '~/utils/metricsHistory'
-import { timeTicks } from '~/utils/metricsHistory'
+import { pointFigures, timeTicks } from '~/utils/metricsHistory'
 import { formatAbsoluteUtc, formatLogTime } from '~/utils/format'
 
 export interface TrafficSeries {
@@ -92,6 +92,9 @@ const hovered = computed<{ t: number, rows: HoverRow[] } | null>(() => {
   }
   return { t, rows }
 })
+
+/** Per-series figures for the table view, the accessible alternative to the plot. */
+const table = computed(() => props.series.map(s => ({ key: s.key, label: s.label, color: s.color, ...pointFigures(s.segments) })))
 
 const pct = (value: number, total: number) => `${(value / total) * 100}%`
 </script>
@@ -189,5 +192,57 @@ const pct = (value: number, total: number) => `${(value / total) * 100}%`
         :style="{ left: pct(xOf(t), WIDTH) }"
       >{{ tickLabel(t) }}</span>
     </div>
+
+    <details class="mt-2 text-xs">
+      <summary class="target w-fit cursor-pointer select-none text-fg-subtle hover:text-fg">
+        Show as table
+      </summary>
+      <table class="data-table mt-2 !text-xs" :aria-label="`${props.label} over the last ${props.range}`">
+        <thead>
+          <tr>
+            <th scope="col">
+              Series
+            </th>
+            <th scope="col" class="right">
+              Steps
+            </th>
+            <th scope="col" class="right">
+              Min
+            </th>
+            <th scope="col" class="right">
+              Average
+            </th>
+            <th scope="col" class="right">
+              Peak
+            </th>
+            <th scope="col" class="right">
+              Latest
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in table" :key="row.key">
+            <td>
+              <span class="mr-1.5 inline-block size-1.5 rounded-full align-middle" :style="{ background: row.color }" aria-hidden="true" />{{ row.label }}
+            </td>
+            <td class="mono right">
+              {{ row.samples }}
+            </td>
+            <td class="mono right">
+              {{ row.min === null ? '—' : props.format(row.min) }}
+            </td>
+            <td class="mono right">
+              {{ row.avg === null ? '—' : props.format(row.avg) }}
+            </td>
+            <td class="mono right">
+              {{ row.max === null ? '—' : props.format(row.max) }}
+            </td>
+            <td class="mono right">
+              {{ row.latest === null ? '—' : props.format(row.latest) }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </details>
   </div>
 </template>

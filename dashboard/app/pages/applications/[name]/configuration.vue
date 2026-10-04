@@ -4,9 +4,22 @@ import { formatBytes, formatCores } from '~/utils/format'
 import { tidyDuration } from '~/utils/jobs'
 import { describeHealth, describeLogging, formatArgv, formatPathRedirect, hasProxySettings } from '~/utils/spec'
 import { applicationPath } from '~/utils/tabs'
+import { atLeast07 } from '~/utils/updates'
 
-/** The deploy.yaml the running version was deployed with, read-only: it is changed in the file and deployed. */
+/**
+ * The deploy.yaml the running version was deployed with, laid out to be read.
+ * Whoever may deploy the application gets the way to the editor, where the
+ * agent hands the document out to be changed; everybody else reads.
+ */
 const { name, spec, mayDeploy } = useApplication()
+const server = useServerInfo()
+
+/**
+ * From 0.7 on the agent hands out the document of any application. Before, a
+ * changed configuration was a pasted file, and only for an image the agent
+ * can pull itself.
+ */
+const editable = computed(() => mayDeploy.value && spec.value !== null && (atLeast07(server.data.value) || (!spec.value.static && !spec.value.build)))
 
 const envNames = computed(() => Object.keys(spec.value?.env ?? {}).sort())
 const healthCheck = computed(() => describeHealth(spec.value?.health))
@@ -37,6 +50,15 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
     </EmptyState>
   </div>
   <div v-else class="space-y-8">
+    <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <p class="min-w-0 flex-1 basis-72 text-fg-muted">
+        The deploy.yaml of the version that runs. Values of environment variables and passwords are never shown.
+      </p>
+      <UiButton v-if="editable" :to="{ path: '/deploy', query: { application: name } }">
+        Change the configuration
+      </UiButton>
+    </div>
+
     <!-- A static configuration is a folder and a hostname; the container settings do not exist for it. -->
     <UiPanel v-if="spec.static" title="Configuration">
       <dl class="facts">
@@ -237,12 +259,17 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
     </UiPanel>
 
     <p class="text-xs text-fg-subtle">
-      This is the deploy.yaml of the version that runs. To change it, edit the file in the project and run <span class="mono text-fg-muted">shipwick deploy</span>; values of environment variables are never shown.
-      <template v-if="mayDeploy && !spec.static && !spec.build">
-        An application that runs an image from a registry can also be changed from here:
+      <template v-if="editable">
+        To change it, edit the file in the project and run <span class="mono text-fg-muted">shipwick deploy</span>, or
         <NuxtLink :to="{ path: '/deploy', query: { application: name } }" class="link">
-          deploy a changed configuration
-        </NuxtLink>.
+          change it here
+        </NuxtLink>: the server hands the document out, with a reference where a value came from a stored secret and <span class="mono text-fg-muted">"********"</span> where it did not.
+      </template>
+      <template v-else-if="mayDeploy">
+        To change it, edit the file in the project and run <span class="mono text-fg-muted">shipwick deploy</span>.
+      </template>
+      <template v-else>
+        It is changed by whoever may deploy this application, with <span class="mono text-fg-muted">shipwick deploy</span> or from this page.
       </template>
     </p>
   </div>

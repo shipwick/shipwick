@@ -55,7 +55,7 @@ func (c *cli) serverCommand() *cobra.Command {
 				return err
 			}
 			fields := [][2]string{
-				{"Agent", info.AgentVersion},
+				{"Agent", c.describeAgent(info)},
 				{"CLI", version.Version},
 				{"Host", info.Hostname},
 				{"OS", fmt.Sprintf("%s (%s, kernel %s)", info.OS, info.Architecture, info.Kernel)},
@@ -74,7 +74,7 @@ func (c *cli) serverCommand() *cobra.Command {
 			fields = append(fields, [2]string{"Dashboard", c.describeDashboard(info.DashboardURL)})
 			// People sign in to the dashboard only where a provider is configured.
 			if info.SignIn.Configured {
-				fields = append(fields, [2]string{"Sign-in", info.SignIn.Issuer})
+				fields = append(fields, [2]string{"Sign-in", signInText(info.SignIn)})
 			}
 			// Absent from an older agent, and where the agent cannot measure it.
 			if info.Disk != nil {
@@ -83,6 +83,10 @@ func (c *cli) serverCommand() *cobra.Command {
 			// Only a server that does not reach the internet the plain way has one.
 			if network := describeNetwork(info.Network); network != "" {
 				fields = append(fields, [2]string{"Network", network})
+			}
+			// Absent from an agent older than the log archive.
+			if info.LogArchive != nil {
+				fields = append(fields, [2]string{"Log archive", describeLogArchive(*info.LogArchive)})
 			}
 			c.ui.Fields(fields)
 			c.printAlerts(info.Alerts)
@@ -247,4 +251,13 @@ func (c *cli) readToken(fromStdin, interactive bool) (string, error) {
 		return "", errors.New("the token is empty")
 	}
 	return token, nil
+}
+
+// signInText is the provider people sign in with, and what it names them by
+// where that is not the address.
+func signInText(s api.SignInStatus) string {
+	if s.NameClaim == "" || s.NameClaim == api.DefaultNameClaim {
+		return s.Issuer
+	}
+	return s.Issuer + " (people are named by the " + s.NameClaim + " claim)"
 }

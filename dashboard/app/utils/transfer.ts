@@ -12,6 +12,50 @@ import type { StatusDisplay } from '~/utils/status'
 /** What is typed to confirm a promotion, as `shipwick standby promote` asks for it. */
 export const PROMOTE_WORD = 'promote'
 
+/** What is typed to confirm an import that replaces what exists. */
+export const OVERWRITE_WORD = 'overwrite'
+
+/** The shortest passphrase the agent writes an export with: it is all that protects every secret of the server. */
+export const MIN_PASSPHRASE_LENGTH = 12
+
+/**
+ * Why the passphrase of a new export cannot be used yet; "" when it can. It
+ * is typed twice because a typo makes a file nobody can open.
+ */
+export function passphraseProblem(passphrase: string, again: string): string {
+  if (passphrase === '') return ''
+  if (passphrase.length < MIN_PASSPHRASE_LENGTH) return `At least ${MIN_PASSPHRASE_LENGTH} characters: it is all that protects every secret of the server.`
+  if (again !== '' && again !== passphrase) return 'The two passphrases differ.'
+  return ''
+}
+
+/** Typed twice, the same, and long enough. */
+export function passphraseReady(passphrase: string, again: string): boolean {
+  return passphrase.length >= MIN_PASSPHRASE_LENGTH && passphrase === again
+}
+
+/** A passphrase as the X-Shipwick-Passphrase header of an import carries it: its UTF-8 bytes, base64-encoded. */
+export function encodePassphrase(passphrase: string): string {
+  let binary = ''
+  for (const byte of new TextEncoder().encode(passphrase)) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/** Every file `shipwick export` and the agent write starts with these bytes. */
+const EXPORT_MAGIC = 'SWBACKUP'
+
+/** Whether the first bytes of a file are those of an export; anything else is refused before it is uploaded. */
+export function looksLikeExport(head: Uint8Array): boolean {
+  if (head.length < EXPORT_MAGIC.length) return false
+  for (let i = 0; i < EXPORT_MAGIC.length; i++) if (head[i] !== EXPORT_MAGIC.charCodeAt(i)) return false
+  return true
+}
+
+/** Where the server-side routes that hand an export to the browser live, next to the proxy to the same agent: `/api/export`, `/api/servers/<name>/export`. */
+export function exportBase(agentBase: string): string {
+  return agentBase.replace(/\/agent$/, '/export')
+}
+
 /** The server is, or has been made, a standby: it holds stopped applications, or fetches exports on a schedule. */
 export function isStandby(standby: Standby | null | undefined): boolean {
   return Boolean(standby) && (standby!.applications.length > 0 || standby!.pull !== null)

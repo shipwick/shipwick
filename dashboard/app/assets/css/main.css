@@ -22,10 +22,12 @@
 
   --line: #e6e6e6;
   --line-strong: #d0d0d0;
+  /* The edge of a field one types into: the only thing that says where it is, so it keeps 3:1 against the page. */
+  --control: #8c8c8c;
 
   --fg: #161616;
   --fg-muted: #5a5a5a;
-  --fg-subtle: #737373;
+  --fg-subtle: #6e6e6e;
   --fg-faint: #a8a8a8;
 
   --primary: #161616;
@@ -51,9 +53,9 @@
   /* Replica marks in the log viewer: a fixed categorical order, never status colors. */
   --series-1: #2a78d6;
   --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --series-4: #eda100;
-  --series-5: #e87ba4;
+  --series-3: #19a471;
+  --series-4: #c48600;
+  --series-5: #df6996;
   --series-6: #008300;
   --series-7: #4a3aa7;
   --series-8: #e34948;
@@ -72,6 +74,7 @@
 
     --line: #262626;
     --line-strong: #383838;
+    --control: #666666;
 
     --fg: #ededed;
     --fg-muted: #a6a6a6;
@@ -95,7 +98,7 @@
     --danger-bg: #241110;
     --danger-line: #55221f;
     --danger-solid: #c93f39;
-    --danger-solid-hover: #dc4d46;
+    --danger-solid-hover: #d2443e;
     --muted-dot: #5c5c5c;
 
     --series-1: #3987e5;
@@ -121,6 +124,7 @@
 
   --line: #262626;
   --line-strong: #383838;
+  --control: #666666;
 
   --fg: #ededed;
   --fg-muted: #a6a6a6;
@@ -144,7 +148,7 @@
   --danger-bg: #241110;
   --danger-line: #55221f;
   --danger-solid: #c93f39;
-  --danger-solid-hover: #dc4d46;
+  --danger-solid-hover: #d2443e;
   --muted-dot: #5c5c5c;
 
   --series-1: #3987e5;
@@ -177,6 +181,7 @@
   --color-overlay: var(--bg-overlay);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
+  --color-control: var(--control);
   --color-fg: var(--fg);
   --color-fg-muted: var(--fg-muted);
   --color-fg-subtle: var(--fg-subtle);
@@ -223,6 +228,14 @@
   --shadow-dialog: 0 16px 48px -12px rgb(0 0 0 / 0.28);
 }
 
+/* A table becomes a list of cards where the page's column is narrow, not where
+   the window is: beside the sidebar the column is narrower in a window of
+   800 px than it is without the sidebar in one of 700. `cards:` and `rows:`
+   are for what a cell shows in the one form and not in the other; they follow
+   the same line as `.data-table.stack` below. The column is <main>. */
+@custom-variant cards (@container page (width < 48rem));
+@custom-variant rows (@container page (width >= 48rem));
+
 /* ---------------------------------------------------------------------------
    Base
    --------------------------------------------------------------------------- */
@@ -232,7 +245,8 @@
     background: var(--bg);
     color: var(--fg);
     font-family: var(--font-sans);
-    font-size: 16px;
+    /* The size set in the browser, 16px unless someone chose another: everything else is in rem and follows it. */
+    font-size: 100%;
     -webkit-text-size-adjust: 100%;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
@@ -329,9 +343,13 @@
     text-decoration-color: var(--fg);
   }
 
-  /* Dense data table. Below 640px each row becomes a stacked block and cells
-     show their column name (data-label) on the left. */
+  /* Dense data table. Where the page's column is narrower than 768px each row
+     becomes a stacked block and cells show their column name (data-label) on
+     the left. Positioned, so that what is hidden for the eye inside it (a
+     header for a screen reader) stays inside the box that scrolls the table
+     sideways and does not widen the page. */
   .data-table {
+    position: relative;
     width: 100%;
     border-collapse: collapse;
     font-size: 0.8125rem;
@@ -383,7 +401,7 @@
     background: var(--bg-hover);
   }
 
-  @media (max-width: 639px) {
+  @container page (width < 48rem) {
     .data-table.stack thead {
       position: absolute;
       width: 1px;
@@ -516,17 +534,18 @@
     font-size: 0.8125rem;
     color: var(--fg);
     background: var(--bg);
-    border: 1px solid var(--line-strong);
+    border: 1px solid var(--control);
     border-radius: 4px;
     transition: border-color 120ms;
   }
 
   .input::placeholder {
-    color: var(--fg-faint);
+    color: var(--fg-subtle);
+    opacity: 1;
   }
 
   .input:hover {
-    border-color: var(--fg-faint);
+    border-color: var(--fg-muted);
   }
 
   .input:focus-visible {
@@ -568,5 +587,47 @@
 
   .spinner {
     animation: spin 0.7s linear infinite;
+  }
+
+  /* What a finger has to hit. With a mouse everything keeps its size. On a
+     touch screen a control (.target: buttons, fields, tabs, the navigation)
+     grows to 44 by 44 CSS px, and a link or a button that is text keeps its
+     look and gets an area of that size around it to be hit in. */
+  @media (pointer: coarse) {
+    .target,
+    .input {
+      min-height: 2.75rem;
+    }
+
+    .target {
+      min-width: 2.75rem;
+    }
+
+    summary.target {
+      min-height: 0;
+      padding-block: 0.8125rem;
+    }
+
+    a:not(.target),
+    button:not(.target) {
+      position: relative;
+    }
+
+    a:not(.target)::after,
+    button:not(.target)::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: max(100%, 2.75rem);
+      height: 2.75rem;
+      transform: translate(-50%, -50%);
+    }
+
+    input[type="checkbox"],
+    input[type="radio"] {
+      width: 1.125rem;
+      height: 1.125rem;
+    }
   }
 }

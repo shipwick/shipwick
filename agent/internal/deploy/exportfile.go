@@ -85,6 +85,10 @@ type exportApp struct {
 	Static bool `json:"static,omitempty"`
 	// Volumes are the volumes whose archives follow, in this order.
 	Volumes []string `json:"volumes"`
+	// References are the secret values of Spec that its document wrote as
+	// references to stored secrets (config.go). Absent when there are none,
+	// and in an export written before they were kept.
+	References *spec.References `json:"references,omitempty"`
 }
 
 type exportImage struct {

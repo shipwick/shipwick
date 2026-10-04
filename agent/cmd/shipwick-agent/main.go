@@ -215,6 +215,9 @@ func run() error {
 	if opts.Transfer, err = transferOptions(cfg, &opts.Backups, log); err != nil {
 		return err
 	}
+	opts.LogArchive = deploy.LogArchiveOptions{Dir: cfg.Logs.Dir, MaxAge: time.Duration(cfg.Logs.RetentionDays) * 24 * time.Hour, MaxBytes: cfg.Logs.MaxBytes}
+
+	opts.Updates = updateOptions(cfg, log)
 
 	engine := deploy.New(st, rt, opts)
 	if err := engine.Recover(startCtx); err != nil {
@@ -232,12 +235,15 @@ func run() error {
 		log.Error("could not start the backup scheduler; no backups are taken until the agent is restarted", "error", err)
 	}
 	engine.StartTransfers()
+	engine.StartUpdateCheck()
 
 	apiServer := api.New(engine, st, tokenHash, log)
 	if cfg.SignIn != nil {
 		apiServer.UseSignIn(oidc.New(oidc.Config{Issuer: cfg.SignIn.Issuer, ClientID: cfg.SignIn.ClientID, ClientSecret: cfg.SignIn.ClientSecret,
-			Scopes: cfg.SignIn.Scopes, GroupsClaim: cfg.SignIn.GroupsClaim, RedirectURL: cfg.SignIn.RedirectURL, Logger: log}))
-		log.Info("people sign in to the dashboard with an OpenID Connect provider", "issuer", cfg.SignIn.Issuer, "redirect", cfg.SignIn.RedirectURL)
+			Scopes: cfg.SignIn.Scopes, GroupsClaim: cfg.SignIn.GroupsClaim, RedirectURL: cfg.SignIn.RedirectURL, Logger: log,
+			NameClaim: cfg.SignIn.NameClaim, Tenants: cfg.SignIn.Tenants}))
+		log.Info("people sign in to the dashboard with an OpenID Connect provider", "issuer", cfg.SignIn.Issuer, "redirect", cfg.SignIn.RedirectURL,
+			"name_claim", cfg.SignIn.NameClaim, "tenants", cfg.SignIn.Tenants)
 	}
 	srv := &http.Server{
 		Handler:           apiServer.Handler(),

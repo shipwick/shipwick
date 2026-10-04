@@ -27,17 +27,22 @@ export function describeSchedule(expression: string): string {
 const DEFAULT_BEFORE_TIMEOUT = '1h'
 
 /**
- * "daily at 03:00 UTC, 7 kept, after pg_dump -f /data/dump.sql (2h at most),
- * with the application stopped": what the `backups` block has the server do.
- * The time the command gets is said only when it is not the default hour, as
- * `shipwick status` does.
+ * "daily at 03:00 UTC, 7 kept, after pg_dump -f /data/dump.sql (2h at most,
+ * in a container of its own), with the application stopped": what the
+ * `backups` block has the server do. The time the command gets is said only
+ * when it is not the default hour, as `shipwick status` does; where it runs
+ * only when that is not inside the replica (`before_in: container`).
  */
 export function describeBackupPlan(backups: SpecBackups): string {
   let plan = `${describeSchedule(backups.schedule)}, ${backups.keep} kept`
   if (backups.before?.length) {
     plan += `, after ${formatArgv(backups.before)}`
     const limit = backups.before_timeout ? tidyDuration(backups.before_timeout) : DEFAULT_BEFORE_TIMEOUT
-    if (limit !== DEFAULT_BEFORE_TIMEOUT) plan += ` (${limit} at most)`
+    const notes = [
+      ...(limit !== DEFAULT_BEFORE_TIMEOUT ? [`${limit} at most`] : []),
+      ...(backups.before_in === 'container' ? ['in a container of its own'] : []),
+    ]
+    if (notes.length > 0) plan += ` (${notes.join(', ')})`
   }
   if (backups.stop) plan += ', with the application stopped'
   return plan

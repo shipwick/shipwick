@@ -22,6 +22,12 @@ const (
 	// provider sends the browser back to, for a dashboard run on the
 	// developer's machine: only a localhost URL is accepted.
 	EnvOIDCRedirectURL = "SHIPWICK_OIDC_REDIRECT_URL"
+	// EnvOIDCNameClaim names the ID token claim people are known by, for
+	// providers whose accounts have no address.
+	EnvOIDCNameClaim = "SHIPWICK_OIDC_NAME_CLAIM"
+	// EnvOIDCTenants lists the Microsoft Entra tenants whose accounts may
+	// sign in: what a multi-tenant issuer is not used without.
+	EnvOIDCTenants = "SHIPWICK_OIDC_TENANTS"
 )
 
 // SignIn is the OpenID Connect provider people sign in to the dashboard
@@ -37,6 +43,12 @@ type SignIn struct {
 	// RedirectURL is the dashboard's callback: the only place the provider
 	// is asked to send anyone back to.
 	RedirectURL string
+	// NameClaim is the ID token claim people are named by: "email" unless
+	// the operator chose another.
+	NameClaim string
+	// Tenants are the tenant ids allowed to sign in, in lowercase, or
+	// oidc.AnyTenant alone; empty for a provider that is one issuer.
+	Tenants []string
 }
 
 var (
@@ -52,7 +64,7 @@ var (
 func (c *Config) loadSignIn(getenv func(string) string) error {
 	issuer := strings.TrimSpace(getenv(EnvOIDCIssuer))
 	if issuer == "" {
-		for _, name := range []string{EnvOIDCClientID, EnvOIDCClientSecret, EnvOIDCScopes, EnvOIDCGroupsClaim, EnvOIDCRedirectURL} {
+		for _, name := range []string{EnvOIDCClientID, EnvOIDCClientSecret, EnvOIDCScopes, EnvOIDCGroupsClaim, EnvOIDCRedirectURL, EnvOIDCNameClaim, EnvOIDCTenants} {
 			if strings.TrimSpace(getenv(name)) != "" {
 				return fmt.Errorf("%s is set but %s is not", name, EnvOIDCIssuer)
 			}
@@ -68,6 +80,7 @@ func (c *Config) loadSignIn(getenv func(string) string) error {
 		ClientSecret: strings.TrimSpace(getenv(EnvOIDCClientSecret)),
 		Scopes:       strings.Fields(strings.ReplaceAll(valueOr(getenv(EnvOIDCScopes), "openid email profile"), ",", " ")),
 		GroupsClaim:  valueOr(strings.TrimSpace(getenv(EnvOIDCGroupsClaim)), "groups"),
+		NameClaim:    valueOr(strings.TrimSpace(getenv(EnvOIDCNameClaim)), api.DefaultNameClaim),
 	}
 	if !oidcClientID.MatchString(s.ClientID) {
 		return fmt.Errorf("%s: the client id the provider issued for Shipwick is needed next to %s", EnvOIDCClientID, EnvOIDCIssuer)
@@ -86,6 +99,9 @@ func (c *Config) loadSignIn(getenv func(string) string) error {
 	}
 	if !oidcClaim.MatchString(s.GroupsClaim) {
 		return fmt.Errorf("%s: invalid value %q (expected the name of the ID token claim that lists groups, e.g. groups)", EnvOIDCGroupsClaim, s.GroupsClaim)
+	}
+	if err := s.loadNames(getenv); err != nil {
+		return err
 	}
 
 	switch redirect := strings.TrimSpace(getenv(EnvOIDCRedirectURL)); {

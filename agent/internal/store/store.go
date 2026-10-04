@@ -384,6 +384,55 @@ var migrations = []string{
 	);
 	CREATE INDEX sessions_email ON sessions(email);
 	CREATE INDEX sessions_expires_at ON sessions(expires_at);`,
+	// 19: the log archive's index: one row per ended run of a container whose
+	// output was kept. The lines themselves are files in the data directory
+	// (deploy/logarchive.go); a row with stored_bytes 0 has none. A run of a
+	// job goes with its run when the job's history is pruned. ended_at and
+	// last_at are also where the next capture of the same container begins.
+	// AUTOINCREMENT: the id names the file, and a removed entry's id must not
+	// come back for another's.
+	`CREATE TABLE log_archives (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+		kind           TEXT NOT NULL,
+		deployment_id  INTEGER REFERENCES deployments(id) ON DELETE SET NULL,
+		replica        INTEGER NOT NULL DEFAULT 0,
+		run_id         INTEGER REFERENCES job_runs(id) ON DELETE CASCADE,
+		job            TEXT NOT NULL DEFAULT '',
+		container_id   TEXT NOT NULL,
+		container_name TEXT NOT NULL,
+		reason         TEXT NOT NULL,
+		exit_code      INTEGER,
+		oom_killed     INTEGER NOT NULL DEFAULT 0,
+		ended_at       TEXT NOT NULL,
+		first_at       TEXT,
+		last_at        TEXT,
+		lines          INTEGER NOT NULL,
+		bytes          INTEGER NOT NULL,
+		stored_bytes   INTEGER NOT NULL,
+		truncated      INTEGER NOT NULL DEFAULT 0,
+		created_at     TEXT NOT NULL
+	);
+	CREATE INDEX log_archives_application ON log_archives(application_id, id);
+	CREATE INDEX log_archives_container ON log_archives(container_id, id);
+	CREATE INDEX log_archives_ended_at ON log_archives(ended_at);`,
+	// 20: the references of a deployment: which of its secret values the server
+	// filled in from its secrets, as the document wrote them (${NAME} in
+	// place). One row per deployment that had any, as JSON, sealed like a
+	// secret (references.go): the text around a reference is whatever the
+	// document said there. The spec keeps holding the values the containers
+	// were started with; this is what lets the document be given back.
+	`CREATE TABLE deployment_references (
+		deployment_id INTEGER PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,
+		value         BLOB NOT NULL
+	);`,
+	// 21: what a session's name rests on. name_claim is the ID token claim
+	// the name was read from — it is kept in email, which holds whatever
+	// that claim said — and tenant the directory the account belongs to
+	// where the provider serves several. A session from before was named by
+	// the email claim and has no tenant.
+	`ALTER TABLE sessions ADD COLUMN name_claim TEXT NOT NULL DEFAULT 'email';
+	ALTER TABLE sessions ADD COLUMN tenant TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

@@ -71,15 +71,14 @@ export function useAgent() {
     return response
   }
 
-  async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, options?: AgentRequestOptions): Promise<T> {
-    const response = await send(method, path, options)
-    if (response.status === 204) return undefined as T
+  /** The answer's envelope: `data`, and whatever the agent says next to it. */
+  async function envelope<E extends ApiEnvelope<unknown>>(response: Response): Promise<E> {
     try {
-      const envelope = await response.json() as ApiEnvelope<T>
-      if (typeof envelope !== 'object' || envelope === null || !('data' in envelope)) {
+      const body = await response.json() as E
+      if (typeof body !== 'object' || body === null || !('data' in body)) {
         throw new AgentError(response.status, 'BAD_RESPONSE', 'The agent sent a response without a data envelope')
       }
-      return envelope.data
+      return body
     }
     catch (error) {
       if (isAbortError(error)) throw error
@@ -88,8 +87,16 @@ export function useAgent() {
     }
   }
 
+  async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, options?: AgentRequestOptions): Promise<T> {
+    const response = await send(method, path, options)
+    if (response.status === 204) return undefined as T
+    return (await envelope<ApiEnvelope<T>>(response)).data
+  }
+
   return {
     get: <T>(path: string, options?: AgentRequestOptions) => request<T>('GET', path, options),
+    /** The whole answer, for the one that says something next to `data`: GET /audit and its `more`. */
+    getEnvelope: async <E extends ApiEnvelope<unknown>>(path: string, options?: AgentRequestOptions) => envelope<E>(await send('GET', path, options)),
     post: <T>(path: string, options?: AgentRequestOptions) => request<T>('POST', path, options),
     /**
      * For a JSON body that creates or replaces: a secret or a registry

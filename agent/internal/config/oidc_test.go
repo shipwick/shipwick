@@ -26,7 +26,7 @@ func TestSignInIsConfiguredWithAProviderAndTheDashboardsHostname(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := &SignIn{Issuer: "https://accounts.example.com/realms/company", ClientID: "shipwick", ClientSecret: "s3cr3t-of-the-client",
-		Scopes: []string{"openid", "email", "profile"}, GroupsClaim: "groups", RedirectURL: "https://dashboard.example.com/auth/callback"}
+		Scopes: []string{"openid", "email", "profile"}, GroupsClaim: "groups", RedirectURL: "https://dashboard.example.com/auth/callback", NameClaim: "email"}
 	if !reflect.DeepEqual(cfg.SignIn, want) {
 		t.Errorf("SignIn = %+v, want %+v", cfg.SignIn, want)
 	}

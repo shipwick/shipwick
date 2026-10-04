@@ -1,0 +1,40 @@
+# The Shipwick agent as a service of the host. Installed by the shipwick-agent
+# package; its settings are in /etc/shipwick/agent.env.
+
+[Unit]
+Description=Shipwick agent
+Documentation=https://shipwick.com
+# Docker by either packaging, when it is a unit of this host. The agent stops
+# at startup when it cannot reach the daemon and is started again.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+EnvironmentFile=/etc/shipwick/agent.env
+Environment=SHIPWICK_DATA_DIR=/var/lib/shipwick
+# Where `docker login` as root keeps credentials for private images.
+Environment=HOME=/root
+ExecStart=/usr/bin/shipwick-agent
+Restart=on-failure
+RestartSec=5
+# The agent settles deployments in flight for up to 30 seconds.
+TimeoutStopSec=45
+
+# Root: the agent drives Docker through its socket, and whoever may do that
+# is root on this host whatever the user is called. What it does not need is
+# taken away all the same.
+StateDirectory=shipwick
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

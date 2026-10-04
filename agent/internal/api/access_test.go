@@ -215,8 +215,29 @@ func TestEveryApplicationRouteIsCheckedAgainstTheTokensApplications(t *testing.T
 
 	checked := 0
 	for _, rt := range f.api.routes {
-		if strings.Contains(rt.path, "/applications/{") != rt.application {
+		if strings.Contains(rt.path, "/applications/{") != rt.application || (rt.application && rt.document) {
 			t.Errorf("%s: acts on an application and is not under %s, so the application check does not see it", rt.pattern(), applicationPrefix)
+			continue
+		}
+		if rt.document {
+			checked++
+			document := func(name string) string { return "name: " + name + "\nimage: app:1\n" }
+			status, body := f.doWithAuth(rt.method, rt.path, document("other"), auth)
+			if e := decodeError(t, body); status != http.StatusForbidden || e.Code != api.CodeTokenLimited || e.Details["application"] != "other" {
+				t.Errorf("%s with the document of another application: status = %d, body = %s; want 403 %s", rt.pattern(), status, body, api.CodeTokenLimited)
+			}
+			// A document that names no application is about none of those the
+			// token is limited to.
+			for _, nameless := range []string{"", "image: app:1\n", "name: [other]\n", "name: Not A Name\n", "{"} {
+				status, body := f.doWithAuth(rt.method, rt.path, nameless, auth)
+				if e := decodeError(t, body); status != http.StatusForbidden || e.Code != api.CodeTokenLimited {
+					t.Errorf("%s with the document %q: status = %d, body = %s; want 403 %s", rt.pattern(), nameless, status, body, api.CodeTokenLimited)
+				}
+			}
+			if status, body := f.doWithAuth(rt.method, rt.path, document("mine"), auth); status == http.StatusForbidden || status == http.StatusUnauthorized {
+				t.Errorf("%s with the document of its own application: status = %d, body = %s", rt.pattern(), status, body)
+			}
+			f.engine.Wait()
 			continue
 		}
 		if !rt.application {

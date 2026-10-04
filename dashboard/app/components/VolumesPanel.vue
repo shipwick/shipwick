@@ -35,7 +35,7 @@ const restoreTitle = computed(() => {
 
 <template>
   <div class="overflow-x-auto">
-    <table class="data-table stack">
+    <table class="data-table stack" aria-label="Volumes">
       <thead>
         <tr>
           <th>Volume</th>

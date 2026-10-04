@@ -25,10 +25,10 @@ import (
 // A server with no way out is installed from a bundle: everything the
 // installer would have fetched, made here, where there is a connection, and
 // copied there by whatever means the network allows. The release's files are
-// verified against its checksums as the installer would verify them; the
-// images are the ones the registry serves under the release's tags, as they
-// are for an installation over the network. The bundle carries the checksum
-// of its image archive, so the server can tell a damaged copy.
+// verified against its checksums as the installer would verify them, and
+// among them the digests of its images, which the archive of images is
+// checked against before it goes in (bundle_images.go). The bundle carries
+// the checksum of its image archive, so the server can tell a damaged copy.
 
 // bundleFiles are the release's files a bundle carries besides the CLI:
 // names that scripts/build-release.sh and scripts/install.sh agree on.
@@ -59,7 +59,9 @@ shipwick binary for the server, and the three images as one archive.
 
 Run it on a machine that has a connection and Docker. The release's files are
 verified against its published checksums; the images are pulled from the
-registry for the server's architecture and saved.
+registry for the server's architecture, saved, and the archive is checked
+against the digests the release published for them (0.7.0 and later). With
+--no-pull the images are the ones this machine has, and nothing proves them.
 
   shipwick server bundle --arch arm64
 
@@ -147,8 +149,40 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 	if len(images) != 3 {
 		return fmt.Errorf("the compose file of release %s names %d Shipwick images, not three: %s", tag, len(images), strings.Join(images, ", "))
 	}
+	// What the release says its images are. Images this machine already had
+	// were not served by the registry under the release's tags, and a release
+	// before 0.7.0 says nothing: neither is held against digests.
+	var digests []byte
+	if !opts.noPull {
+		err := release.verified(ctx, base, bundleDigests, sums, filepath.Join(work, bundleDigests))
+		var missing *missingAssetError
+		switch {
+		case errors.As(err, &missing):
+		case err != nil:
+			return err
+		default:
+			if digests, err = os.ReadFile(filepath.Join(work, bundleDigests)); err != nil {
+				return err
+			}
+		}
+	}
 	if err := c.saveImages(ctx, images, opts, filepath.Join(work, bundleImages)); err != nil {
 		return err
+	}
+	switch {
+	case digests != nil:
+		c.ui.Progress("Checking the images against the release's digests…")
+		err := verifyImageArchive(filepath.Join(work, bundleImages), images, digests, tag, "linux/"+opts.arch)
+		c.ui.Done()
+		if err != nil {
+			return err
+		}
+		files = append(files, bundleDigests)
+		c.ui.Success("The three images are the ones release %s published for linux/%s", tag, opts.arch)
+	case opts.noPull:
+		c.ui.Warn("The images are the ones this machine had under the release's names (--no-pull): they were not checked against the release's digests, and the installer will say so.")
+	default:
+		c.ui.Warn("Release %s does not publish the digests of its images (0.7.0 and later do): the images are what the registry serves under its tags, unchecked, and the installer will say so.", tag)
 	}
 	sum, err := sha256File(filepath.Join(work, bundleImages))
 	if err != nil {
@@ -171,6 +205,10 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 	c.ui.Println(c.ui.Styled(ui.Bold, "  tar -xzf "+filepath.Base(output)))
 	c.ui.Println(c.ui.Styled(ui.Bold, "  sh "+name+"/install.sh"))
 	c.ui.Println(c.ui.Styled(ui.Dim, "The server needs Docker Engine and the Compose plugin; nothing is downloaded there."))
+	// Everything in the bundle follows from this one file; the installer
+	// prints the same line, for whoever wants to compare the two.
+	sumsDigest := sha256.Sum256(sums)
+	c.ui.Println(c.ui.Styled(ui.Dim, "checksums.txt of the release: sha256 "+hex.EncodeToString(sumsDigest[:])))
 	return nil
 }
 

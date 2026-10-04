@@ -161,7 +161,7 @@ const errorTitle = computed(() => {
         <a
           v-if="!offer.problem"
           :href="providerLink"
-          class="mt-5 flex h-8 w-full items-center justify-center rounded-sm border border-primary bg-primary px-3 text-sm font-medium text-primary-fg hover:border-primary-hover hover:bg-primary-hover"
+          class="target mt-5 flex h-8 w-full items-center justify-center rounded-sm border border-primary bg-primary px-3 text-sm font-medium text-primary-fg hover:border-primary-hover hover:bg-primary-hover"
         >Sign in with {{ providerHost }}</a>
         <template v-else>
           <span class="mt-5 flex h-8 w-full items-center justify-center rounded-sm border border-line-strong px-3 text-sm font-medium opacity-45" aria-disabled="true">Sign in with the provider</span>
@@ -188,10 +188,10 @@ const errorTitle = computed(() => {
         autofocus
         required
         :aria-invalid="error?.status === 401 || undefined"
-        aria-describedby="token-help"
+        :aria-describedby="error ? 'token-error token-help' : 'token-help'"
       >
 
-      <div v-if="error" class="mt-3 rounded-sm border border-danger-line bg-danger-bg px-3 py-2 text-xs text-danger" role="alert">
+      <div v-if="error" id="token-error" class="mt-3 rounded-sm border border-danger-line bg-danger-bg px-3 py-2 text-xs text-danger" role="alert">
         <p class="font-medium">
           {{ errorTitle }}
         </p>

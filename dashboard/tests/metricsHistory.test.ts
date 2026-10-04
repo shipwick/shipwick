@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { MetricsHistory } from '../app/types/api'
-import { historyLimit, isMetricsRange, parseStep, segmentPoints, timeTicks, toChartData } from '../app/utils/metricsHistory'
+import { historyLimit, isMetricsRange, parseStep, pointFigures, segmentPoints, timeTicks, toChartData } from '../app/utils/metricsHistory'
 
 const T0 = Date.parse('2026-03-01T09:00:00Z')
 const at = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
@@ -110,5 +110,16 @@ describe('timeTicks', () => {
     expect(timeTicks(T0 + 1, T0 + 3_600_000, '1h').map(t => new Date(t).toISOString().slice(11, 16))).toEqual(['09:15', '09:30', '09:45', '10:00'])
     expect(timeTicks(T0, T0 + 24 * 3_600_000, '24h')).toHaveLength(6)
     expect(timeTicks(T0, T0 + 7 * 24 * 3_600_000, '7d')).toHaveLength(7)
+  })
+})
+
+describe('a line of a chart in numbers', () => {
+  it('counts the points across the gaps and gives the least, the mean, the peak and the last', () => {
+    const segments = [[{ t: 1, value: 10 }, { t: 2, value: 30 }], [{ t: 5, value: 20 }]]
+    expect(pointFigures(segments)).toEqual({ samples: 3, min: 10, avg: 20, max: 30, latest: 20 })
+  })
+
+  it('has no figures for a line without points', () => {
+    expect(pointFigures([])).toEqual({ samples: 0, min: null, avg: null, max: null, latest: null })
   })
 })

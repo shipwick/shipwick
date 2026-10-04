@@ -51,18 +51,21 @@ type AuditFilter struct {
 	Application string
 	Actor       string
 	Since       time.Time
+	// Actions are actions as the trail records them, or the start of a
+	// family with its dot ("token."); an entry matches when one of them does.
+	Actions []string
+	// Outcomes are api.AuditOK and its neighbours; any of them matches.
+	Outcomes []string
+	// ActorKind is api.ActorToken or api.ActorUser.
+	ActorKind string
 	// Before is the id of the last entry of the page before: only older
 	// entries are returned.
 	Before int64
 	Limit  int
 }
 
-// AuditEntries returns the entries that match, newest first.
-func (s *Store) AuditEntries(ctx context.Context, f AuditFilter) ([]api.AuditEntry, error) {
-	var (
-		where []string
-		args  []any
-	)
+// conditions is the filter as the WHERE clause of a query on audit_log.
+func (f AuditFilter) conditions() (where []string, args []any) {
 	if f.Application != "" {
 		where = append(where, "application = ?")
 		args = append(args, f.Application)
@@ -79,6 +82,35 @@ func (s *Store) AuditEntries(ctx context.Context, f AuditFilter) ([]api.AuditEnt
 		where = append(where, "id < ?")
 		args = append(args, f.Before)
 	}
+	if len(f.Actions) > 0 {
+		var either []string
+		for _, action := range f.Actions {
+			if strings.HasSuffix(action, ".") {
+				either = append(either, "substr(action, 1, ?) = ?")
+				args = append(args, len(action), action)
+			} else {
+				either = append(either, "action = ?")
+				args = append(args, action)
+			}
+		}
+		where = append(where, "("+strings.Join(either, " OR ")+")")
+	}
+	if len(f.Outcomes) > 0 {
+		where = append(where, "outcome IN (?"+strings.Repeat(", ?", len(f.Outcomes)-1)+")")
+		for _, outcome := range f.Outcomes {
+			args = append(args, outcome)
+		}
+	}
+	if f.ActorKind != "" {
+		where = append(where, "actor_kind = ?")
+		args = append(args, f.ActorKind)
+	}
+	return where, args
+}
+
+// AuditEntries returns the entries that match, newest first.
+func (s *Store) AuditEntries(ctx context.Context, f AuditFilter) ([]api.AuditEntry, error) {
+	where, args := f.conditions()
 	query := `SELECT id, at, actor_kind, actor, address, forwarded_for, action, application, target, outcome, status, code, detail FROM audit_log`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")

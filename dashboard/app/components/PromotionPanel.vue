@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Promotion } from '~/types/api'
+import { promotionAnnouncement } from '~/utils/announce'
 import { promotedDisplay, promotionOutcome, promotionProgress, promotionRunning, recordValue } from '~/utils/transfer'
 
 /**
@@ -16,13 +17,18 @@ const props = defineProps<{
 const emit = defineEmits<{ dismiss: [] }>()
 
 const running = computed(() => promotionRunning(props.promotion))
+
+// Each application whose state moved is said once, and the end. The panel is
+// polled and shows a clock: live as a whole, it would be read again and again.
+const { announce } = useAnnounce()
+watch(() => props.promotion, (next, previous) => announce(promotionAnnouncement(previous ?? null, next)), { immediate: true })
 </script>
 
 <template>
   <section
     class="overflow-hidden rounded-sm border"
     :class="running ? 'border-warn-line' : props.promotion.status === 'failed' ? 'border-danger-line' : 'border-line'"
-    aria-live="polite"
+    aria-label="Promotion"
   >
     <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-line bg-subtle px-4 py-2.5">
       <p class="flex min-w-0 items-center gap-2 font-medium">
@@ -59,7 +65,7 @@ const running = computed(() => promotionRunning(props.promotion))
         DNS records to point here
       </p>
       <div class="overflow-x-auto rounded-sm border border-line">
-        <table class="data-table !text-xs">
+        <table class="data-table !text-xs" aria-label="DNS records to point here">
           <thead>
             <tr>
               <th>Hostname</th>

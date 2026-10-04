@@ -15,6 +15,7 @@ func (c *cli) logsCommand() *cobra.Command {
 	var file string
 	var tail int
 	var follow, timestamps bool
+	var archive archiveFlags
 
 	cmd := &cobra.Command{
 		Use:   "logs [app]",
@@ -23,7 +24,20 @@ func (c *cli) logsCommand() *cobra.Command {
 
 Without an argument, the application described by deploy.yaml is shown. With
 --follow in a terminal, an application that has printed nothing yet is said
-to be followed, so that an empty screen is not taken for a hang.`,
+to be followed, so that an empty screen is not taken for a hang.
+
+The agent keeps the last output of every container that ended: a replica that
+crashed, was restarted or was replaced by a deployment, and the runs of jobs
+and commands. --previous shows the last one that ended, which is where to look
+after a crash; --list shows what is kept and --id one entry of it; --run the
+output of a run. --search, --since, --until, --deployment and --replica show
+lines of the kept output and of the running containers together, oldest
+first, the newest -n of them.`,
+		Example: `  shipwick logs my-api -f
+  shipwick logs my-api --previous
+  shipwick logs my-api --search "connection refused" --since 2h
+  shipwick logs my-api --deployment 12
+  shipwick logs my-api --list`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := c.resolveApp(args, file)
@@ -32,6 +46,17 @@ to be followed, so that an empty screen is not taken for a hang.`,
 			}
 			if tail < 0 || tail > 5000 || (tail == 0 && !follow) {
 				return fmt.Errorf("--tail must be between 1 and 5000 (0 is allowed with --follow)")
+			}
+			if archive.set() {
+				if err := archive.validate(follow); err != nil {
+					return err
+				}
+				// A search shows when each line was printed unless told not to:
+				// what it finds is hours and containers apart.
+				if archive.search != "" && !cmd.Flags().Changed("timestamps") {
+					timestamps = true
+				}
+				return c.archivedLogs(cmd.Context(), name, archive, tail, cmd.Flags().Changed("tail"), timestamps)
 			}
 			cl, err := c.connect()
 			if err != nil {
@@ -75,6 +100,7 @@ to be followed, so that an empty screen is not taken for a hang.`,
 	cmd.Flags().IntVarP(&tail, "tail", "n", 100, "number of lines to show from the end of the logs")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "keep streaming new log lines")
 	cmd.Flags().BoolVarP(&timestamps, "timestamps", "t", false, "prefix each line with its timestamp")
+	archive.register(cmd)
 	return cmd
 }
 

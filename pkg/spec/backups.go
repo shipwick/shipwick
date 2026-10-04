@@ -38,7 +38,19 @@ type Backups struct {
 	// backup fails. Zero, in a deployment recorded before the key existed,
 	// means DefaultBackupBeforeTimeout.
 	BeforeTimeout Duration `json:"before_timeout,omitempty"`
+	// BeforeIn says where Before runs: empty, in the replica itself, where it
+	// cannot be ended once it has started; BeforeInContainer, in a container
+	// of its own next to the replica, which is stopped at BeforeTimeout.
+	BeforeIn string `json:"before_in,omitempty"`
 }
+
+// Where backups.before runs. The replica is the default and is recorded as
+// the empty string, which is also what a deployment from before the key
+// existed holds.
+const (
+	BeforeInReplica   = "replica"
+	BeforeInContainer = "container"
+)
 
 // BeforeLimit is how long Before may run.
 func (b *Backups) BeforeLimit() time.Duration {
@@ -56,6 +68,7 @@ type backupsRaw struct {
 	Stop     bool     `yaml:"stop"`
 
 	BeforeTimeout string `yaml:"before_timeout"`
+	BeforeIn      string `yaml:"before_in"`
 }
 
 // validateBackups checks the `backups` block.
@@ -83,7 +96,7 @@ func (r raw) validateBackups(verr *ValidationError, app App) *Backups {
 		// left out.
 		problems, _ := syntaxError(err)
 		for _, f := range problems.Fields {
-			verr.add("backups", f.Message, "schedule, keep, before, before_timeout, stop")
+			verr.add("backups", f.Message, "schedule, keep, before, before_timeout, before_in, stop")
 		}
 		return nil
 	}
@@ -115,6 +128,17 @@ func (r raw) validateBackups(verr *ValidationError, app App) *Backups {
 			verr.add("backups.before_timeout", err.Error(), example)
 		} else {
 			out.BeforeTimeout = Duration(d)
+		}
+	}
+	if v := strings.TrimSpace(b.BeforeIn); v != "" {
+		const example = "replica (inside the running replica), container (in a container of its own, which can be ended)"
+		switch {
+		case b.Before == nil:
+			verr.add("backups.before_in", "needs backups.before: it says where that command runs", example)
+		case v == BeforeInContainer:
+			out.BeforeIn = BeforeInContainer
+		case v != BeforeInReplica:
+			verr.add("backups.before_in", fmt.Sprintf("invalid value %q", b.BeforeIn), example)
 		}
 	}
 	switch {

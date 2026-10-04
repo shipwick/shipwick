@@ -143,6 +143,7 @@ func (e *Engine) collectJob(ctx context.Context, run store.JobRun, id string, ti
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	defer func() {
+		e.archiveLogs(cleanup, id, logEnd{removing: true})
 		if err := e.rt.RemoveContainer(cleanup, id); err != nil {
 			e.log.Warn("could not remove job container", "container", id, "error", err)
 		}
@@ -406,6 +407,7 @@ func (e *Engine) reportRun(d store.Deployment, run store.JobRun, code int, err e
 	if err := e.store.PruneJobRuns(ctx, d.ApplicationID, run.Job, jobRunsKept); err != nil {
 		e.log.Warn("could not prune job runs", "app", d.Application, "job", run.Job, "error", err)
 	}
+	e.dropPrunedRunLogs(ctx, d.ApplicationID)
 }
 
 // Jobs describes the scheduled jobs of the application's active deployment:

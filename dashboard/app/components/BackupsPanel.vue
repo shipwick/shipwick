@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { AppSpec, BackupRun } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
+import { backupAnnouncement } from '~/utils/announce'
 import { toAgentError } from '~/utils/agentError'
 import { formatBytes } from '~/utils/format'
 import { backupBusy, backupSize, backupStatusDisplay, backupUsable, describeBackups, describeDestinations, triggerLabel, verificationDisplay } from '~/utils/backups'
@@ -30,6 +31,7 @@ const emit = defineEmits<{
 
 const agent = useAgent()
 const now = useNow()
+const { announce } = useAnnounce()
 const path = computed(() => `/applications/${encodeURIComponent(props.application)}/backups`)
 
 // A backup being taken, verified or restored is followed closely; the list is otherwise quiet.
@@ -42,6 +44,8 @@ watch(runs.data, (list, before) => {
   anyBusy.value = (list ?? []).some(backupBusy)
   // Something just finished: its event is in the application's feed now.
   if (was && !anyBusy.value && before) emit('changed')
+  // The row changes without a sound: how it ended is said.
+  if (list && before) announce(backupAnnouncement(before, list))
 })
 watch(() => props.application, () => void runs.reset())
 
@@ -148,7 +152,7 @@ function openRow(run: BackupRun, event: MouseEvent) {
         </template>
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Backups">
           <thead>
             <tr>
               <th class="w-16">
@@ -196,7 +200,7 @@ function openRow(run: BackupRun, event: MouseEvent) {
               <td data-label="Verified">
                 <StatusBadge v-if="verificationDisplay(r, now)" v-bind="verificationDisplay(r, now)!" :raw="r.verify_error || r.verified_at || undefined" />
                 <span v-else-if="r.trigger === 'adopted' && backupUsable(r)" class="text-xs text-warn" title="What it holds was read from its files alone">not yet: verify before relying on it</span>
-                <span v-else class="text-fg-faint">never</span>
+                <span v-else class="text-fg-subtle">never</span>
               </td>
               <td class="right">
                 <UiButton
@@ -205,6 +209,7 @@ function openRow(run: BackupRun, event: MouseEvent) {
                   :disabled="!props.mayDeploy || backupBusy(r)"
                   :pending="verifying === r.id"
                   :title="verifyTitle(r)"
+                  :aria-label="`Verify backup ${r.id}`"
                   @click="verify(r)"
                 >
                   Verify

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import type { Container } from '~/types/api'
+import type { Container, LogArchiveEntry } from '~/types/api'
 import { LIVE_METRICS_SAMPLES } from '~/composables/useLiveMetrics'
+import { archiveSupported, endedBecause, hasDied, lastOutputEntry, logsPath } from '~/utils/logArchive'
 import { alertsFor } from '~/utils/alerts'
 import { describeIssued, hostnameCertificateDisplay } from '~/utils/certificates'
 import { diagnose } from '~/utils/diagnosis'
@@ -105,6 +106,19 @@ const sequenceById = computed(() => new Map((deployments.data.value ?? []).map(d
 const replicaCount = computed(() => detail.value.containers.filter(c => !draining(c)).length)
 const drainingCount = computed(() => detail.value.containers.length - replicaCount.value)
 
+// A replica that restarted or lies dead said why before it ended, and the
+// agent kept that: the row links to it. Asked only while such a replica is
+// listed, and only of an agent that keeps output.
+const agent = useAgent()
+const someDied = computed(() => !isStatic.value && archiveSupported(server.data.value) && detail.value.containers.some(c => !draining(c) && hasDied(c)))
+const kept = usePolling<LogArchiveEntry[]>(
+  signal => agent.get<LogArchiveEntry[]>(`/applications/${encodeURIComponent(name.value)}/logs/archive`, { query: { kind: 'replica', limit: 50 }, signal }),
+  { interval: 15_000, enabled: () => someDied.value },
+)
+function lastOutput(c: Container): LogArchiveEntry | null {
+  return someDied.value && !draining(c) && hasDied(c) ? lastOutputEntry(kept.data.value ?? [], c.name) : null
+}
+
 // --- what happened last -------------------------------------------------------
 
 const RECENT = 5
@@ -160,7 +174,7 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
                 class="mono link inline-flex min-w-0 items-center gap-1 break-all"
                 :class="entry.kind === 'redirect' ? 'text-fg-muted' : ''"
                 :title="certificateTitle(entry.host)"
-              >{{ entry.address }}<UiIcon name="external" :size="12" /></a>
+              >{{ entry.address }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></a>
               <!-- A wildcard is a pattern, not an address: there is nothing to open. -->
               <span v-else class="mono break-all" :title="certificateTitle(entry.host) ?? 'Every name one label below is served alike'">{{ entry.address }}</span>
               <span v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :title="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</span>
@@ -239,7 +253,7 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
         </template>
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Replicas">
           <thead>
             <tr>
               <th class="w-20">
@@ -263,9 +277,9 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
           <tbody>
             <tr v-for="c in containers" :key="c.id" :class="draining(c) ? 'text-fg-muted' : ''">
               <td data-primary class="mono">
-                <span :class="draining(c) ? 'line-through decoration-fg-faint' : ''">{{ c.replica }}</span><span class="ml-2 text-fg-muted sm:hidden">{{ c.name }}</span>
+                <span :class="draining(c) ? 'line-through decoration-fg-faint' : ''">{{ c.replica }}</span><span class="ml-2 text-fg-muted rows:hidden">{{ c.name }}</span>
               </td>
-              <td class="mono max-sm:!hidden" :title="`${c.id.slice(0, 12)} · ${c.ip || 'no address'}`">
+              <td class="mono cards:!hidden" :title="`${c.id.slice(0, 12)} · ${c.ip || 'no address'}`">
                 {{ c.name }}
                 <span v-if="mixedVersions" class="ml-2 text-fg-subtle" :title="c.image">
                   {{ splitImage(c.image).tag || 'latest' }}<template v-if="sequenceById.get(c.deployment_id)"> · #{{ sequenceById.get(c.deployment_id) }}</template>
@@ -280,12 +294,19 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
                 <StatusBadge v-else v-bind="containerStateDisplay(c)" :raw="c.state" />
               </td>
               <td data-label="Health">
-                <span v-if="draining(c)" class="text-fg-faint">—</span>
+                <span v-if="draining(c)" class="text-fg-subtle">—</span>
                 <StatusBadge v-else v-bind="replicaHealthDisplay(c.health)" :raw="c.health || 'no health check configured'" />
               </td>
               <td data-label="Restarts" class="mono" :class="draining(c) ? '' : c.crash_loop ? 'text-danger' : c.restarts > 0 ? 'text-warn' : 'text-fg-muted'">
-                <span v-if="draining(c)" class="text-fg-faint">—</span>
+                <span v-if="draining(c)" class="text-fg-subtle">—</span>
                 <span v-else>{{ c.restarts }}<span v-if="c.crash_loop" class="font-sans"> (keeps crashing)</span></span>
+                <NuxtLink
+                  v-if="lastOutput(c)"
+                  :to="logsPath(name, { view: 'archive', entry: lastOutput(c)!.id })"
+                  class="link ml-2 whitespace-nowrap font-sans text-xs text-fg-muted"
+                  :title="`Replica ${c.replica} ${endedBecause(lastOutput(c)!)}: what it wrote before that`"
+                  :aria-label="`Last output of replica ${c.replica}`"
+                >last output</NuxtLink>
               </td>
               <td data-label="CPU" class="mono right text-fg-muted" :title="replicaCpuTitle(c)">
                 {{ formatPercent(replicaMetrics(c)?.cpu_percent) }}
@@ -336,7 +357,7 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
       <EmptyState v-else-if="(events.data.value?.length ?? 0) === 0" title="No events">
         Crashes, restarts, health changes, stops and starts are recorded here.
       </EmptyState>
-      <div v-else class="max-h-80 overflow-y-auto">
+      <div v-else class="max-h-80 overflow-y-auto focus-visible:-outline-offset-2" tabindex="0" role="group" aria-label="Events">
         <EventList :events="events.data.value ?? []" />
       </div>
     </UiPanel>

@@ -59,6 +59,7 @@ type fakeAgent struct {
 	validate     fakeValidate      // POST …/validate, see validate_test.go
 	terminal     bool              // the CLI writes as to a terminal: the progress line is on
 	after        fakeTimer         // replaces the CLI's timers
+	archive      fakeArchive       // the log archive, see logs_archive_test.go
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
@@ -70,6 +71,7 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 	f.images.register(mux)
 	f.static.register(mux)
 	f.validate.register(mux)
+	f.archive.register(mux)
 
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		health := f.health

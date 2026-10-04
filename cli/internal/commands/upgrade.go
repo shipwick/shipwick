@@ -42,7 +42,10 @@ type upgradeOptions struct {
 	// executable locates the running binary, symlinks resolved.
 	executable   func() (string, error)
 	goos, goarch string
-	version      string
+	// machine is the architecture of the machine, which on Windows need not
+	// be the one this binary was built for: see machineArch.
+	machine string
+	version string
 }
 
 func (o upgradeOptions) withDefaults() upgradeOptions {
@@ -66,6 +69,12 @@ func (o upgradeOptions) withDefaults() upgradeOptions {
 	}
 	if o.goos == "" {
 		o.goos = runtime.GOOS
+	}
+	if o.machine == "" {
+		// A test that names an architecture means the machine's too.
+		if o.machine = o.goarch; o.machine == "" {
+			o.machine = machineArch()
+		}
 	}
 	if o.goarch == "" {
 		o.goarch = runtime.GOARCH
@@ -161,10 +170,7 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	if err != nil {
 		return err
 	}
-	asset := "shipwick_" + opts.goos + "_" + opts.goarch
-	if opts.goos == "windows" {
-		asset += ".exe"
-	}
+	asset := releaseAsset(opts.goos, opts.machine)
 
 	// The staging file is opened first: a directory that cannot be written to
 	// should be reported before anything is downloaded.
@@ -172,7 +178,7 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	f, err := os.OpenFile(staged, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
-			return notWritable(filepath.Dir(exe))
+			return notWritable(filepath.Dir(exe), releaseAsset(opts.goos, opts.machine))
 		}
 		return fmt.Errorf("write %s: %w", staged, err)
 	}
@@ -187,6 +193,13 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 		return fmt.Errorf("download the release checksums: %w", err)
 	}
 	want, ok := checksumFor(sums, asset)
+	if !ok && opts.machine != opts.goarch {
+		// A release from before the machine's architecture was built for
+		// still has the build this binary is.
+		if w, found := checksumFor(sums, releaseAsset(opts.goos, opts.goarch)); found {
+			asset, want, ok = releaseAsset(opts.goos, opts.goarch), w, true
+		}
+	}
 	if !ok {
 		return fmt.Errorf("release %s has no %s (looked in %s); nothing was changed", tag, asset, base+"checksums.txt")
 	}
@@ -211,7 +224,7 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	}
 	if err := replaceExecutable(exe, staged); err != nil {
 		if errors.Is(err, fs.ErrPermission) {
-			return notWritable(filepath.Dir(exe))
+			return notWritable(filepath.Dir(exe), releaseAsset(opts.goos, opts.machine))
 		}
 		return fmt.Errorf("replace %s: %w", exe, err)
 	}
@@ -393,9 +406,19 @@ func staleExecutableName(exe string) string {
 	return exe + ".old.exe"
 }
 
-func notWritable(dir string) error {
+// releaseAsset is the name of the CLI's build for a platform among the
+// release's files (scripts/build-release.sh).
+func releaseAsset(goos, goarch string) string {
+	asset := "shipwick_" + goos + "_" + goarch
+	if goos == "windows" {
+		asset += ".exe"
+	}
+	return asset
+}
+
+func notWritable(dir, asset string) error {
 	if runtime.GOOS == "windows" {
-		return fmt.Errorf("cannot write to %s: permission denied\n\nRun it from an administrator prompt, or download shipwick_windows_amd64.exe from\nhttps://github.com/%s/releases and replace the file yourself", dir, releaseRepo)
+		return fmt.Errorf("cannot write to %s: permission denied\n\nRun it from an administrator prompt, or download %s from\nhttps://github.com/%s/releases and replace the file yourself", dir, asset, releaseRepo)
 	}
 	return fmt.Errorf("cannot write to %s: permission denied\n\nRun it as root: sudo shipwick upgrade\nor run the installer again: %s -s -- --cli", dir, installerCommand)
 }

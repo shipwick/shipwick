@@ -36,6 +36,7 @@ func (e *Engine) Stop(ctx context.Context, name string) error {
 		for _, r := range replicas {
 			c := docker.Container{ID: r.ContainerID, Name: r.ContainerName, App: app.Name, DeploymentID: r.DeploymentID, Replica: r.Index}
 			e.noteKilled(ctx, app.ID, app.Name, c, grace, "stopped")
+			e.archiveInBackground(r.ContainerID, logEnd{reason: api.LogReasonStopped})
 		}
 		e.appEvent(ctx, app, byActor(ctx, "Application stopped"))
 		return nil
@@ -134,6 +135,7 @@ func (e *Engine) Delete(ctx context.Context, name string) error {
 		return err
 	}
 	e.traffic.forget(app.ID)
+	e.purgeLogs(app.ID)
 	e.syncProxyBestEffort(ctx, name)
 	removed := e.pruneImages(ctx, images)
 	// Its history goes with it, so the log is the only record of who did this.

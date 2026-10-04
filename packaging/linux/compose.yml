@@ -1,0 +1,74 @@
+# The reverse proxy and the dashboard, for a server where the agent runs as a
+# service of the host (the shipwick-agent package). Both stay containers: the
+# proxy finds the replicas of an application by name on a Docker network, and
+# the dashboard brings its own Node.
+#
+# Start the agent first — it creates the two networks — then:
+#
+#   docker compose --env-file /etc/shipwick/agent.env -f /usr/share/shipwick/compose.yml up -d
+#
+# The same command after the package was upgraded. This file is replaced by
+# every version of the package; the settings are in /etc/shipwick/agent.env.
+
+# The agent finds the proxy by this project name and the service name `caddy`:
+# static applications are copied into that container, and requests are
+# counted from its output.
+name: shipwick
+
+services:
+  caddy:
+    image: ${SHIPWICK_CADDY_IMAGE:-ghcr.io/shipwick/caddy:latest}
+    command: caddy run --config /etc/caddy/bootstrap.json --resume
+    environment:
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    configs:
+      - source: caddy-bootstrap
+        target: /etc/caddy/bootstrap.json
+    ports:
+      - "${SHIPWICK_HTTP_PORT:-80}:80"
+      - "${SHIPWICK_HTTPS_PORT:-443}:443"
+      - "${SHIPWICK_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - caddy-data:/data # certificates — back this volume up, never delete it casually
+      - caddy-config:/config
+      - caddy-static:/srv/shipwick
+      # Caddy's admin API, on a unix socket in a directory of the host that
+      # only root can enter. The path is the same on both sides: the agent
+      # repeats it in every configuration it loads.
+      - /run/shipwick:/run/shipwick
+    networks: [shipwick, shipwick-services]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    restart: unless-stopped
+
+  dashboard:
+    image: ${SHIPWICK_DASHBOARD_IMAGE:-ghcr.io/shipwick/dashboard:latest}
+    environment:
+      # The agent on the host, which must listen on the Docker bridge's
+      # address for this (SHIPWICK_LISTEN_ADDR in agent.env).
+      SHIPWICK_AGENT_URL: http://host.docker.internal:9000
+      SHIPWICK_AGENTS: ${SHIPWICK_AGENTS:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [shipwick]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    restart: unless-stopped
+
+configs:
+  caddy-bootstrap:
+    content: |
+      {"admin": {"listen": "unix//run/shipwick/admin.sock"}}
+
+volumes:
+  caddy-data:
+  caddy-config:
+  caddy-static:
+
+networks:
+  # Created by the agent when it starts.
+  shipwick:
+    name: shipwick
+    external: true
+  shipwick-services:
+    name: shipwick-services
+    external: true

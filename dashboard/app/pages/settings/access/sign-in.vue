@@ -2,7 +2,7 @@
 import type { AccessRule, AccessRuleKind, Application, GrantAccessRequest, PersonSession, Role, SignedOut } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { AgentError as AgentFailure, toAgentError } from '~/utils/agentError'
-import { issuerHost, listNames, ruleSubject, ruleSubjectProblem } from '~/utils/access'
+import { cleanRuleSubject, issuerHost, listNames, otherNameClaim, ruleKinds, ruleReach, ruleSubject, ruleSubjectProblem } from '~/utils/access'
 import { formatAbsoluteUtc, pluralize } from '~/utils/format'
 import { ROLE_DESCRIPTIONS, ROLE_ORDER } from '~/utils/roles'
 
@@ -38,13 +38,17 @@ const signIn = computed(() => server.data.value?.sign_in ?? null)
 
 // --- grant ----------------------------------------------------------------------
 
-const KINDS: readonly { value: AccessRuleKind, label: string, placeholder: string, help: string }[] = [
-  { value: 'email', label: 'One person', placeholder: 'ada@example.com', help: 'The address the provider names for the account.' },
-  { value: 'group', label: 'A group', placeholder: 'developers', help: 'A group of the provider\'s, written exactly as the provider sends it.' },
-  { value: 'domain', label: 'Everyone at a domain', placeholder: 'example.com', help: 'Every address at the domain: the part after the @.' },
-]
+/** The claim people are named by where it is not their address: rules for one person are then by name. */
+const claim = computed(() => otherNameClaim(signIn.value))
+/** An agent from 0.7 on says which claim it is, and knows rules by name. */
+const knowsNames = computed(() => signIn.value?.name_claim !== undefined)
+const KINDS = computed(() => ruleKinds(claim.value, knowsNames.value))
 
 const kind = ref<AccessRuleKind>('email')
+// The first kind is the one for a single person: by name where people have no address.
+watch(claim, (value) => {
+  kind.value = value === '' ? 'email' : 'name'
+}, { immediate: true })
 const subject = ref('')
 const role = ref<Role>('read')
 const limits = ref<string[]>([])
@@ -56,13 +60,13 @@ watch(role, (value) => {
   if (value !== 'deploy') limits.value = []
 })
 
-const kindInfo = computed(() => KINDS.find(k => k.value === kind.value)!)
-const cleanSubject = computed(() => (kind.value === 'group' ? subject.value.trim() : subject.value.trim().toLowerCase().replace(/^\*?@/, '')))
+const kindInfo = computed(() => KINDS.value.find(k => k.value === kind.value) ?? KINDS.value[0]!)
+const cleanSubject = computed(() => cleanRuleSubject(kind.value, subject.value))
 const subjectProblem = computed(() => ruleSubjectProblem(kind.value, cleanSubject.value))
 /** Granting again for the same subject replaces its rule: the form says which it will be. */
 const existing = computed(() => (rules.data.value ?? []).find(r => r.kind === kind.value && r.subject === cleanSubject.value) ?? null)
 /** The rule the admin's own session rests on: changing it ends that session with its next request. */
-const ownRule = computed(() => access.token.value?.kind === 'user' && kind.value === 'email' && cleanSubject.value === access.token.value.name)
+const ownRule = computed(() => access.token.value?.kind === 'user' && (kind.value === 'email' || kind.value === 'name') && cleanSubject.value === access.token.value.name)
 
 async function grant() {
   if (granting.value || cleanSubject.value === '' || subjectProblem.value) return
@@ -160,7 +164,9 @@ async function signOut(email: string) {
       </span>
     </p>
     <p v-else-if="signIn" class="text-fg-muted">
-      People sign in at <span class="mono text-fg">{{ issuerHost(signIn.issuer) }}</span>. Nobody gets in without a rule below; a session lasts ten hours.
+      People sign in at <span class="mono text-fg">{{ issuerHost(signIn.issuer) }}</span><template v-if="claim">
+        and are named by its <span class="mono text-fg">{{ claim }}</span> claim, not by an e-mail address
+      </template>. Nobody gets in without a rule below; a session lasts ten hours.
     </p>
 
     <UiPanel title="Who may sign in" :meta="rules.data.value?.length ?? null">
@@ -170,7 +176,7 @@ async function signOut(email: string) {
         Nobody can sign in through the provider until a rule gives them a role. Add one below: for one person, for a group, or for everyone at a domain.
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Who may sign in">
           <thead>
             <tr>
               <th>Who</th>
@@ -187,6 +193,7 @@ async function signOut(email: string) {
             <tr v-for="r in rules.data.value" :key="r.id">
               <td data-primary class="mono break-all font-medium">
                 {{ ruleSubject(r) }}
+                <span v-if="ruleReach(r, claim)" class="block font-sans text-xs font-normal text-fg-subtle">{{ ruleReach(r, claim) }}</span>
               </td>
               <td data-label="Role" class="mono" :title="ROLE_DESCRIPTIONS[r.role] ?? undefined">
                 {{ r.role }}
@@ -201,7 +208,7 @@ async function signOut(email: string) {
                 {{ r.created_by || '—' }}
               </td>
               <td class="right">
-                <UiButton variant="danger" size="sm" @click="revoking = r">
+                <UiButton variant="danger" size="sm" :aria-label="`Revoke ${ruleSubject(r)}`" @click="revoking = r">
                   Revoke
                 </UiButton>
               </td>
@@ -210,7 +217,7 @@ async function signOut(email: string) {
         </table>
       </div>
       <p class="border-t border-line px-4 py-2 text-xs text-fg-subtle">
-        The most specific rule decides: address, then groups, then domain.
+        The most specific rule decides: {{ knowsNames ? 'name, then address' : 'address' }}, then groups, then domain.
       </p>
     </UiPanel>
 
@@ -226,7 +233,7 @@ async function signOut(email: string) {
             </select>
           </div>
           <div>
-            <label for="rule-subject" class="label block">{{ kind === 'email' ? 'Address' : kind === 'group' ? 'Group' : 'Domain' }}</label>
+            <label for="rule-subject" class="label block">{{ kindInfo.field }}</label>
             <input
               id="rule-subject"
               v-model="subject"
@@ -296,7 +303,7 @@ async function signOut(email: string) {
         A person who signs in appears here for the ten hours their session lasts. Tokens are not sessions and are listed under API tokens.
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="People signed in now">
           <thead>
             <tr>
               <th>Who</th>
@@ -332,7 +339,7 @@ async function signOut(email: string) {
                 <span v-else>never</span>
               </td>
               <td class="right">
-                <UiButton size="sm" :pending="ending === s.email" title="Ends every session of this person; they can sign in again while a rule covers them" @click="signOut(s.email)">
+                <UiButton size="sm" :pending="ending === s.email" title="Ends every session of this person; they can sign in again while a rule covers them" :aria-label="`Sign out ${s.email}`" @click="signOut(s.email)">
                   Sign out
                 </UiButton>
               </td>

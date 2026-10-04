@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { Standby } from '~/types/api'
 import { AgentError } from '~/utils/agentError'
-import { serverTabs } from '~/utils/tabs'
+import { serverTabs, tabTitle } from '~/utils/tabs'
 import { isStandby } from '~/utils/transfer'
+import { updateNotice } from '~/utils/updates'
 
 /**
  * The frame of a server's page: which server, whether it answers, and the
@@ -30,6 +31,11 @@ const waiting = computed(() => (isStandby(standby.data.value) ? standby.data.val
 provide(STANDBY_WAITING, waiting)
 
 const tabs = computed(() => serverTabs({ waiting: waiting.value }))
+
+const newer = computed(() => updateNotice(polling.data.value))
+
+const route = useRoute()
+useHead({ title: () => tabTitle(tabs.value, route.path, 'Server') })
 </script>
 
 <template>
@@ -40,7 +46,7 @@ const tabs = computed(() => serverTabs({ waiting: waiting.value }))
       </template>
     </PageHeader>
     <PageBody>
-      <div v-if="polling.loading.value && !polling.data.value" class="space-y-3" aria-busy="true" aria-label="Loading">
+      <div v-if="polling.loading.value && !polling.data.value" class="space-y-3" role="progressbar" aria-busy="true" aria-label="Loading">
         <span class="skeleton h-6 w-48" />
         <span class="skeleton w-72" />
         <span class="skeleton w-56" />
@@ -58,6 +64,8 @@ const tabs = computed(() => serverTabs({ waiting: waiting.value }))
           <span v-if="session.multiple.value" class="text-fg-muted">Server <span class="mono text-fg">{{ session.selected.value }}</span></span>
           <StatusBadge :tone="polling.error.value ? 'danger' : 'ok'" :label="polling.error.value ? 'Not responding' : 'Connected'" size="md" />
           <span class="text-fg-muted">Agent <span class="mono text-fg">{{ polling.data.value.agent_version }}</span></span>
+          <!-- Per server, and only where its version is shown: a newer release is never a dialog. -->
+          <NuxtLink v-if="newer" :to="{ path: '/servers', hash: '#update' }" class="link text-xs text-fg-muted">{{ newer.latest }} is available</NuxtLink>
         </div>
 
         <UiTabs :tabs="tabs" label="Sections of the server" />

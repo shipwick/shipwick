@@ -54,7 +54,7 @@ app/
                     application's page and [name]/ its tabs), deployments/, logs/, servers.vue and
                     servers/ (the server's page and its tabs), volumes/, certificates/,
                     settings/ (secrets, registries, access), login
-  components/       hand-rolled UI: UiButton, UiDialog (native <dialog>), UiTabs, StatusBadge, FindingList,
+  components/       hand-rolled UI: UiButton, UiDialog (native <dialog>), UiTabs, StatusBadge, FindingList, LiveAnnouncer,
                     Sparkline and MetricsHistoryChart (SVG), LogViewer, DeploymentProgressPanel,
                     VolumesPanel, JobsSection, dialogs (deploy, rollback, delete, restore,
                     run, run command), …
@@ -62,17 +62,20 @@ app/
                     useMetricsHistory, useDeploymentProgress, useSession (the servers, the
                     sign-ins, the one this tab is on), useTheme, useNow, useServerInfo
                     (+ useAccess: the token's role and its applications), useApplication
-                    (what the application page shares with its tabs)
+                    (what the application page shares with its tabs), useAnnounce (what a
+                    screen reader is told), useFocusTrap, useRovingFocus, useFocusWhenShown
   middleware/       auth.global (which server an address is about, and whether it is signed
                     in), moved.global (addresses that moved)
-  plugins/          server-links.client (with several servers, every link names its server)
+  plugins/          server-links.client (with several servers, every link names its server),
+                    focus.client (where the focus goes when its control is removed)
   utils/            pure logic, unit-tested: format, ndjson, status, deploymentProgress,
                     deployments, spec, metricsHistory, roles, jobs, agentError, redirect,
                     secrets, volumes, navigation (groups, moved addresses), tabs, diagnosis
                     (what is wrong with an application), overview (the verdict), marks
                     (alerts and certificates in a list), access (limited and expiring
                     tokens, rules, the audit trail), servers (several servers),
-                    deployDocument (a pasted deploy.yaml), network
+                    deployDocument (a pasted deploy.yaml), network, focus (roving focus, the
+                    focus trap), announce (what is news for a screen reader)
   types/api.ts      wire types, mirroring pkg/api/types.go and pkg/spec/spec.go
   assets/css/       design tokens (light/dark), Tailwind v4 theme
 server/
@@ -320,6 +323,81 @@ internet access and makes no request to any third party.
 - **Log tail** follows the agent: per replica when following, merged total
   otherwise; the control says so.
 
+## Keyboard, screen readers and touch
+
+Every page and dialog works with the keyboard alone, is described to a screen
+reader, and can be hit with a finger. A new component keeps it that way by
+following these rules; the helpers named are the ones the existing components
+use.
+
+- **Controls are controls.** A `<button>`, a link or `UiButton`, never a
+  click handler on a `div`. A row that opens something on a click carries a
+  link or a button in its first cell that opens the same thing.
+- **The focus ring** is the global `:focus-visible` outline in the accent
+  color. Do not remove it from anything Tab stops at. Inside a box that clips
+  (`overflow-hidden`, a row that scrolls sideways) draw it inside the control:
+  `focus-visible:-outline-offset-2`.
+- **Focus is never lost.** A dialog is a `UiDialog`: it starts at the field
+  marked `autofocus` or at its title, keeps Tab inside (`useFocusTrap`, for
+  any other surface that must keep it too), closes on Escape and gives the
+  focus back to the control that opened it. A popover that is not a dialog
+  closes on Escape and when the focus leaves it (the server switcher in
+  `AppNav`). A `UiButton` that is `pending` keeps the focus, and one that is
+  `disabled` with a `title` stays a Tab stop so the reason can be read; do not
+  set the native `disabled` on a button while it has the focus. A result that
+  replaces the form which produced it takes the focus (`useFocusWhenShown`,
+  on an element with `tabindex="-1"`); when it goes away again, focus the
+  control that takes its place. When the control that has the focus is
+  removed — a link that was followed, a row its own button deleted —
+  `plugins/focus.client.ts` gives the focus to `<main>`. After a navigation
+  the page's title is announced, so every route sets one (`useHead`; a tab
+  with `tabTitle`).
+- **One of several is a radio group**: `role="radiogroup"` around
+  `role="radio"` buttons, one Tab stop (`rovingTabStop`), the arrows move and
+  choose (`useRovingFocus`) — `ThemeToggle`, `RangeSwitch`. Several of
+  several are buttons with `aria-pressed` (`ApplicationsPicker`). Sections
+  with an address are links (`UiTabs`), not an ARIA tab list.
+- **Everything has a name.** An icon-only button has an `aria-label`
+  (`UiIcon` itself is hidden from a screen reader). An action repeated in
+  every row names its row and begins with the visible text:
+  `aria-label="Revoke ci"`. A link that opens a new tab says so in a
+  `sr-only` span. A field has a `<label for>`; its help and its error are one
+  paragraph tied to it with `aria-describedby`, and `aria-invalid` is set
+  while it is wrong. A table has an `aria-label`. A chart is `role="img"`
+  with a sentence, and a `Show as table` below it (`pointFigures`). A status
+  is a word next to its color (`StatusBadge`), never the color alone.
+- **What changes without a navigation is said once.** Call
+  `useAnnounce().announce(text)`; the two live regions are in `app.vue`
+  (`LiveAnnouncer`). Never put `aria-live` or `role="status"` on a container
+  that holds a clock (`TimeAgo`, an elapsed time) or that polling re-renders:
+  it is read out again at every change. Pick the sentence that is news with
+  a pure function in `utils/announce.ts`, next to the ones for a deployment,
+  a promotion and the backups, and test it. `role="alert"` is for a failed
+  action (`InlineError`, `ErrorState`); `role="status"` on a sentence that
+  appears once (`Stored`, `Added`) is fine. A log is `role="log"` with
+  `aria-live="off"`.
+- **A finger needs 44 by 44 CSS px.** `UiButton` and `.input` have it; any
+  other control takes the class `target`. It changes nothing with a mouse and
+  grows the control on a touch screen (`pointer: coarse`). Links and buttons
+  that are text get an area of that size around them from `main.css` without
+  growing. With a mouse a control is at least 24 by 24; a link that is text
+  has the height of its line and room around it.
+- **Contrast.** Text is `fg`, `fg-muted` or `fg-subtle`: each has 4.5:1 on
+  `bg`, `bg-subtle`, `bg-hover` and `bg-inset` in both themes. On `bg-active`
+  (a selected row) use `fg` or `fg-muted`. `fg-faint` is for decoration — a
+  separator, a chevron, a rule in a chart — never for text. The edge of a
+  field one types into is `--control` (3:1); `line` and `line-strong` are for
+  dividers and for buttons, which their label identifies. The series colors
+  have 3:1 on `bg`. A new pair of tokens is checked before it is used.
+- **Tables fold by the width of the page's column**, not of the window:
+  `data-table stack` with `data-label` on the cells, inside an
+  `overflow-x-auto` box, and `cards:` / `rows:` (defined in `main.css`) for
+  what a cell shows in only one of the two forms — not `max-sm:` / `sm:`,
+  which do not know about the sidebar.
+- **Motion.** CSS animations and transitions stop under
+  `prefers-reduced-motion` through one rule in `main.css`; scrolling from
+  JavaScript has to ask for itself.
+
 ## Configuration
 
 | Variable | Default | |
@@ -479,6 +557,12 @@ the real agent, so the log viewer's reconnect can be seen.
 | `MOCK_DASHBOARD_URL` | Where the dashboard is, for the sign-in's `redirect_uri` (default `http://localhost:3000`) |
 | `MOCK_IDP_USER=ada@example.com` | The stand-in provider signs this account in without showing its page |
 | `MOCK_HOSTNAME` | The server's hostname (default `shipwick-fsn1-01`); to tell two mocks apart behind `SHIPWICK_AGENTS` |
+| `MOCK_AGENT=0.6` | Answers like an agent before 0.7: what 0.7 added is `404 ENDPOINT_NOT_FOUND`, its fields are absent and its filters are ignored. |
+| `MOCK_UPDATE=available\|current\|unknown\|off` | `update` on `GET /server`: a newer release (the default), none, GitHub never answered, or the check turned off. |
+| `MOCK_LOG_ARCHIVE=off` | Nothing is kept of ended containers, as with `SHIPWICK_LOG_RETENTION_SIZE=0`. |
+| `MOCK_NAME_CLAIM=preferred_username` | People are named by that claim instead of their address; rules of kind `name`. |
+| `MOCK_EXPORT_MB=64`, `MOCK_EXPORT=trailer\|breaks` | The size of the file `POST /export` streams, and an export that stops half-way: with the agent's error trailer, or with the connection cut. |
+| `MOCK_IMPORT_MS=1500` | How long an import takes per application. |
 | `MOCK_PORT`, `MOCK_HOST`, `MOCK_TOKEN` | `9100`, `127.0.0.1`, `mock-token-0123456789abcdef` |
 
 What 0.5 added is served with the agent's shapes and refusals: `path`, `proxy`
@@ -538,7 +622,7 @@ SHIPWICK_AGENTS=production=http://127.0.0.1:9100,staging=http://127.0.0.1:9101 n
 |---|---|
 | `npm run dev` | Nuxt dev server with HMR on :3000 |
 | `npm run mock` | Mock agent on :9100 |
-| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, and the mock's YAML reader |
+| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, and the titles of tabs |
 | `npm run typecheck` | `vue-tsc` over app, server and config, strict + `noUncheckedIndexedAccess` |
 | `npm run build` | Production build into `.output/` |
 | `npm start` | `node .output/server/index.mjs` |

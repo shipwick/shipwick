@@ -26,8 +26,8 @@ import (
 
 // signIn is what the server keeps for people who sign in with the company's
 // accounts. A person becomes the same identity a token is — kind "user",
-// named by the e-mail address — so that authorize and the audit trail need
-// to know nothing about it.
+// named by the e-mail address, or by the claim the operator chose — so that
+// authorize and the audit trail need to know nothing about it.
 type signIn struct {
 	// provider is nil when no provider is configured: tokens only.
 	provider *oidc.Provider
@@ -71,7 +71,7 @@ func (s *Server) signInStatus() api.SignInStatus {
 	if s.signIn.provider == nil {
 		return api.SignInStatus{}
 	}
-	return api.SignInStatus{Configured: true, Issuer: s.signIn.provider.Issuer()}
+	return api.SignInStatus{Configured: true, Issuer: s.signIn.provider.Issuer(), NameClaim: s.signIn.nameClaim()}
 }
 
 func (s *Server) handleSignInConfig(w http.ResponseWriter, r *http.Request) {
@@ -186,22 +186,15 @@ func (s *Server) handleSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, err := api.NormalizeEmail(claims.Email)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, api.CodeSignInFailed,
-			"the provider named no e-mail address Shipwick can use for this account. The email scope must be among SHIPWICK_OIDC_SCOPES on the agent, and the account needs an address",
-			map[string]any{"reason": api.SignInEmailMissing})
-		return
-	}
-	if claims.EmailVerified != nil && !*claims.EmailVerified {
-		writeError(w, http.StatusUnauthorized, api.CodeSignInFailed,
-			"the provider says the address "+email+" has not been verified. Verify it there, then sign in again",
-			map[string]any{"reason": api.SignInEmailNotVerified})
+	email, ok := s.personNamed(w, claims)
+	if !ok {
 		return
 	}
 	groups := make([]string, 0, len(claims.Groups))
 	for _, g := range claims.Groups {
-		if api.ValidGroup(g) {
+		// Where every tenant may sign in, a group is whatever the account's
+		// own tenant calls it: no rule is to be met that way.
+		if api.ValidGroup(g) && !p.AnyTenant() {
 			groups = append(groups, g)
 		}
 	}
@@ -214,10 +207,10 @@ func (s *Server) handleSignIn(w http.ResponseWriter, r *http.Request) {
 	grant, ok := api.ResolveAccess(rules, email, groups)
 	if !ok {
 		s.log.Info("sign-in refused: no access rule", "user", email)
-		s.auditSignIn(r, email, api.AuditRefused, http.StatusForbidden, api.CodeAccessNotGranted, "")
+		s.auditSignIn(r, email, api.AuditRefused, http.StatusForbidden, api.CodeAccessNotGranted, withTenant("", claims.Tenant))
 		writeError(w, http.StatusForbidden, api.CodeAccessNotGranted,
-			email+" signed in, and no rule on this server gives that address a role. An admin grants one with: shipwick access grant "+email+" --role read",
-			map[string]any{"email": email})
+			email+" signed in, and no rule on this server gives that "+s.signIn.nameWord()+" a role. An admin grants one with: shipwick access grant "+api.WhoOf(email)+" --role read",
+			map[string]any{"email": email, "name": email})
 		return
 	}
 
@@ -227,13 +220,14 @@ func (s *Server) handleSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess, err := s.store.CreateSession(r.Context(), store.Session{Hash: hash, Email: email, Groups: groups,
-		Role: grant.Role, Applications: grant.Applications, CreatedAt: now, ExpiresAt: now.Add(api.SessionLifetime)})
+		Role: grant.Role, Applications: grant.Applications, CreatedAt: now, ExpiresAt: now.Add(api.SessionLifetime),
+		NameClaim: s.signIn.nameClaim(), Tenant: claims.Tenant})
 	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
 	s.log.Info("signed in", "user", email, "role", sess.Role, "applications", sess.Applications, "expires", sess.ExpiresAt)
-	s.auditSignIn(r, email, api.AuditOK, http.StatusOK, "", describeToken(sess.Role, sess.Applications, &sess.ExpiresAt))
+	s.auditSignIn(r, email, api.AuditOK, http.StatusOK, "", withTenant(describeToken(sess.Role, sess.Applications, &sess.ExpiresAt), sess.Tenant))
 	writeJSON(w, http.StatusOK, api.SignedIn{Session: value, Identity: sessionIdentity(sess)})
 }
 
@@ -264,6 +258,8 @@ func (s *Server) writeSignInError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, api.CodeSignInFailed, oe.Message, map[string]any{"reason": api.SignInInvalidIDToken})
 	case oidc.NonceMismatch:
 		writeError(w, http.StatusUnauthorized, api.CodeSignInFailed, oe.Message, map[string]any{"reason": api.SignInNonceMismatch})
+	case oidc.TenantNotAllowed:
+		writeError(w, http.StatusUnauthorized, api.CodeSignInFailed, oe.Message, map[string]any{"reason": api.SignInTenantNotAllowed})
 	default:
 		writeError(w, http.StatusBadGateway, api.CodeSignInUnavailable, oe.Message, nil)
 	}
@@ -353,6 +349,11 @@ func (s *Server) identifySession(ctx context.Context, presented [sha256.Size]byt
 	}
 	grant, ok := api.ResolveAccess(rules, sess.Email, sess.Groups)
 	switch {
+	// A name read from another claim than the agent reads now is not the
+	// name the rules are written for, and a tenant taken off the list is
+	// access taken away like a rule.
+	case !s.signIn.stillVouchedFor(sess):
+		ended = api.SessionEndedSignInChanged
 	case !ok:
 		ended = api.SessionEndedRuleRemoved
 	case !grant.Equal(api.Grant{Role: sess.Role, Applications: sess.Applications}):
@@ -404,9 +405,11 @@ func (s *Server) refuseEnded(w http.ResponseWriter, who api.TokenIdentity, reaso
 	var message string
 	switch reason {
 	case api.SessionEndedRuleRemoved:
-		message = "no rule on this server gives " + who.Name + " a role any more. An admin grants one with: shipwick access grant " + who.Name + " --role read"
+		message = "no rule on this server gives " + who.Name + " a role any more. An admin grants one with: shipwick access grant " + api.WhoOf(who.Name) + " --role read"
 	case api.SessionEndedAccessChanged:
 		message = "what " + who.Name + " may do on this server was changed. Sign in again"
+	case api.SessionEndedSignInChanged:
+		message = "how people sign in to this server was changed. Sign in again"
 	default:
 		message = "an admin ended this session. Sign in again"
 	}
@@ -546,7 +549,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]api.Session, 0, len(sessions))
 	for _, sess := range sessions {
-		if grant, ok := api.ResolveAccess(rules, sess.Email, sess.Groups); !ok || !grant.Equal(api.Grant{Role: sess.Role, Applications: sess.Applications}) {
+		if grant, ok := api.ResolveAccess(rules, sess.Email, sess.Groups); !ok || !grant.Equal(api.Grant{Role: sess.Role, Applications: sess.Applications}) || !s.signIn.stillVouchedFor(sess) {
 			continue
 		}
 		out = append(out, api.Session{ID: sess.ID, Email: sess.Email, Role: sess.Role, Applications: sess.Applications,
@@ -559,7 +562,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 // out: while a rule covers them they can sign in again, with whatever the
 // provider says about them then.
 func (s *Server) handleEndSessions(w http.ResponseWriter, r *http.Request) {
-	email, err := api.NormalizeEmail(r.PathValue("email"))
+	email, err := api.PersonName(s.signIn.nameClaim(), r.PathValue("email"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return

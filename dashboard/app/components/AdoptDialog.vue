@@ -69,7 +69,7 @@ const nothing = computed(() => result.value !== null && result.value.adopted.len
           Adopted · {{ result.adopted.length }}
         </p>
         <div class="overflow-x-auto rounded-sm border border-line">
-          <table class="data-table stack !text-xs">
+          <table class="data-table stack !text-xs" aria-label="Adopted backups">
             <thead>
               <tr>
                 <th>Backup of</th>

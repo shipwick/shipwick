@@ -29,7 +29,7 @@ curl -fsSL https://get.shipwick.com | sh -s -- --cli
 ```
 
 Or `brew install shipwick/tap/shipwick`. On Windows, download
-`shipwick_windows_amd64.exe` from the
+`shipwick_windows_amd64.exe` (`shipwick_windows_arm64.exe` on Arm) from the
 [latest release](https://github.com/shipwick/shipwick/releases/latest).
 
 **2. Install the server**, from your laptop:
@@ -109,6 +109,7 @@ Already have an image in a registry? Name it instead of building:
 shipwick ps               # every application on the server
 shipwick status my-api    # replicas, health, CPU and memory, certificates, history
 shipwick logs -f my-api
+shipwick logs -p my-api    # the last output of a replica that died
 shipwick open my-api      # in the browser; --dashboard opens the dashboard
 ```
 
@@ -196,6 +197,7 @@ shipwick server install root@203.0.113.10   # the server: the same command upgra
 The server keeps its token, its applications and their data; they go on
 serving while the three Shipwick containers are replaced. What changed between
 versions, and what to do about it, is in the [changelog](CHANGELOG.md).
+`shipwick server status` and the dashboard say when a newer release exists.
 
 ## What you get
 
@@ -203,9 +205,11 @@ versions, and what to do about it, is in the [changelog](CHANGELOG.md).
 - **HTTPS** for every domain, certificates included, plus aliases and `www` redirects; behind Cloudflare's proxy, with wildcards, or with a certificate of your own.
 - **Routing per application**: several applications on one domain by `path`, response headers, basic authentication and redirects in `proxy`.
 - **Supervision**: crashed replicas are restarted with backoff; a container that disappears is recreated.
+- **Logs that outlive the container**: the last output of every replica that crashed, was killed for memory or was replaced is kept and searched, so "why did it die?" has an answer the next morning.
 - **Scheduled jobs** and one-off commands from the application's image: `jobs`, `shipwick run app -- rails db:migrate`.
 - **Volumes and backups**: on a schedule, encrypted, to an S3-compatible bucket, and verified by restoring them: `backups` in deploy.yaml, `shipwick backups verify`.
 - **Moving house**: `shipwick export` and `shipwick import` take every application, its secrets and its data to another server; a second server can be kept ready and promoted by hand.
+- **The configuration back from the server**: `shipwick config my-api` prints the `deploy.yaml` of what runs, for the day the file is lost.
 - **Secrets** kept out of files with `${NAME}`, encrypted at rest on the server under a key that can be rotated; **registry credentials** stored the same way.
 - **Access for a team**: tokens with roles — `deploy` for CI, limited to the applications it deploys and with an end date if you like; `read` for a teammate; `admin` for you — sign-in to the dashboard with the company's accounts through OpenID Connect, and an audit trail of who did what.
 - **Notifications** and **alerts** to Slack, Discord or any webhook; **metrics** and **traffic** with a week of history, and `GET /metrics` for Prometheus.

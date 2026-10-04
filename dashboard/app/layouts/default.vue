@@ -9,8 +9,16 @@ const server = provideServerInfo()
 const alerts = computed(() => server.data.value?.alerts ?? [])
 const alertTone = computed(() => worstAlertTone(alerts.value))
 
+// The mark in the navigation changes without a sound: a change in the alerts is said, on whichever page it happens.
+const { announce } = useAnnounce()
+watch(() => (server.data.value ? summarizeAlerts(alerts.value) : null), (summary, before) => {
+  if (summary === null || before === null || before === undefined) return
+  announce(alerts.value.length === 0 ? 'No active alerts any more.' : `The server now has ${summary}.`)
+})
+
 const drawer = ref<HTMLDialogElement | null>(null)
 const drawerOpen = ref(false)
+const trap = useFocusTrap(drawer)
 
 function openDrawer() {
   drawerOpen.value = true
@@ -37,7 +45,7 @@ watch(() => route.fullPath, closeDrawer)
     >Skip to content</a>
 
     <!-- Desktop: fixed narrow sidebar -->
-    <aside class="fixed inset-y-0 left-0 z-30 hidden w-56 border-r border-line bg-subtle md:block">
+    <aside aria-label="Sidebar" class="fixed inset-y-0 left-0 z-30 hidden w-56 border-r border-line bg-subtle md:block">
       <AppNav :server="server.data.value" :server-error="server.error.value" />
     </aside>
 
@@ -45,14 +53,14 @@ watch(() => route.fullPath, closeDrawer)
     <header class="flex h-12 items-center gap-2 border-b border-line bg-subtle px-2 md:hidden">
       <button
         type="button"
-        class="flex size-9 items-center justify-center rounded-sm text-fg-muted hover:bg-hover hover:text-fg"
+        class="target flex size-9 items-center justify-center rounded-sm text-fg-muted hover:bg-hover hover:text-fg"
         aria-label="Open navigation"
         :aria-expanded="drawerOpen"
         @click="openDrawer"
       >
         <UiIcon name="menu" />
       </button>
-      <NuxtLink to="/" class="flex items-center gap-2">
+      <NuxtLink to="/" class="target flex items-center gap-2">
         <AppMark :size="16" compact />
         <span class="text-base font-semibold tracking-tight">Shipwick</span>
       </NuxtLink>
@@ -60,7 +68,7 @@ watch(() => route.fullPath, closeDrawer)
       <NuxtLink
         v-if="alertTone"
         to="/servers"
-        class="ml-auto mr-1 inline-flex h-7 items-center gap-1.5 rounded-sm border px-2 text-xs font-medium"
+        class="target ml-auto mr-1 inline-flex h-7 items-center gap-1.5 rounded-sm border px-2 text-xs font-medium"
         :class="alertTone === 'danger' ? 'border-danger-line bg-danger-bg text-danger' : 'border-warn-line bg-warn-bg text-warn'"
       >
         <UiIcon name="alert" :size="12" />
@@ -74,11 +82,12 @@ watch(() => route.fullPath, closeDrawer)
       class="m-0 h-dvh max-h-none w-64 max-w-[85vw] border-r border-line bg-subtle p-0 text-fg backdrop:bg-overlay md:hidden"
       @close="drawerOpen = false"
       @mousedown="onDrawerPointerDown"
+      @keydown="trap.onKeydown"
     >
       <AppNav v-if="drawerOpen" :server="server.data.value" :server-error="server.error.value" @navigate="closeDrawer" />
     </dialog>
 
-    <main id="main" tabindex="-1" class="outline-none">
+    <main id="main" tabindex="-1" class="@container/page outline-none">
       <slot />
     </main>
   </div>

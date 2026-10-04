@@ -162,6 +162,9 @@ open_bundle() {
         die "images.tar in the bundle is damaged (expected $expected, got $actual): copy the bundle again. Nothing was changed."
     fi
     step "The bundle is complete ($BUNDLE)"
+    # Everything in the bundle follows from this file; `shipwick server bundle`
+    # printed the same line where the bundle was made.
+    info "checksums.txt of the release: sha256 $(sha256_of "$BUNDLE/checksums.txt")"
 }
 
 # load_bundle_images hands the images to Docker, before the compose file that
@@ -170,13 +173,55 @@ load_bundle_images() {
     docker load --quiet --input "$BUNDLE/images.tar" >/dev/null \
         || die "Docker could not load images.tar from the bundle. Nothing was changed."
     step "Loaded the images from the bundle"
+    verify_bundle_images
+}
+
+# verify_bundle_images holds what Docker made of the archive against the
+# digests the release published (image-digests.txt, a file of the release like
+# the others). An image's ID says what it is: with the classic image store it
+# is the digest of the image's configuration, with the containerd image store
+# the digest of the manifest it was loaded by. That manifest is the registry's
+# when the bundle was made with the containerd store too; made with the
+# classic store, it is one `docker save` wrote around the configuration, and
+# is read from the archive to see which configuration it names.
+verify_bundle_images() {
+    if [ ! -f "$BUNDLE/image-digests.txt" ]; then
+        warn "The images in this bundle were not checked against the release's digests: it was made with --no-pull, or of a release before 0.7.0."
+        return 0
+    fi
+    fetch_release_asset image-digests.txt "$WORK_DIR/image-digests.txt" \
+        || die "The bundle's image-digests.txt could not be read."
+    platform="linux/${PLATFORM#*_}"
+    images="$(awk -v p="$platform" '$2 == "config" && $4 == p { print $1 }' "$WORK_DIR/image-digests.txt")"
+    [ -n "$images" ] || die "The bundle's image-digests.txt lists no image for $platform."
+    for image in $images; do
+        id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" \
+            || die "$image is not among the images the bundle brought."
+        if awk -v i="$image" -v p="$platform" -v id="$id" \
+            '$1 == i && $3 == id && ($2 == "index" || $4 == p) { found = 1 } END { exit !found }' "$WORK_DIR/image-digests.txt"; then
+            continue
+        fi
+        config="$(awk -v i="$image" -v p="$platform" '$1 == i && $2 == "config" && $4 == p { print $3 }' "$WORK_DIR/image-digests.txt")"
+        if have tar && tar -xOf "$BUNDLE/images.tar" "blobs/sha256/${id#sha256:}" > "$WORK_DIR/manifest" 2>/dev/null \
+            && [ "sha256:$(sha256_of "$WORK_DIR/manifest")" = "$id" ] \
+            && grep -q "\"config\":{[^}]*\"digest\":\"$config\"" "$WORK_DIR/manifest"; then
+            continue
+        fi
+        # The tag must not stay on an image nobody vouches for. Containers
+        # that run keep the image they were created from.
+        docker image rm "$image" >/dev/null 2>&1 || true
+        die "$image in the bundle is not the image the release published for $platform
+  (Docker loaded $id; published: configuration $config).
+  The image was removed again and the installation was left as it was. Make the bundle again with:  shipwick server bundle"
+    done
+    step "The images are the ones the release published"
 }
 
 detect_platform() {
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
     case "$os" in
         linux|darwin) ;;
-        *) die "Unsupported operating system: $os. On Windows, download shipwick_windows_amd64.exe from https://github.com/$REPO/releases" ;;
+        *) die "Unsupported operating system: $os. On Windows, download shipwick_windows_amd64.exe (or _arm64) from https://github.com/$REPO/releases" ;;
     esac
     arch="$(uname -m)"
     case "$arch" in
@@ -336,7 +381,7 @@ SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
       # Settings given for this run have to outlive it: the next run, an
       # upgrade, must not quietly move the proxy back to the default ports.
-      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_AGENTS; do
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_OIDC_NAME_CLAIM SHIPWICK_OIDC_TENANTS SHIPWICK_AGENTS SHIPWICK_LOG_RETENTION_DAYS SHIPWICK_LOG_RETENTION_SIZE SHIPWICK_UPDATE_CHECK; do
           eval "value=\${$name:-}"
           [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
       done
@@ -590,6 +635,9 @@ Environment:
   SHIPWICK_STANDBY_SCHEDULE   makes this server a standby that imports those exports (optional)
   SHIPWICK_ALERT_MEMORY_PERCENT, SHIPWICK_ALERT_DISK_PERCENT
                               when a replica's memory and the disk raise an alert (90, 85)
+  SHIPWICK_LOG_RETENTION_DAYS, SHIPWICK_LOG_RETENTION_SIZE
+                              how long the output of ended containers is kept, and how much
+                              of the disk it may take (14, 1gb; a size of 0 keeps nothing)
   HTTPS_PROXY, HTTP_PROXY, NO_PROXY
                               a proxy between the server and the internet: used for the downloads
                               and kept for the agent and Caddy. The Docker daemon, which pulls
@@ -609,6 +657,12 @@ Environment:
   SHIPWICK_OIDC_SCOPES, SHIPWICK_OIDC_GROUPS_CLAIM
                               what is asked of the provider, and the claim that lists
                               groups ("openid email profile", groups)
+  SHIPWICK_OIDC_NAME_CLAIM    the claim people are named by, for accounts without an
+                              address: preferred_username, upn or sub (default: email)
+  SHIPWICK_OIDC_TENANTS       with a Microsoft Entra issuer for several tenants
+                              (.../organizations/v2.0): the tenant ids that may sign in
+  SHIPWICK_UPDATE_CHECK       "off" stops the agent's daily question to github.com about a
+                              newer release (default: it asks, and sends nothing about the server)
   SHIPWICK_HTTP_PORT, SHIPWICK_HTTPS_PORT
                               the proxy's ports, when something else owns 80 and 443
   SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE, SHIPWICK_CADDY_IMAGE

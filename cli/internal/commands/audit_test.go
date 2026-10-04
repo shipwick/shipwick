@@ -96,7 +96,7 @@ func TestTokenListShowsLimitsAndMarksWhatIsAboutToExpire(t *testing.T) {
 	assertInOrder(t, lines[4], []string{"sooner", "read", "all", "in 90 minutes (soon)"})
 	assertInOrder(t, lines[5], []string{"gone", "read", "all", "expired 3d ago"})
 	assertInOrder(t, lines[6], []string{"later", "read", "all", "in 14 days "})
-	if lines[8] != "Expired, or expiring within 14 days: soon, sooner, gone. A token cannot be extended: create a new one, hand it over, then revoke the old one." {
+	if lines[8] != "Expired, or expiring within 14 days: soon, sooner, gone. Move an end with: shipwick token update <name> --expires 90d" {
 		t.Errorf("closing line: %q", lines[8])
 	}
 
@@ -113,12 +113,17 @@ func TestRenderAnExpiredAndALimitedToken(t *testing.T) {
 	expired := &client.APIError{Status: 401, Code: api.CodeTokenExpired, Message: "token ci expired on 2026-10-02 at 12:00 UTC; an admin creates a new one with: shipwick token create",
 		Details: map[string]any{"name": "ci", "expired_at": "2026-10-02T12:00:00Z"}}
 	want := "The token ci expired on " + at.Local().Format("2006-01-02 at 15:04") + ".\n\n" +
-		"An admin creates a new one with: shipwick token create\nThen set SHIPWICK_AGENT_TOKEN to it, or save it with: shipwick login"
+		"An admin lets it work again with: shipwick token update ci --expires 90d\nOr creates a new one with: shipwick token create\nThen set SHIPWICK_AGENT_TOKEN to it, or save it with: shipwick login"
 	if got := Render(expired); got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
-	if got := Render(&client.APIError{Status: 401, Code: api.CodeTokenExpired, Details: map[string]any{}}); !strings.HasPrefix(got, "The API token has expired.\n\n") {
+	if got := Render(&client.APIError{Status: 401, Code: api.CodeTokenExpired, Details: map[string]any{}}); got != "The API token has expired.\n\nAn admin creates a new one with: shipwick token create\nThen set SHIPWICK_AGENT_TOKEN to it, or save it with: shipwick login" {
 		t.Errorf("without details: %q", got)
+	}
+	// A name that is not a token's is not put into a command to copy.
+	expired.Details["name"] = "ci; rm -rf ~"
+	if got := Render(expired); strings.Contains(got, "rm -rf") {
+		t.Errorf("a name the agent could not have sent is repeated: %q", got)
 	}
 
 	limited := &client.APIError{Status: 403, Code: api.CodeTokenLimited, Message: "this token is limited to my-api and web; it can read worker and not change it",

@@ -460,6 +460,10 @@ func (im *importRun) importApplication(ctx context.Context, xr *exportReader, na
 	if err != nil {
 		return api.ImportAppFailed, "the export's entry for it is refused: " + err.Error(), nil
 	}
+	references, err := importedReferences(app, entry.References)
+	if err != nil {
+		return api.ImportAppFailed, "the export's entry for it is refused: " + err.Error(), nil
+	}
 	dormant := im.opts.Stopped || entry.Stopped
 
 	// Asked before anything of it is read, so that what is skipped costs
@@ -524,7 +528,7 @@ func (im *importRun) importApplication(ctx context.Context, xr *exportReader, na
 				return origin{}, err
 			}
 		}
-		return origin{spec: app, kind: kind, static: static, dormant: dormant}, nil
+		return origin{spec: app, kind: kind, static: static, dormant: dormant, references: references}, nil
 	})
 	var invalid *InvalidExportError
 	switch {

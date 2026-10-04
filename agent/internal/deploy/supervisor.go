@@ -102,6 +102,7 @@ func (e *Engine) StartSupervisor() {
 	}()
 	e.startSampler()
 	e.startProxyWatch()
+	e.startLogArchive()
 }
 
 // tick performs one supervision pass. Time is a parameter so that tests can
@@ -409,6 +410,7 @@ func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app st
 		s.restart(ctx, now, app, r, func() error {
 			return s.e.restartNameless(ctx, r.ContainerID, s.e.gracePeriod(d.Spec))
 		})
+		s.e.archiveInBackground(r.ContainerID, logEnd{reason: api.LogReasonUnhealthy})
 	}
 }
 
@@ -480,6 +482,7 @@ func (s *supervisor) superviseDown(ctx context.Context, now time.Time, app store
 		if c.OOMKilled {
 			why = "was killed for exceeding its memory limit"
 		}
+		s.e.archiveInBackground(r.ContainerID, endOf(c))
 		restart := shouldRestart(d.Spec.Restart.Policy, c)
 
 		s.mu.Lock()

@@ -115,7 +115,7 @@ function closeRemove() {
             Add one below<template v-if="!mayAdmin"> with an admin token</template>, or run <span class="mono text-fg">shipwick secret set NAME</span>.
           </EmptyState>
           <div v-else class="overflow-x-auto">
-            <table class="data-table stack">
+            <table class="data-table stack" aria-label="Secrets">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -132,16 +132,16 @@ function closeRemove() {
                     {{ s.name }}
                   </td>
                   <td data-label="Created" class="text-fg-muted">
-                    <TimeAgo :time="s.created_at" /><span class="mono ml-2 text-xs text-fg-subtle max-sm:hidden">{{ formatAbsoluteUtc(s.created_at) }}</span>
+                    <TimeAgo :time="s.created_at" /><span class="mono ml-2 text-xs text-fg-subtle cards:hidden">{{ formatAbsoluteUtc(s.created_at) }}</span>
                   </td>
                   <td data-label="Updated" class="text-fg-muted">
                     <template v-if="s.updated_at !== s.created_at">
-                      <TimeAgo :time="s.updated_at" /><span class="mono ml-2 text-xs text-fg-subtle max-sm:hidden">{{ formatAbsoluteUtc(s.updated_at) }}</span>
+                      <TimeAgo :time="s.updated_at" /><span class="mono ml-2 text-xs text-fg-subtle cards:hidden">{{ formatAbsoluteUtc(s.updated_at) }}</span>
                     </template>
                     <span v-else title="Never replaced since it was created">never</span>
                   </td>
                   <td v-if="mayAdmin" class="right">
-                    <UiButton variant="danger" size="sm" @click="removing = s">
+                    <UiButton variant="danger" size="sm" :aria-label="`Remove ${s.name}`" @click="removing = s">
                       Remove
                     </UiButton>
                   </td>

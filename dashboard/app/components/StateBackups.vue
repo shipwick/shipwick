@@ -114,7 +114,7 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
 
     <template v-if="props.admin && (runs.data.value?.length ?? 0) > 0">
       <div class="overflow-x-auto border-t border-line">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Backups of the agent's state">
           <thead>
             <tr>
               <th class="w-16">

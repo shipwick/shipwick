@@ -8,6 +8,161 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Output that outlives its container.** The agent keeps the last lines of
+  every container whose run ends — a replica that crashed, was killed for
+  memory, was restarted for its health check, stopped or replaced by a
+  deployment, the replicas of a deployment that failed, and the runs of jobs,
+  pre-deploy commands and `shipwick run` — with what it is the output of, why
+  it ended and its exit code. A replica's run keeps 2,000 lines (1 MB), a run
+  of a job 10,000 (4 MB); a crash loop leaves one entry per attempt, and no
+  line is kept twice.
+- `shipwick logs --previous` (`-p`) shows the output of the last container
+  that ended, which is the question after a crash; `--list` and `--id` show
+  what is kept and one entry of it, `--run <id>` the output of a run.
+  `--search TEXT`, `--since`, `--until`, `--deployment <#>` and `--replica`
+  show lines of the kept output and of the running containers together.
+  `shipwick status` ends with the exact command when a replica died or a
+  deployment failed, and `shipwick server status` shows what the archive
+  holds.
+- `GET /applications/:name/logs/archive`, `…/logs/archive/:id` and
+  `…/logs/search` (role `read`); `GET /server` → `log_archive`.
+- `SHIPWICK_LOG_RETENTION_DAYS` (14) and `SHIPWICK_LOG_RETENTION_SIZE` (1gb;
+  `0` keeps nothing) bound the archive. Over its size the application that
+  holds the most loses its oldest entries; while the disk is as full as its
+  alert's threshold the archive does not grow. It is removed with its
+  application by `shipwick delete`, and is in neither the backup of the
+  agent's state nor an export.
+- `shipwick config <app> [-o file]` and `GET /applications/:name/config`
+  (deploy) give back the `deploy.yaml` of what an application runs. A secret
+  value that was written as a reference to a secret on the server —
+  `postgres://app:${DB_PASSWORD}@db:5432/app` — is that reference again: the
+  agent now remembers it with each deployment, through redeploys, rollbacks,
+  key rotations, exports and imports. Any other env value or basic-auth
+  password is shown as `"********"` and listed, never returned. Deployments
+  made before this release have no references to give back: their secret
+  values are all shown as masks until the application is deployed again from
+  its file.
+- `POST /applications` and `POST /validate` take a deploy.yaml and act on the
+  application the document names, for a client that has a document and no
+  name. A token limited to applications is checked against that name, and
+  the audit trail records it. `POST /applications/:name/deploy` and
+  `…/validate` are unchanged.
+- `backups.before_in: container` runs `backups.before` in a container of its
+  own beside the replica — same image, environment and volumes, the replica
+  as `localhost` — and ends it at `backups.before_timeout`. The default,
+  `replica`, is unchanged: the command runs inside the replica and cannot be
+  ended there. A command that reaches the application through a socket
+  outside its volumes, as `pg_dump` and `mysqldump` do by default, needs a
+  host (`-h localhost`) to run in the container.
+- `shipwick token update <name>` changes a token without changing its value:
+  `--app` replaces the applications a `deploy` token is limited to,
+  `--all-apps` lifts the limit, `--expires` moves its end and `--no-expiry`
+  takes it away (`PUT /tokens/:name`, admin). A token that has expired works
+  again once its end is moved. The role cannot be changed, and neither can
+  the root token. Each change is in the audit trail as `token.update` with
+  what it was before.
+- The audit trail is searched by action, outcome and kind of actor:
+  `shipwick audit --action token. --action deploy --outcome refused,failed
+  --actor-kind person` (`action`, `outcome` and `actor_kind` on `GET /audit`).
+  An action with a dot at its end is a family: `token.`, `backup.`.
+- The audit trail can be exported whole: `shipwick audit --format csv|json`,
+  to standard output or `--output <file>` (`GET /audit/export`, admin,
+  streamed). In CSV a cell that a spreadsheet would run as a formula is
+  written as text. An export is itself recorded, as `audit.export`.
+- `GET /audit` says whether older entries match (`"more"`, next to `data`),
+  so a page that is exactly full no longer looks like there is another.
+- `SHIPWICK_OIDC_NAME_CLAIM`: the ID token claim people are named by, for
+  providers whose accounts have no address — `preferred_username`, `upn`,
+  `sub` (default `email`). Rules for one such person are written
+  `shipwick access grant name:<name>`; rules by address and domain apply to
+  names that are addresses. `GET /server` → `sign_in.name_claim`.
+- Microsoft Entra's issuers for several tenants
+  (`https://login.microsoftonline.com/organizations/v2.0`, `common/v2.0`)
+  are accepted together with `SHIPWICK_OIDC_TENANTS`, the tenant ids that
+  may sign in. A token is believed only if its issuer is its own tenant's;
+  `*` admits every tenant and requires `SHIPWICK_OIDC_NAME_CLAIM=sub`.
+- The handbook says how to keep a credential for Amazon ECR and Google
+  Artifact Registry current with `shipwick registry login`.
+- **A bundle whose images are proven.** A release publishes
+  `image-digests.txt`, listed in its `checksums.txt`: the digests of its three
+  images as the registry holds them, per platform. `shipwick server bundle`
+  checks the archive of images against them before it writes the bundle, and
+  the installer checks what `docker load` made of the archive before it
+  replaces anything; an image that is not the release's is refused at either
+  end. A bundle made with `--no-pull`, or of a release before this one, is
+  not proven, and both say so. Both print the SHA-256 of the release's
+  `checksums.txt`, to compare.
+- A Windows build of the CLI for Arm: `shipwick_windows_arm64.exe`.
+  `shipwick upgrade` picks the build for the machine, also when the shipwick
+  that runs is the x64 one, and the winget manifests list both.
+- **Debian and RPM packages of the agent**, for amd64 and arm64:
+  `shipwick-agent_<arch>.deb` and `.rpm` in every release. They install the
+  agent as a service of the host — `/usr/bin/shipwick-agent`, a systemd unit,
+  `/etc/shipwick/agent.env` with a generated token, `/var/lib/shipwick` — and
+  start nothing. The reverse proxy and the dashboard stay containers, started
+  from the compose file the package brings. Handbook §4, "Installation from a
+  package".
+- **A notice when a newer release exists.** The agent asks GitHub once a day
+  which release is the latest; `GET /server` → `update` carries the answer,
+  and `shipwick server status` shows it. The request says nothing about the
+  server (handbook §12), goes through the agent's proxy, and fails silently
+  where there is no way out. `SHIPWICK_UPDATE_CHECK=off` turns it off.
+- Dashboard: an application's *Logs* tab reads the log archive. *Previous* is
+  the last output of the container that ended most recently, and is what the
+  tab opens on when the application is not healthy and a replica crashed, was
+  killed for memory or was restarted for its health check; *Archive* lists
+  what is kept and opens an entry; *Search* looks through the archive and the
+  running replicas. A replica that restarted links to its last output, a
+  failed deployment to the output of its replicas.
+- Dashboard: *Change the configuration* opens the application's deploy.yaml
+  as the agent gives it back, lists the values that have to be written again
+  with a link that stores each as a secret, and deploys the result. A new
+  application is deployed the same way, from a pasted document.
+- Dashboard: a token is edited on the *Access* page (its applications, its
+  end); the audit trail is filtered by kind of action, result and
+  tokens or people, and exported as CSV or as one JSON object a line.
+- Dashboard: an export is downloaded as a file with a passphrase of your own,
+  and a file is imported, on the server's *Export and standby* tab. Both pass
+  through the dashboard's server as they arrive: it keeps neither the file
+  nor the passphrase.
+- Dashboard: a notice on the server's page when a newer release exists, with
+  the command that upgrades.
+- **The dashboard without a mouse.** Every page and dialog works with the
+  keyboard alone: the focus is visible everywhere in both themes, a dialog
+  keeps it and gives it back, a button that turns busy no longer drops it,
+  and following a link inside the app no longer leaves it nowhere. The theme
+  and a chart's range are radio groups moved through with the arrow keys. A
+  screen reader hears the page's title when the page changes, each step of a
+  followed deployment, how a run, a backup or a promotion ended and when the
+  data stops being live, without the clocks on the page being read out;
+  tables and row actions are named, and the traffic charts have their
+  numbers as a table like the others. On a touch screen controls are at
+  least 44 by 44 px. Text that was too faint to read reliably is darker, and
+  the edge of a field has the contrast a field needs.
+
+### Changed
+
+- A document that holds `"********"` as an env value or a basic-auth password
+  is refused, by `deploy` and `validate` alike, with `400 INVALID_CONFIG` and
+  the fields to fill in: what the API masks can no longer be deployed as a
+  value by pasting it back.
+- An expired token's message in the CLI names `shipwick token update` next
+  to creating a new one, and `shipwick token ls` no longer says that a token
+  cannot be extended.
+- A session ends with its next request (`SESSION_ENDED`, reason
+  `sign_in_changed`) when the agent is restarted with another
+  `SHIPWICK_OIDC_NAME_CLAIM`, or without the tenant the session came from.
+- `ACCESS_NOT_GRANTED` carries the person's name as `details.name`;
+  `details.email` holds the same and stays for older clients.
+
+### Fixed
+
+- Tables in the dashboard become cards by the width of the page's column
+  instead of the window's. At tablet widths, beside the sidebar, the wide
+  ones used to run out of their panel, and the page scrolled sideways.
+
 ## [0.6.0] - 2026-10-04
 
 ### Added

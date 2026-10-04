@@ -131,6 +131,10 @@ type Session struct {
 	// EndedReason says why: one of the api.SessionEnded* reasons.
 	EndedAt     *time.Time
 	EndedReason string
+	// NameClaim is the ID token claim Email was read from, and Tenant the
+	// directory the account belongs to; "" where the provider has one.
+	NameClaim string
+	Tenant    string
 }
 
 // sessionsKeptFor is how long a session's row outlives the session: long
@@ -147,6 +151,9 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) (Session, error
 	if sess.Applications == nil {
 		sess.Applications = []string{}
 	}
+	if sess.NameClaim == "" {
+		sess.NameClaim = api.DefaultNameClaim
+	}
 	groups, err := json.Marshal(sess.Groups)
 	if err != nil {
 		return Session{}, fmt.Errorf("create session: %w", err)
@@ -157,8 +164,9 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) (Session, error
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO sessions (hash, email, groups, role, applications, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			hex.EncodeToString(sess.Hash), sess.Email, string(groups), string(sess.Role), string(applications), formatTime(sess.CreatedAt), formatTime(sess.ExpiresAt))
+			`INSERT INTO sessions (hash, email, groups, role, applications, created_at, expires_at, name_claim, tenant) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			hex.EncodeToString(sess.Hash), sess.Email, string(groups), string(sess.Role), string(applications), formatTime(sess.CreatedAt), formatTime(sess.ExpiresAt),
+			sess.NameClaim, sess.Tenant)
 		if err != nil {
 			return err
 		}
@@ -174,7 +182,7 @@ func (s *Store) CreateSession(ctx context.Context, sess Session) (Session, error
 	return sess, nil
 }
 
-const sessionSelect = `SELECT id, hash, email, groups, role, applications, created_at, expires_at, last_used_at, ended_at, ended_reason FROM sessions`
+const sessionSelect = `SELECT id, hash, email, groups, role, applications, created_at, expires_at, last_used_at, ended_at, ended_reason, name_claim, tenant FROM sessions`
 
 func scanSession(row rowScanner) (Session, error) {
 	var (
@@ -183,7 +191,7 @@ func scanSession(row rowScanner) (Session, error) {
 		created, expires         string
 		lastUsed, ended          sql.NullString
 	)
-	err := row.Scan(&sess.ID, &hash, &sess.Email, &groups, &role, &apps, &created, &expires, &lastUsed, &ended, &sess.EndedReason)
+	err := row.Scan(&sess.ID, &hash, &sess.Email, &groups, &role, &apps, &created, &expires, &lastUsed, &ended, &sess.EndedReason, &sess.NameClaim, &sess.Tenant)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	} else if err != nil {

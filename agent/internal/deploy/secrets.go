@@ -94,6 +94,11 @@ func (e *UnusableSecretError) Fields() []spec.FieldError { return e.Problems }
 // holds is left alone. $${NAME}, which the CLI leaves untouched in these
 // values, becomes the literal ${NAME}.
 func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (spec.App, error) {
+	// Before anything is filled in: a mask is judged as the document wrote
+	// it, not as a secret happens to read.
+	if masked := spec.MaskedFields(app); len(masked) > 0 {
+		return spec.App{}, &MaskedValuesError{Masked: masked}
+	}
 	var accounts []spec.BasicAuth
 	if app.Proxy != nil {
 		accounts = app.Proxy.BasicAuth

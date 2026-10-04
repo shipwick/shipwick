@@ -66,6 +66,10 @@ services:
       SHIPWICK_ENCRYPTION_KEY: ${SHIPWICK_ENCRYPTION_KEY:-}
       SHIPWICK_ALERT_MEMORY_PERCENT: ${SHIPWICK_ALERT_MEMORY_PERCENT:-}
       SHIPWICK_ALERT_DISK_PERCENT: ${SHIPWICK_ALERT_DISK_PERCENT:-}
+      # Optional: how long the output of ended containers is kept, and how much
+      # of the disk it may take (14 days, 1gb; a size of 0 keeps nothing)
+      SHIPWICK_LOG_RETENTION_DAYS: ${SHIPWICK_LOG_RETENTION_DAYS:-}
+      SHIPWICK_LOG_RETENTION_SIZE: ${SHIPWICK_LOG_RETENTION_SIZE:-}
       # Optional: behind a proxy. The agent's own requests — webhook, bucket —
       # go through it; images are pulled by the Docker daemon, which has its
       # own setting (docs/handbook.md, "Behind a corporate proxy").
@@ -85,6 +89,10 @@ services:
       SHIPWICK_OIDC_CLIENT_SECRET: ${SHIPWICK_OIDC_CLIENT_SECRET:-}
       SHIPWICK_OIDC_SCOPES: ${SHIPWICK_OIDC_SCOPES:-}
       SHIPWICK_OIDC_GROUPS_CLAIM: ${SHIPWICK_OIDC_GROUPS_CLAIM:-}
+      SHIPWICK_OIDC_NAME_CLAIM: ${SHIPWICK_OIDC_NAME_CLAIM:-}
+      SHIPWICK_OIDC_TENANTS: ${SHIPWICK_OIDC_TENANTS:-}
+      # Optional: "off" stops the agent's daily question to github.com about a newer release
+      SHIPWICK_UPDATE_CHECK: ${SHIPWICK_UPDATE_CHECK:-}
       SHIPWICK_LOG_FORMAT: json
     # No published port on purpose: the API is plain HTTP, and the only ways in
     # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a

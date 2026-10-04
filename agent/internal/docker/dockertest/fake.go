@@ -102,6 +102,8 @@ type Fake struct {
 	stop *stopControl
 	// SaveErr makes SaveImage fail: see fake_export.go.
 	SaveErr error
+	// What containers print and when they stopped: see fake_logs.go.
+	logs *logState
 }
 
 func New() *Fake {
@@ -138,6 +140,7 @@ func (f *Fake) Crash(id string, exitCode int) {
 	defer f.mu.Unlock()
 	if c, ok := f.containers[id]; ok {
 		c.Running, c.State, c.ExitCode, c.IP = false, "exited", exitCode, ""
+		f.finish(c)
 		f.signalStopped(id)
 	}
 }
@@ -238,6 +241,9 @@ func (f *Fake) CreateContainer(_ context.Context, spec docker.ContainerSpec) (st
 		OnServicesNetwork: true,
 	}
 	f.specs[id] = spec
+	if spec.Job != nil {
+		f.containers[id].RunID = spec.Job.RunID
+	}
 	// Like the daemon: a volume exists once a container mounting it does.
 	for _, m := range spec.Mounts {
 		if name := docker.VolumeName(spec.App, m.Volume); f.volumes[name] == nil {
@@ -259,13 +265,23 @@ func (f *Fake) StartContainer(_ context.Context, id string) error {
 	if !ok {
 		return docker.ErrNotFound
 	}
+	// Like the daemon: a network namespace can only be joined while its
+	// container runs.
+	if beside := f.specs[id].Beside; beside != nil {
+		if other, ok := f.containers[beside.Container]; !ok || !other.Running {
+			return fmt.Errorf("cannot join network namespace of a non running container: %s", beside.Container)
+		}
+	}
 	f.starts[id]++
+	f.started(c)
 	if f.CrashImages[c.Image] || f.CrashNames[c.Name] {
 		c.Running, c.State, c.ExitCode = false, "exited", 1
+		f.finish(c)
 		return nil
 	}
 	now := time.Now().UTC()
 	c.Running, c.State, c.ExitCode, c.StartedAt = true, "running", 0, &now
+	c.OOMKilled = false
 	c.IP = f.ips[id]
 	return nil
 }
@@ -280,6 +296,7 @@ func (f *Fake) StopContainer(ctx context.Context, id string, timeout time.Durati
 	if c, ok := f.containers[id]; ok && c.Running {
 		c.Running, c.State, c.ExitCode, c.IP = false, "exited", f.stopExit(c, timeout), ""
 		f.stoppedAt[c.Name] = time.Now()
+		f.finish(c)
 		f.signalStopped(id)
 	}
 	return nil
@@ -298,6 +315,7 @@ func (f *Fake) RemoveContainer(_ context.Context, id string) error {
 	defer f.mu.Unlock()
 	delete(f.containers, id)
 	delete(f.specs, id)
+	delete(f.logState().lines, id)
 	f.signalStopped(id)
 	return nil
 }
@@ -322,12 +340,15 @@ func (f *Fake) ListContainers(_ context.Context, app string) ([]docker.Container
 	return out, nil
 }
 
-func (f *Fake) Logs(_ context.Context, id string, _ int) ([]docker.LogEntry, error) {
+func (f *Fake) Logs(_ context.Context, id string, tail int) ([]docker.LogEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c, ok := f.containers[id]
 	if !ok {
 		return nil, docker.ErrNotFound
+	}
+	if lines, ok := f.written(id, tail); ok {
+		return lines, nil
 	}
 	return []docker.LogEntry{
 		{Stream: "stdout", Time: time.Now().UTC(), Message: "log line from " + c.Name},

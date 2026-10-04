@@ -192,6 +192,12 @@ type Options struct {
 	// Network is how the agent was set up to reach what is outside the
 	// server, for GET /server: see network.go.
 	Network NetworkOptions
+	// LogArchive is where the output of ended containers is kept, and how
+	// much of it: see logarchive.go.
+	LogArchive LogArchiveOptions
+	// Updates is the agent's daily question about a newer release: see
+	// updates.go.
+	Updates UpdateOptions
 }
 
 // ProbeFunc checks one replica once. A nil error means healthy.
@@ -321,6 +327,11 @@ type Engine struct {
 	// transfer is the import that runs or ran last, and how far the export
 	// and standby schedules have looked: see import.go.
 	transfer *transfer
+	// archive is what the log archive has to remember while it copies: see
+	// logarchive.go.
+	archive logArchive
+	// updates is what the agent last learned about releases: see updates.go.
+	updates updateCheck
 }
 
 // appLock records who holds an application, because the two kinds of holder
@@ -440,11 +451,11 @@ func (e *Engine) Deploy(ctx context.Context, app spec.App) (store.Deployment, er
 	return e.start(ctx, app.Name, func(ctx context.Context) (origin, error) {
 		// The one place a spec arrives from outside: whatever the CLI left
 		// for the server to fill in is filled in here, and stored filled in.
-		app, err := e.resolveSecrets(ctx, app)
+		resolved, err := e.resolveSecrets(ctx, app)
 		if err != nil {
 			return origin{}, err
 		}
-		return origin{spec: app, kind: api.KindDeploy}, nil
+		return origin{spec: resolved, kind: api.KindDeploy, references: spec.ReferencesOf(app)}, nil
 	})
 }
 
@@ -491,6 +502,10 @@ type origin struct {
 	// executeDormant). An import sets it for an application that was stopped
 	// where it comes from.
 	dormant bool
+	// references are the secret values of spec that its document wrote as
+	// ${NAME}: see config.go. A deployment made from an earlier one has the
+	// references of that one, which start looks up.
+	references spec.References
 }
 
 // start is the one way a deployment begins, whatever its origin. resolve runs
@@ -511,10 +526,10 @@ func (e *Engine) start(ctx context.Context, name string, resolve func(context.Co
 		return store.Deployment{}, err
 	}
 	var d store.Deployment
-	if o.static != nil {
-		d, err = e.store.CreateStaticDeployment(ctx, app, o.kind, o.sourceID, actorFrom(ctx), *o.static, time.Now())
-	} else {
-		d, err = e.store.CreateDeploymentFrom(ctx, app, o.kind, o.sourceID, actorFrom(ctx), time.Now())
+	references, err := e.referencesOf(ctx, o)
+	if err == nil {
+		d, err = e.store.CreateDeploymentWith(ctx, store.NewDeployment{Spec: app, Kind: o.kind, SourceID: o.sourceID, Actor: actorFrom(ctx),
+			Static: o.static, References: references}, time.Now())
 	}
 	if err != nil {
 		e.unlock(name)
@@ -824,6 +839,8 @@ func parallel[T any](items []T, fn func(T) error) []error {
 }
 
 func (e *Engine) removeContainer(ctx context.Context, id string) error {
+	// What it printed goes with it: the archive takes its copy first.
+	e.archiveLogs(ctx, id, logEnd{removing: true})
 	if err := e.rt.RemoveContainer(ctx, id); err != nil {
 		return err
 	}

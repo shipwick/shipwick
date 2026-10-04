@@ -122,7 +122,7 @@ function closeRemove() {
             None is needed: the proxy obtains a certificate for every hostname by itself and renews it. Supply one for a hostname whose certificate must come from elsewhere — a company authority, or a wildcard without a DNS challenge — below<template v-if="!mayAdmin"> with an admin token</template>, or with <span class="mono text-fg">shipwick cert set</span>.
           </EmptyState>
           <div v-else class="overflow-x-auto">
-            <table class="data-table stack">
+            <table class="data-table stack" aria-label="Supplied certificates">
               <thead>
                 <tr>
                   <th>Stored under</th>
@@ -156,7 +156,7 @@ function closeRemove() {
                     />
                   </td>
                   <td v-if="mayAdmin" class="right">
-                    <UiButton variant="danger" size="sm" @click="removing = c">
+                    <UiButton variant="danger" size="sm" :aria-label="`Remove the certificate of ${c.hostname}`" @click="removing = c">
                       Remove
                     </UiButton>
                   </td>
@@ -203,7 +203,7 @@ function closeRemove() {
             </div>
             <div class="grid gap-4 lg:grid-cols-2">
               <div>
-                <label for="cert-chain" class="label block">Certificate chain <span class="normal-case tracking-normal text-fg-faint">PEM, fullchain.pem</span></label>
+                <label for="cert-chain" class="label block">Certificate chain <span class="normal-case tracking-normal text-fg-subtle">PEM, fullchain.pem</span></label>
                 <textarea
                   id="cert-chain"
                   v-model="chain"
@@ -221,7 +221,7 @@ function closeRemove() {
                 </p>
               </div>
               <div>
-                <label for="cert-key" class="label block">Private key <span class="normal-case tracking-normal text-fg-faint">PEM, privkey.pem</span></label>
+                <label for="cert-key" class="label block">Private key <span class="normal-case tracking-normal text-fg-subtle">PEM, privkey.pem</span></label>
                 <textarea
                   id="cert-key"
                   v-model="key"

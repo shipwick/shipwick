@@ -215,8 +215,109 @@ services:
     ports: ["127.0.0.1:9000:9000"]
 ```
 
-The agent also runs as a plain binary on Linux (`make build`), next to a Caddy
-installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
+**A newer release.** The agent asks GitHub once a day which release is the
+latest, and `GET /server` carries the answer: the dashboard and `shipwick
+server status` say when the server is behind without a connection of their
+own.
+
+```text
+Agent           v0.7.0  v0.7.1 is available  (on the server, run the installer again: curl -fsSL https://get.shipwick.com | sh)
+```
+
+The question is one request to `github.com/shipwick/shipwick/releases/latest`
+and says nothing about the server (§12). It goes through the proxy and the
+certificate authorities the agent was given. A server that cannot reach
+GitHub notices nothing: the request gives up after 15 seconds, nothing is
+logged above debug level, and the next attempt is a day later like any other.
+The last answer is kept in `update-check.json` in the data directory, so a
+restart asks nothing. `SHIPWICK_UPDATE_CHECK=off` stops the question; the
+agent says at startup, once, that it asks and how to stop it.
+
+### Installation from a package
+
+The agent is also published as a Debian and an RPM package, for a server where
+it should be a service of the host — started by systemd, upgraded by the
+package manager, its output in the journal — instead of a container. Each
+release has `shipwick-agent_amd64.deb`, `shipwick-agent_arm64.deb`,
+`shipwick-agent_amd64.rpm` and `shipwick-agent_arm64.rpm`, listed in its
+`checksums.txt`:
+
+```bash
+curl -fsSLO https://github.com/shipwick/shipwick/releases/latest/download/shipwick-agent_amd64.deb
+curl -fsSL https://github.com/shipwick/shipwick/releases/latest/download/checksums.txt | grep shipwick-agent_amd64.deb | sha256sum -c
+sudo apt install ./shipwick-agent_amd64.deb        # or: sudo dnf install ./shipwick-agent_amd64.rpm
+```
+
+**What the package installs:** the agent as `/usr/bin/shipwick-agent`; a
+systemd unit, `shipwick-agent.service`; its settings in
+`/etc/shipwick/agent.env`, written on the first installation with a generated
+API token, readable by root only, and never touched again; its data in
+`/var/lib/shipwick`; and a compose file for the proxy and the dashboard,
+`/usr/share/shipwick/compose.yml`. It starts nothing and enables nothing: the
+agent needs Docker, and when it runs is your decision.
+
+**What it does not:** Docker, which you install from your distribution or
+from Docker (the package recommends it and does not depend on one packaging
+of it); the CLI (`curl -fsSL https://get.shipwick.com | sh -s -- --cli`); and
+the proxy and the dashboard as programs of the host. Those two stay
+containers. Caddy finds the replicas of an application by name on a Docker
+network, which a Caddy installed on the host cannot do; static applications
+are copied into its container and requests are counted from its output. The
+dashboard needs Node, which the package does not bring. The compose file
+starts both, pinned to the package's version.
+
+```bash
+systemctl enable --now shipwick-agent
+docker compose --env-file /etc/shipwick/agent.env -f /usr/share/shipwick/compose.yml up -d
+```
+
+In that order: the agent creates the two Docker networks the compose file
+joins. The agent finds the proxy by the compose project `shipwick` and the
+service `caddy`, and talks to it through a socket in `/run/shipwick`.
+
+**Where the API listens.** As installed, on `127.0.0.1:9000`: the CLI on the
+server reaches it (`shipwick login --url http://127.0.0.1:9000`), and a
+laptop through an SSH tunnel. The proxy and the dashboard are containers, and
+a container does not reach the host's loopback. To serve the API at a
+hostname, or to use the dashboard, the agent listens on the address of
+Docker's bridge instead — `ip -4 addr show docker0` shows it, `172.17.0.1`
+unless Docker was configured otherwise:
+
+```bash
+# /etc/shipwick/agent.env
+SHIPWICK_LISTEN_ADDR=172.17.0.1:9000
+SHIPWICK_AGENT_DOMAIN=agent.example.com
+SHIPWICK_DASHBOARD_DOMAIN=dashboard.example.com
+```
+
+then `systemctl restart shipwick-agent`. That address is reachable from the
+containers of this server and from nowhere else; a firewall on the server
+that filters traffic from Docker's networks (`ufw`, `firewalld`) must let
+port 9000 through from them. The API is plain HTTP: never give it a public
+address.
+
+**The agent runs as root.** It drives Docker through Docker's socket, and
+whoever may do that can start a container that owns the host: a user of its
+own in the `docker` group would be root in everything but name, and the proxy's
+admin socket and root's `docker login` credentials would need opening up for
+it. The unit takes away what the agent does not need instead: it cannot gain
+privileges, `/usr`, `/boot` and `/etc` are read-only to it, home directories
+are read-only, and it has a `/tmp` of its own. A `SHIPWICK_BACKUP_DIR` must
+therefore lie outside those, under `/var` or `/srv`.
+
+**Upgrading** is installing the newer package: the agent is restarted when
+it was running, `agent.env` stays as it is, and the compose command above,
+run again, brings the proxy and the dashboard to the same version. The
+update notice names the installer; on such a server the package is what to
+install. **Removing** the package stops the agent and leaves the
+applications running, unsupervised; `agent.env` goes with `apt purge`, and
+`/var/lib/shipwick` — the database and the key that decrypts it — is never
+removed by the package.
+
+An installation made by the installer and one made from a package are two
+installations: the first keeps its data in a Docker volume, the second in
+`/var/lib/shipwick`. To move from one to the other, [export and
+import](#moving-to-a-new-server).
 
 | Variable | Default | |
 |---|---|---|
@@ -235,6 +336,8 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 | `SHIPWICK_WEBHOOK_SECRET` | — | Signs each notification (`X-Shipwick-Signature: sha256=<HMAC of the body>`), so your endpoint can tell it came from the agent |
 | `SHIPWICK_ALERT_MEMORY_PERCENT` | `90` | A replica at or above this share of its `resources.memory` raises an alert, see [Alerts](#7-deployment). A whole number from 50 to 100 |
 | `SHIPWICK_ALERT_DISK_PERCENT` | `85` | The disk that holds the data directory raises an alert when it is this full. A whole number from 50 to 94; at 95 the alert turns critical, whatever is set here |
+| `SHIPWICK_LOG_RETENTION_DAYS` | `14` | How long the last output of an ended container stays in the log archive, in days after it ended, from 1 to 365. See [Output that outlives its container](#output-that-outlives-its-container) |
+| `SHIPWICK_LOG_RETENTION_SIZE` | `1gb` | What the log archive may take on the disk, as `500mb` or `2gb`; over it, the application that holds the most loses its oldest entries. `0` keeps nothing |
 | `SHIPWICK_CLOUDFLARE_API_TOKEN` | — | A Cloudflare API token with *Zone → Zone → Read* and *Zone → DNS → Edit* on your zones. Certificates are then obtained through a DNS record: hostnames can stay behind Cloudflare's proxy, and can be wildcards. Needs `SHIPWICK_CADDY_ADMIN` — see [Behind Cloudflare](#11-caddy) |
 | `SHIPWICK_BACKUP_DIR` | `<data dir>/backups` | Where the backups the agent takes are kept on the server. See [Backups the server takes](#backups-the-server-takes) |
 | `SHIPWICK_BACKUP_PASSPHRASE` | — | Encrypts every backup, and is what allows the agent's own database and encryption key to be backed up at all. At least 12 characters. Keep a copy somewhere that is not this server: without it the backups cannot be read |
@@ -254,7 +357,10 @@ installed on the host: `SHIPWICK_CADDY_ADMIN=http://127.0.0.1:2019`.
 | `SHIPWICK_OIDC_CLIENT_ID`, `SHIPWICK_OIDC_CLIENT_SECRET` | — | The client the provider registered for Shipwick. The secret is sent to the provider's token endpoint only; never logged, never returned |
 | `SHIPWICK_OIDC_SCOPES` | `openid email profile` | What is asked of the provider, separated by spaces; must contain `openid`. Okta wants `groups` added for group rules |
 | `SHIPWICK_OIDC_GROUPS_CLAIM` | `groups` | The claim of the ID token that lists a person's groups |
+| `SHIPWICK_OIDC_NAME_CLAIM` | `email` | The claim of the ID token people are named by, for [accounts without an address](#accounts-without-an-address): `preferred_username`, `upn`, `sub`. Rules, the audit trail and `by` use that name |
+| `SHIPWICK_OIDC_TENANTS` | — | With Microsoft Entra's issuer for [several tenants](#accounts-of-several-microsoft-entra-tenants) (`…/organizations/v2.0`, `…/common/v2.0`), which is not used without it: the tenant ids whose accounts may sign in, separated by commas. `*` for every tenant, only with `SHIPWICK_OIDC_NAME_CLAIM=sub` |
 | `SHIPWICK_OIDC_REDIRECT_URL` | `https://<SHIPWICK_DASHBOARD_DOMAIN>/auth/callback` | Development only: where the provider sends the browser back to when the dashboard runs on the developer's machine, `http://localhost:3000/auth/callback`. Anything but a localhost URL is refused |
+| `SHIPWICK_UPDATE_CHECK` | `on` | `off` stops the agent's daily question to GitHub about a newer release; `GET /server` then says so and the dashboard shows no notice. See [A newer release](#4-installation) |
 | `SHIPWICK_LOG_LEVEL` | `info` | `debug` `info` `warn` `error` |
 | `SHIPWICK_LOG_FORMAT` | `text` | `text` `json` |
 | `DOCKER_HOST`, `DOCKER_CONFIG` | Docker defaults | Standard Docker variables are honored |
@@ -401,12 +507,15 @@ shipwick server bundle --arch amd64
 ```
 
 ```text
-✓ Release v0.6.0: compose.production.yml, install.sh and shipwick_linux_amd64 match its checksums
-✓ Wrote shipwick-v0.6.0-linux-amd64.tar.gz (112 MB)
+✓ Release v0.7.0: compose.production.yml, install.sh and shipwick_linux_amd64 match its checksums
+✓ The three images are the ones release v0.7.0 published for linux/amd64
+✓ Wrote shipwick-v0.7.0-linux-amd64.tar.gz (113 MB)
 
 Copy it to the server, and there, as root:
-  tar -xzf shipwick-v0.6.0-linux-amd64.tar.gz
-  sh shipwick-v0.6.0-linux-amd64/install.sh
+  tar -xzf shipwick-v0.7.0-linux-amd64.tar.gz
+  sh shipwick-v0.7.0-linux-amd64/install.sh
+The server needs Docker Engine and the Compose plugin; nothing is downloaded there.
+checksums.txt of the release: sha256 646205a7…
 ```
 
 The bundle holds the release's compose file, installer and checksums, the
@@ -418,14 +527,41 @@ is made and again by the installer on the server; the image archive carries a
 checksum of its own, so a copy that arrived damaged is refused before
 anything is changed.
 
+**The images are proven too**, from 0.7.0 on. A release publishes
+`image-digests.txt`, listed in its `checksums.txt` like every other file: for
+each image the digest of its manifest list and, for each platform, the digest
+of the manifest and of the image's configuration, read back from the registry
+after the release pushed them. `shipwick server bundle` reads the archive
+`docker save` wrote before it goes into the bundle: it must hold the
+configuration the release published for the server's platform and the layers
+that configuration lists, and name that image, and no other, by the release's
+tag. An archive that does not is refused and no bundle is written. The
+installer checks once more what Docker made of the archive — the ID of each
+loaded image against the same file — before it replaces the compose file; an
+image that is not the release's is removed again and the installation is left
+as it was.
+
+Two bundles are not proven, and both the command and the installer say so: one
+made with `--no-pull`, whose images are whatever the machine had under the
+release's names, and one of a release before 0.7.0, which published no
+digests.
+
+Everything in a bundle follows from its `checksums.txt`, and the bundle brings
+that file itself: on the server, the checks tell a damaged or mixed-up bundle,
+not one that somebody rebuilt on purpose. Against that, both ends print the
+SHA-256 of `checksums.txt` — compare the line `shipwick server bundle`
+printed with the one the installer prints.
+
 Copy the file by whatever means the network allows, unpack it and run the
 installer inside it. It is the same installer and asks the same questions; it
 downloads nothing and pulls nothing:
 
 ```text
-✓ The bundle is complete (/root/shipwick-v0.6.0-linux-amd64)
+✓ The bundle is complete (/root/shipwick-v0.7.0-linux-amd64)
+  checksums.txt of the release: sha256 646205a7…
 ✓ Docker 29.8.2 with Compose 5.5.1
 ✓ Loaded the images from the bundle
+✓ The images are the ones the release published
 ✓ Installed /opt/shipwick/compose.yml
 ✓ Wrote /opt/shipwick/.env
 ✓ Started the Shipwick services
@@ -456,11 +592,14 @@ What such a server needs besides:
   webhook, the bucket and the sign-in provider, if you use them, are inside the company, with
   `SHIPWICK_CA_FILE` when their certificates are. `shipwick doctor` on such a
   network reports that it could not check for a newer release, and goes on.
+  The agent's own daily question about one goes unanswered and unnoticed;
+  `SHIPWICK_UPDATE_CHECK=off` spares it the attempt.
 
 ## 5. Quick start
 
-With the CLI installed (above; on Windows, download `shipwick_windows_amd64.exe`
-from the [releases](https://github.com/shipwick/shipwick/releases)), in your
+With the CLI installed (above; on Windows, download `shipwick_windows_amd64.exe`,
+or `shipwick_windows_arm64.exe` for a machine with an Arm processor, from the
+[releases](https://github.com/shipwick/shipwick/releases)), in your
 application's repository:
 
 ```bash
@@ -657,6 +796,44 @@ on; running containers keep the value they were started with, and a rollback
 restores the value that deployment used. Secrets are encrypted at rest like
 env values are ([Security](#12-security)).
 
+**The file, back from the server.** `shipwick config my-api` prints the
+`deploy.yaml` that describes what `my-api` runs, in the layout `shipwick init`
+writes; `-o deploy.yaml` writes it to a file. It is how a file that was lost,
+or was never on this machine, is had again:
+
+```text
+$ shipwick config my-api -o deploy.yaml
+✓ Wrote deploy.yaml: my-api as deployment #7 (1.4.2) runs it
+! 1 value is not handed out and stands as "********" in the file: env.LOG_LEVEL
+  Write it again, or store it with shipwick secret set NAME and refer to it as ${NAME}.
+  Until then shipwick deploy refuses the file.
+```
+
+The server does not hand out secret values, and every `env` value and
+basic-auth password is one to it. What it does with each depends on how the
+value arrived:
+
+- A value that the deployed file left to the server —
+  `DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app` with `DB_PASSWORD`
+  stored by `shipwick secret set` — comes back as exactly that text. The agent
+  remembers it with the deployment, and fills it in again when the file is
+  deployed.
+- A value that was in the file, or that the CLI filled in from the
+  environment or `--env-file`, comes back as `"********"` with a comment on
+  its line. The agent cannot tell `LOG_LEVEL: debug` from a password, so it
+  returns neither. Write the value again, or store it as a secret and write
+  `${NAME}`.
+
+A file without masks deploys as it is and gives the configuration that runs,
+with its secrets as they are on the server now. A file that still has one is
+refused, by `deploy` and `validate`, with the fields that need a value —
+whoever sends it: `"********"` is never accepted as an env value or a
+password, so what the server masks cannot be deployed back as if it were the
+value. `shipwick config` takes a token that may deploy the application: the
+text around a reference is more than a reader is shown elsewhere. An
+application deployed before 0.7 has all its secret values masked until it is
+deployed again from its file: the references were not kept then.
+
 ### Dashboard
 
 The same things in a browser, at the dashboard hostname you gave the installer
@@ -723,12 +900,38 @@ chosen for the `deploy` role, and an expiry of 30, 90 or 365 days or a date.
 *Sign-in* holds the rules that say who gets which role when they sign in
 through the provider, and who is signed in now. *Audit trail* is
 `shipwick audit`: who did what, from which address and how it was answered,
-filtered by application, name and time, with the deployment an entry made
-linked. Addresses from
+filtered by application, name, time, kind of action, result and tokens or
+people, with the deployment an entry made linked, and exported as CSV or as
+one JSON object a line. A token is edited in its row: the applications a
+`deploy` token is limited to, and its end. Addresses from
 before the tabs — `/tokens`, `/secrets`, `/registries` — lead to the pages
-they became. What needs a file or a passphrase of your own stays with the CLI:
-the first deployment of an application, `shipwick export` to a file, and
-`shipwick import`.
+they became.
+
+An application's *Logs* tab has four views. *Live* is the output of the
+running replicas. *Previous* is the last output of the container that ended
+most recently — the tab opens on it when the application is not healthy and a
+replica crashed, was killed for memory or was restarted for its health check.
+*Archive* lists what the agent kept of ended containers and runs, and *Search*
+looks through all of it and the running replicas for a piece of text.
+
+*Change the configuration*, on an application's Configuration tab, opens its
+deploy.yaml as `shipwick config` prints it: references to stored secrets
+are references, and every other secret value stands as `"********"` and is
+listed above the document, each with a link that stores it as a secret. The
+document is checked and deployed from there; one that still holds a mask is
+refused.
+
+The server's *Export and standby* tab downloads an export as a file, under a
+passphrase typed twice, and imports one. Both pass through the dashboard's
+server as they arrive: it holds neither the file nor the passphrase, and a
+download that breaks off is a file the import refuses, since the page cannot
+see why a download ended. An import is one upload that lasts as long as the
+import; the page has to stay open. What still needs the CLI is what needs the
+project's directory: an application that is built from source or is a folder
+of files.
+
+When a newer release exists, the server's page says so, with the command
+that upgrades (§4, *A newer release*).
 
 Sign in with an API token; what it may do follows the token's role, and for
 a `deploy` token limited to some applications the page of every other
@@ -757,6 +960,22 @@ URL in the list is the agent as the dashboard's server reaches it, the same
 address `shipwick login --url` takes: the other server's agent needs a
 hostname (`SHIPWICK_AGENT_DOMAIN`) or a private network between the two.
 With one server nothing changes.
+
+**Without a mouse.** Every page and dialog works with the keyboard alone: Tab
+reaches every control in the order of the page, the first stop is a link that
+skips the navigation, and the control that has the focus is outlined in both
+themes. A dialog takes the focus, keeps it, closes on Escape and gives it back
+to the button that opened it. The theme and a chart's range are chosen with
+the arrow keys. A screen reader is told the page's title when the page
+changes, every step of a deployment that is followed, how a run, a backup or
+a promotion ended, and when the data on screen stops being live; each chart
+has its numbers as a table under *Show as table*. On a touch screen every
+control is at least 44 by 44 px, and a table becomes a list of cards wherever
+the page's column is narrow: on a phone, and beside the sidebar on a tablet.
+Animations stop when the system asks for reduced motion. This was checked
+with the keyboard, the browser's accessibility tree and an automated checker,
+in both themes; it has not yet been used with a screen reader by someone who
+works with one every day.
 
 The browser never holds a token: the dashboard's own server keeps it in an `httpOnly`
 cookie and relays requests to the agent, so the agent needs no CORS and can
@@ -807,6 +1026,7 @@ proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 | `backups.keep` | `7` | How many successful backups are kept, 1–365; the oldest go once a new one has succeeded |
 | `backups.before` | — | A command run inside the running replica before the archive is taken, as a list: a dump, a checkpoint. A non-zero exit fails the backup and nothing is archived |
 | `backups.before_timeout` | `1h` | How long `backups.before` may run, 1s–24h. A command still running at the limit fails the backup, and nothing is archived. Needs `backups.before` |
+| `backups.before_in` | `replica` | Where `backups.before` runs. `replica`: inside the running replica, where a command that passes its limit stays until it ends by itself. `container`: in a container of its own beside the replica — its image, environment and volumes, the replica as `localhost` — which is stopped at the limit. Needs `backups.before` — see [Backups the server takes](#backups-the-server-takes) |
 | `backups.stop` | `false` | Stop the application while the archive is taken, and start it again whatever happens |
 | `restart.policy` | `always` | `always` `on-failure` `never` |
 | `deploy.strategy` | `rolling` | `rolling` `recreate` — see [Deployment](#7-deployment) |
@@ -872,9 +1092,47 @@ A stored credential takes precedence over that file. Either way, only a
 username with a password or token works: credential helpers (`credsStore` in
 the Docker configuration, `docker-credential-*` programs) are not supported.
 A helper is a program on the server, which the agent's container does not
-have, and the agent executes nothing. Registries whose tokens come from such
-a program and expire within hours need the token renewed with
-`shipwick registry login` from a scheduled job of your own.
+have, and the agent executes nothing. Nor would the Docker daemon step in:
+it pulls with the credential a request hands it and with none otherwise,
+whatever the configuration of the user who installed it says. A
+`config.json` that names a `credsStore` holds no passwords at all, only the
+registries' names, so mounting it gives the agent nothing.
+
+**Registries with tokens that expire.** Amazon ECR and Google Artifact
+Registry are the registries people use a helper for, and what the helper
+does there is fetch a short-lived token. The same token can be handed to
+the agent from wherever the cloud's own CLI is signed in — the pipeline
+that deploys, or a scheduled job:
+
+```bash
+# Amazon ECR: the token is valid for 12 hours
+aws ecr get-login-password --region eu-central-1 \
+  | shipwick registry login 123456789012.dkr.ecr.eu-central-1.amazonaws.com --username AWS
+
+# Google Artifact Registry: an access token, valid for an hour
+gcloud auth print-access-token \
+  | shipwick registry login europe-west1-docker.pkg.dev --username oauth2accesstoken
+
+# Google Artifact Registry: a service account's key, which does not expire
+cat key.json | shipwick registry login europe-west1-docker.pkg.dev --username _json_key
+```
+
+These are the commands Amazon and Google document for `docker login`, with
+`shipwick registry login` in its place: the same user names, the password
+on standard input, the registry without `https://`. The account, the region
+and the location are yours.
+
+Logging in as the step before `shipwick deploy` covers the deployment: the
+agent pulls the image while the token is fresh. The server needs the
+registry again later only for an image it no longer has — a rollback to a
+version whose image was pruned, a replica recreated after its image was
+removed — and then a token from the last deployment has expired. Where
+that matters, renew it on a schedule shorter than the token's life (every
+few hours for ECR), or use a credential that does not expire: a service
+account key for Artifact Registry, with a role that only reads. Storing a
+registry credential needs an `admin` token; give the job one of its own,
+with an end. A pull that fails for an expired token says which command to
+run.
 
 **Running something other than the image's default.** `entrypoint`, `command`
 and `user` replace the image's `ENTRYPOINT`, `CMD` and `USER`, the way
@@ -912,7 +1170,9 @@ on the server. With `json-file` or `local` the caps stay unless you set
 `max-size` and `max-file` yourself. With a remote driver, `shipwick logs`
 keeps working through the local copy Docker keeps for `docker logs` — its
 dual logging, on by default since Docker 20.10; if it was turned off
-daemon-wide, `shipwick logs` shows nothing for that application.
+daemon-wide, `shipwick logs` shows nothing for that application. The log
+archive reads the same copy: what `shipwick logs` can show of a container,
+the archive can keep of it when it ends, and no more.
 
 ## 7. Deployment
 
@@ -1348,7 +1608,9 @@ output is printed when it finishes, and `shipwick` exits with its exit code.
 Several commands may run at once. Every run keeps the last 200 lines (64 KB) of
 what the command wrote; the container itself is removed. A job's output goes
 through Docker's default log driver, whatever `logging` says: that copy is
-where the run's output is read from.
+where the run's output is read from. The log archive keeps more of it, the
+last 10,000 lines: `shipwick logs my-api --run <id>`, see
+[Output that outlives its container](#output-that-outlives-its-container).
 
 If the agent restarts while a job runs, the run is marked `interrupted` and
 its container removed on the next start; the job runs again at its next
@@ -1435,6 +1697,126 @@ Active alerts are kept in the agent's memory: after the agent restarts, one
 whose condition still holds is raised again. Stopping or deleting an
 application drops its alerts without a message.
 
+### Output that outlives its container
+
+What a container printed is Docker's to keep, and Docker keeps it as long as
+the container. A rollout removes the replicas it replaces, a failed
+deployment is cleaned up, a job's container goes when the job is done — each
+takes its output along; and a replica that crashes and is started again keeps
+its log only until the logging driver rotates it away. So the agent copies
+the last output of every container whose run ends into a *log archive* on the
+server, with what it is the output of and how it ended:
+
+| What ended | What is kept of it |
+|---|---|
+| A replica that exits by itself: a crash, a kill for memory, a clean exit. Copied when the supervisor notices, in the background | The run's last 2,000 lines, at most 1 MB |
+| A replica the supervisor restarts for failing its health check | The same, of the run that was ended |
+| The replicas of an application that is stopped | The same |
+| A container that is removed: a replica a deployment replaced, the replicas of a deployment that failed, a leftover | What it printed since its last copy, within the same bound, taken before it is removed |
+| A run of a job, of a `pre_deploy` command, of `shipwick run` | Its last 10,000 lines, at most 4 MB |
+
+A line longer than 16 KB is cut there. Every line keeps the time Docker
+recorded for it and whether it was written to standard output or standard
+error. A copy begins where the last copy of the same container ended, so no
+line is kept twice: a replica in a crash loop leaves one entry for each
+attempt, with that attempt's output. A container that printed nothing leaves
+no entry — unless it died, with an exit code other than 0 or for memory: that
+it died is then the entry.
+
+**Why did it die?** One command, the morning after:
+
+```text
+$ shipwick logs my-api --previous
+#12 replica 1 (1.4.2), shipwick_my-api_12_1: crashed (exit 1) 6h ago; 153 lines
+…
+panic: runtime error: invalid memory address or nil pointer dereference
+```
+
+`--previous` (`-p`) shows the last run of a replica that ended, whatever
+ended it; `--deployment` and `--replica` narrow it. `shipwick status` names
+the exact entry when it shows a replica that died or a deployment that
+failed:
+
+```text
+Replica 2's last output before it ran out of memory, 5m ago:   shipwick logs my-api --id 41
+What deployment #13 printed before it failed:                  shipwick logs my-api --deployment 13
+```
+
+`shipwick logs my-api --list` lists what is kept — the entry's id, when and
+why its container ended, how many lines — and `--id` shows one entry;
+`--run <id>` shows the output of a run of a job or a command, by the run's
+id, which `--list` and `shipwick jobs logs` show. `-n` limits an entry to its last
+lines, `-t` adds the times.
+
+**Searching.** `--search` looks through what is kept and what the replicas
+that exist still hold, together:
+
+```text
+$ shipwick logs my-api --search "connection refused" --since 2h
+== #12 replica 1, shipwick_my-api_12_1, kept as 41 ==
+2026-10-04 03:12:44.108 dial tcp 10.0.0.5:5432: connect: connection refused
+== #13 replica 1, shipwick_my-api_13_1 ==
+2026-10-04 03:40:02.551 dial tcp 10.0.0.5:5432: connect: connection refused
+```
+
+The text is looked for inside lines, whatever its case; it is not a pattern.
+`--since` and `--until` take how long ago (`30m`, `2h`, `7d`), a date or a
+time in RFC 3339; `--deployment <#>`, `--replica <n>` and `--run <id>` narrow
+where the lines come from. Each of them works without `--search` too:
+`shipwick logs my-api --since 2h` is everything the application printed in
+the last two hours, kept or current, and `--deployment 13` everything
+deployment #13 printed. The newest `-n` lines that match are shown (100; up
+to 5000), oldest first, under a line for each container they come from. Of a
+container that exists its last 50,000 lines are looked at; the output of a
+job that is still running is found once the run has ended.
+
+A search reads; there is no index. The agent rules out what the question
+rules out — other deployments, other replicas, entries from before `--since`
+— and reads the rest, about 128 MB for one request, and the CLI asks again
+from where the last answer stopped. On the development stack, an application
+with 2.5 million archived lines in 257 entries (301 MB of output, 64 MB on
+the disk) was searched to the end in 1.3 seconds, over three requests.
+
+**How much, and for how long.** An entry is kept for 14 days after its
+container ended (`SHIPWICK_LOG_RETENTION_DAYS`), and the archive takes at
+most 1 GB of the disk (`SHIPWICK_LOG_RETENTION_SIZE`); the lines are stored
+compressed, about a fifth of their size. Over that size, the application
+that holds the most loses its oldest entries first: one that fills the
+archive makes room out of its own output, and what a quiet application
+printed when it crashed last week stays. While the disk is as full as its
+alert's threshold (85%, `SHIPWICK_ALERT_DISK_PERCENT`) the archive does not
+grow at all: a new entry makes room for itself by removing at least as much.
+The output of a job's runs follows the job's history, its last 50 runs.
+`SHIPWICK_LOG_RETENTION_SIZE=0` keeps nothing. `shipwick server status` shows
+what the archive holds.
+
+**Where it is, and where it is not.** The lines are gzip files under
+`<data dir>/logs`, one per entry, readable on the server with `zcat`; the
+agent's database holds one row for each, not the output. They are as
+sensitive as the logs themselves — whatever the application printed — and
+are treated as such: reading the archive takes the role that reads the logs;
+the archive puts nothing into events, notifications or the audit trail (a
+failed deployment's events quote the last 20 lines of the replica that
+failed, as they always did); and the files are not encrypted, like the logs
+Docker keeps next to them. Three
+things leave it behind on purpose:
+
+- `shipwick delete` removes the application's archived output with it. The
+  volumes and the backups stay, because the application may want its data
+  back; nothing needs its old output back.
+- The backup of the agent's state does not hold it: seven daily copies of
+  every line would be most of the backup. A database restored from one
+  starts with an empty archive.
+- An export does not hold it, like the history: it describes the old server.
+
+**What cannot be kept.** The copy reads what `shipwick logs` reads. A
+container removed by something other than Shipwick — `docker rm`, a prune —
+takes its output with it, and so do lines the logging driver had already
+rotated away (30 MB per container, unless `logging` says otherwise) and the
+output of an application whose remote logging driver keeps no local copy
+(§6). An agent that was down when a replica died makes the copy when it
+starts, as long as the container is still there.
+
 ### Backups the server takes
 
 An application with volumes gets a `backups` block, and the agent archives its
@@ -1453,6 +1835,7 @@ backups:
   keep: 7                   # successful backups kept; default 7
   before: ["pg_dump", "-U", "postgres", "-f", "/var/lib/postgresql/data/backup.sql", "app"]
   before_timeout: 1h        # how long `before` may run; default 1h, up to 24h
+  before_in: replica        # where `before` runs: replica (default) or container
   stop: false               # stop the application for the archive; default false
 ```
 
@@ -1468,7 +1851,8 @@ downloads. Two things decide whether what is in it can be trusted:
   same way, with an error that names the key. Docker has no way to end a
   command once it was started in a container, so one that hangs stays there
   until it ends by itself or the application is deployed or restarted; the
-  backup no longer waits for it.
+  backup no longer waits for it. `before_in: container` runs it where it can
+  be ended: see below.
 - `stop: true` stops the application for as long as the archive takes and
   starts it again whatever happens, a failed backup included. This is the one
   way to a consistent copy of files a process keeps open and has no dump tool
@@ -1477,6 +1861,44 @@ downloads. Two things decide whether what is in it can be trusted:
 Both may be given: the command runs, then the application stops. Without
 either, the archive is taken from under the running process, which is fine for
 uploads and not for a database.
+
+**A `before` that is ended at its limit.** With `before_in: container` the
+command does not run inside the replica but in a container of its own next to
+it, for as long as the command takes. At `before_timeout` that container is
+stopped — `SIGTERM`, and `SIGKILL` if it is still there ten seconds later —
+and removed, the backup
+fails with `backups.before did not finish within 1h and was stopped`, and
+nothing of the command is left; the same happens when the agent is stopped
+while it runs. The replica is not touched.
+
+```yaml
+backups:
+  schedule: "0 3 * * *"
+  before: ["pg_dump", "-U", "postgres", "-h", "localhost", "-f", "/var/lib/postgresql/data/backup.sql", "app"]
+  before_timeout: 30m
+  before_in: container
+```
+
+What the container shares with the replica, and what it does not:
+
+| | |
+|---|---|
+| The image, the `env` values, `user` and the `resources` limits | The same. The limits are its own: a dump's memory is not taken from the replica's |
+| The volumes | Mounted at the same paths, so a dump written into a volume is in the archive |
+| The network | The replica's own: `localhost` and `127.0.0.1` are the replica, on every port it listens on |
+| The rest of the replica's filesystem | Not there: the container starts from the image. A socket the application keeps under `/var/run` or `/tmp` cannot be reached |
+| The replica's processes | Not visible: a command that signals the application's process does not find it |
+| The image's entrypoint | Not run: the command is started as it is written, as it would be inside the replica |
+
+So a command that talks to the application over the network works unchanged
+(`redis-cli SAVE`, `psql -h localhost -c CHECKPOINT`), and one that looks for
+a socket by default must be told a host: `pg_dump` and `psql` need
+`-h localhost`, `mysqldump` and `mysql` `-h 127.0.0.1`, with a password where
+the database asks for one over TCP (PostgreSQL's image trusts `localhost`;
+MySQL's wants `-p` or `MYSQL_PWD`). That difference is why `replica` remains
+the default: nothing changes for a configuration that does not ask. A scheduled
+job and the pre-deploy command were containers all along, and are stopped and
+removed at their `timeout` the same way.
 
 ```text
 $ shipwick backups postgres
@@ -1688,8 +2110,8 @@ shipwick --context new import move.swexport
 credentials and certificates with their keys; the images that exist nowhere
 but on the server, which are the ones `shipwick deploy` built; the folders of
 static applications; and a tar archive of every volume. Deployment history,
-metrics, events, API tokens, the audit trail, access rules, sessions and
-backups stay behind: they describe the old server. `--app <name>` (repeatable) limits it to some applications; the
+metrics, events, archived logs, API tokens, the audit trail, access rules,
+sessions and backups stay behind: they describe the old server. `--app <name>` (repeatable) limits it to some applications; the
 secrets, credentials and certificates come along either way.
 
 **It is encrypted, always.** The file holds every secret the server has, in
@@ -2512,7 +2934,8 @@ container that mounts `/`. Consequently:
 **Tokens and roles.** The token the installer prints is the *root* token:
 `admin`, and the one to keep for yourself. Create more, each with the role it
 needs — `read` sees everything, `deploy` also deploys, rolls back, stops and
-starts, `admin` also deletes applications, manages tokens, secrets, registry
+starts and gets an application's `deploy.yaml` back (`shipwick config`),
+`admin` also deletes applications, manages tokens, secrets, registry
 credentials and certificates, and rotates the encryption key:
 
 ```bash
@@ -2543,11 +2966,33 @@ history, the server. It changes nothing else: another application is refused
 with a message that names the token's applications, and so is anything of
 the `deploy` role that is not about one application. What takes `admin` stays
 refused, also for its own applications. Only `deploy` can be limited — a
-`read` token changes nothing, and `admin` is for the whole server — and the
-list is fixed when the token is created: for a different list, create another
-token. A limit narrows what a token can be used for by mistake or after a
-leak; it is not a wall between tenants, because a limited token still reads
-every application's logs and configuration (never the values of `env`).
+`read` token changes nothing, and `admin` is for the whole server. A limit
+narrows what a token can be used for by mistake or after a leak; it is not a
+wall between tenants, because a limited token still reads every application's
+logs and configuration (never the values of `env`).
+
+**Changing a token.** The applications and the end of a token can be changed
+while it is in use; its value stays the same, so nothing that holds it needs
+touching:
+
+```bash
+shipwick token update ci --app my-api --app web --app worker   # replaces the list
+shipwick token update ci --all-apps                            # lifts the limit
+shipwick token update ci --expires 90d                         # moves the end
+shipwick token update ci --no-expiry
+```
+
+`--app` replaces the list, it does not add to it, and is checked as at
+creation: valid names, at most 50, a `deploy` token. The change holds from
+the token's next request. The role cannot be changed: a token that is to do
+more than it was created for is a new token, so that a `read` token handed
+to a contractor never becomes `admin` by an edit. The root token cannot be
+changed here at all. Every change is in the audit trail with what was there
+before, under the name of whoever made it:
+
+```
+2026-10-03 20:31:10   root   token.update   ci   ok   203.0.113.9   applications my-api -> my-api web worker
+```
 
 **A token with an end.** `--expires` takes days or hours from now, or a date:
 
@@ -2560,9 +3005,19 @@ From then on the token is refused, and whoever presents it is told that it
 expired and when — a wrong token is told nothing of the kind. An expired token
 stays in `shipwick token ls` until you revoke it; the list marks what expires
 within 14 days, and `shipwick doctor` and `shipwick server status` say when
-the token they run with does. A token cannot be extended: create its
-replacement, hand it over, revoke the old one. The root token, the one in the
-agent's environment, does not expire.
+the token they run with does. The root token, the one in the agent's
+environment, does not expire.
+
+An end can be moved with `shipwick token update <name> --expires`, also for
+a token that has expired already, which then works again. An end bounds how
+long a token that leaked unnoticed stays useful, and moving it gives that up
+for the time added: the value that may have leaked is still the one in use.
+Where that matters — a token that left with a person, or sat in a log —
+create its replacement, hand it over and revoke the old one instead. Where a
+pipeline simply reached its date, moving the end is the honest alternative
+to creating tokens without one, and the trail keeps the old date next to the
+new and the name of who moved it. An end is moved into the future only: to
+stop a token now, revoke it.
 
 **Who did what.** Every request that changes something is written down: who
 made it (the token's name), when, from which address, what it was about and
@@ -2572,6 +3027,8 @@ how it was answered.
 shipwick audit                              # the last 50, newest first; needs admin
 shipwick audit --app my-api --since 7d
 shipwick audit --actor ci -n 200
+shipwick audit --action token. --action access. --outcome refused,failed
+shipwick audit --actor-kind person --since 30d
 ```
 
 ```
@@ -2585,7 +3042,7 @@ WHEN                  WHO    ACTION         ON            RESULT    FROM        
 Recorded are deployments, redeployments and rollbacks, stops and starts,
 deletions, commands and jobs started by hand, uploaded images and folders,
 secrets set and removed (the name, never the value), registry logins and
-logouts, certificates, tokens created and revoked, key rotation, backups
+logouts, certificates, tokens created, changed and revoked, key rotation, backups
 taken, verified, restored, removed and downloaded, volume downloads, restores
 and removals, exports, imports and promotions. A request that was refused for
 its role or its application limit is recorded as `refused`, any other failure
@@ -2599,6 +3056,43 @@ connection's. Nothing from a request's body is kept except names. The trail
 is kept for a year and at most 100,000 entries, whichever is reached first;
 it lives in the agent's database and travels with its backups.
 
+The trail is narrowed by application (`--app`), by who (`--actor`, a token's
+name or a person's), by kind of actor (`--actor-kind token` or `person`), by
+time (`--since`), by what was done and by how it ended. `--action` takes an
+action as the ACTION column shows it, or the start of a family with its dot
+— `token.` is every action on tokens, `backup.` every one on backups — and
+can be repeated or given a list separated by commas; an entry matches when
+one of them does. `--outcome` takes `ok`, `refused` and `failed` the same
+way. Filters of different kinds narrow each other. A page that is not the
+end of what matches closes with the command for the next one.
+
+**Taking the trail out.** With `--format` or `--output` the command writes
+everything that matches instead of a page:
+
+```bash
+shipwick audit --since 2026-01-01 --output audit-2026.csv      # a file only its owner reads
+shipwick audit --action deploy --format json | jq -r .actor.name
+```
+
+`csv` has one row per entry under a header (`id`, `at`, `actor_kind`,
+`actor`, `address`, `forwarded_for`, `action`, `application`, `target`,
+`outcome`, `status`, `code`, `detail`), times in UTC; `json` has one JSON
+object per line, the same object the API returns. Both are newest first.
+`--output` takes the format from the file's name (`.csv`, `.json`,
+`.ndjson`), does not write over a file that exists, and leaves none behind
+when the export was interrupted. The agent sends the trail as it reads it,
+500 entries at a time, so the largest trail costs it no more memory
+than a small one.
+
+A CSV file is usually opened in a spreadsheet, and a spreadsheet takes a
+cell that begins with `=`, `+`, `-` or `@` for a formula. The trail holds
+names that callers chose — a request for a token called `=HYPERLINK(…)` is
+refused and recorded with that name — so every such cell is written with an
+apostrophe in front, which Excel, LibreOffice and Google Sheets show as
+text. The JSON export, and the trail itself, keep the values as they were
+recorded. An export needs `admin` and is itself an entry, `audit.export`,
+with who took it, the format, the filters and the number of entries.
+
 What Shipwick does:
 
 - Only the SHA-256 of each token is kept, in memory and on disk; comparison is
@@ -2608,7 +3102,9 @@ What Shipwick does:
   exists. The installer avoids this by generating the token itself and
   passing it in; do the same if you set things up by hand.
 - Tokens, `Authorization` headers, request bodies and env values are never
-  logged. Env values are masked in every API response. `${NAME}` placeholders
+  logged. Env values are masked in every API response, and the mask is
+  refused as a value: a configuration copied out of an answer cannot be
+  deployed with `********` for a password. `${NAME}` placeholders
   keep secrets out of `deploy.yaml` and out of your repository; the CLI fills
   them in from its environment or `--env-file` at deploy time, the agent fills
   the remaining `env` values in from the secrets stored on the server, and a
@@ -2719,6 +3215,20 @@ the API; the log names the bucket and its host. Taking and verifying a backup
 needs the `deploy` role; downloading, restoring or removing one, and anything
 about the agent's state, needs `admin`.
 
+**What leaves the server unasked.** One request a day, from the agent to
+`https://github.com/shipwick/shipwick/releases/latest`, to learn whether a
+newer release exists. It is a `HEAD` request without a body, a query or a
+cookie, and its `User-Agent` is `shipwick-agent`: no version, no identifier
+of the server, nothing about what it runs. GitHub sees the address the
+request came from, or the proxy's, and that a Shipwick agent runs behind it;
+the answer is a redirect whose target names the release, and it is not
+followed. `SHIPWICK_UPDATE_CHECK=off` stops it. Everything else that leaves
+the server does so because you configured it: the webhook, the bucket, the
+sign-in provider, the certificate authority, the registries your images
+come from. The CLI asks GitHub for the latest release only when you run
+`shipwick upgrade`, `shipwick doctor` or `shipwick server bundle`, with the
+`User-Agent` `shipwick/<version>`.
+
 Protect the data directory regardless; it is created `0700`.
 
 Found a vulnerability? Please report it privately: [SECURITY.md](../SECURITY.md).
@@ -2764,12 +3274,13 @@ affected.
 | Provider | Issuer | Where to register, and what else it needs |
 |---|---|---|
 | Google Workspace | `https://accounts.google.com` | Google Cloud console → *APIs & Services* → *Credentials* → *Create credentials* → *OAuth client ID*, type *Web application*, with the redirect URI under *Authorized redirect URIs*. Set the consent screen's user type to *Internal* to admit your organisation only. Google's ID tokens name no groups: use rules for addresses and for your domain |
-| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant id>/v2.0` | *App registrations* → *New registration*, *Accounts in this organizational directory only*, redirect URI of the platform *Web*; the secret under *Certificates & secrets*. The tenant's own issuer is required: the shared `common` and `organizations` endpoints name no single issuer and are refused. For group rules add a groups claim under *Token configuration*; Entra sends each group's **object id**, so a rule reads `group:0f3c…`, and leaves the claim out for a person in more groups than fit a token — limit it to the groups assigned to the application. An account without a mail address has no `email` claim and cannot sign in |
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant id>/v2.0` | *App registrations* → *New registration*, *Accounts in this organizational directory only*, redirect URI of the platform *Web*; the secret under *Certificates & secrets*. For the accounts of several tenants see [below](#accounts-of-several-microsoft-entra-tenants). For group rules add a groups claim under *Token configuration*; Entra sends each group's **object id**, so a rule reads `group:0f3c…`, and leaves the claim out for a person in more groups than fit a token — limit it to the groups assigned to the application. An account without a mail address has no `email` claim: name people by another claim, as [described below](#accounts-without-an-address) |
 | Okta | `https://<your org>.okta.com` | *Applications* → *Create App Integration* → *OIDC – OpenID Connect* → *Web Application*, with the redirect URI under *Sign-in redirect URIs*. For group rules add a groups claim filter to the application's ID token (claim name `groups`) and set `SHIPWICK_OIDC_SCOPES="openid email profile groups"` |
 | Keycloak | `https://<host>/realms/<realm>` | A client with *Client authentication* on and the *Standard flow*, the redirect URI under *Valid redirect URIs*. For group rules add a mapper of the type *Group Membership* to the client's dedicated scope: token claim name `groups`, *Add to ID token* on, and *Full group path* off for plain names (`developers`) or on for paths (`/developers`). An account whose e-mail address is not verified in Keycloak is refused |
 
-Sign-in was tested against Keycloak 26; the rows for the other three follow
-what those providers document. Two more variables exist for a provider that
+Sign-in was tested against Keycloak 26, with people named by their address
+and by their user name; the rows for the other three follow what those
+providers document. Two more variables exist for a provider that
 differs from the defaults: `SHIPWICK_OIDC_SCOPES` (`openid email profile`)
 is what is asked of it, and `SHIPWICK_OIDC_GROUPS_CLAIM` (`groups`) names
 the claim of the ID token that lists a person's groups.
@@ -2808,6 +3319,103 @@ The agent takes the address from the provider's ID token, and only one the
 provider does not mark as unverified. Rules are kept whether or not a
 provider is configured, so the table can be prepared first. Managing it
 needs `admin`.
+
+#### Accounts without an address
+
+A person is known to Shipwick by one name: what rules are written for, what
+the audit trail and a deployment's `by` show. By default it is the `email`
+claim of the ID token, and an account without one is refused. Service
+accounts, administrator accounts and whole directories have none. For them
+the agent reads the name from another claim:
+
+```bash
+SHIPWICK_OIDC_NAME_CLAIM=preferred_username
+```
+
+| Claim | What it holds | Worth knowing |
+|---|---|---|
+| `email` (default) | The account's address, brought to lowercase | Refused when the provider marks it as not verified |
+| `preferred_username` | The name the person signs in with: a user name in Keycloak, usually the address in Okta and Entra | People can often change it themselves; use it where the directory is yours |
+| `upn` | Entra's user principal name, `ada@corp.example` | Not in a token by default: add it as an optional claim under *Token configuration* |
+| `sub` | The provider's own identifier for the account: a number, a UUID, 43 characters at Entra | Never changes and is never reassigned, and says nothing to a reader: the audit trail shows `AAAAAAAAAAAAAAAAAAAAAIkzqFVrSaSaFHy782bbtaQ` |
+
+Any other claim that holds one string works the same way.
+
+A name from a claim other than `email` is kept exactly as the provider
+writes it, capitals included: two identifiers that differ only by case are
+two people. It may hold letters, digits and `. _ % + ' @ | : = # ~ -`, at
+most 254 characters, and no spaces; an account whose claim is missing or
+holds anything else is refused (`name_missing`), because the name is written
+into the audit trail and the log as it is. `email_verified` is looked at for
+the `email` claim only: it says nothing about any other.
+
+What `shipwick access grant` takes follows from the name:
+
+```bash
+shipwick access grant name:svc-deploy --role deploy     # exactly this name
+shipwick access grant ada@corp.example --role admin     # a name that is this address
+shipwick access grant '*@corp.example' --role read      # names that are addresses there
+shipwick access grant group:platform --role admin       # unchanged
+```
+
+`name:` matches the name character for character and decides before every
+other rule. Rules for an address and for a domain apply to names that are
+addresses, without regard to case — with `upn`, and with
+`preferred_username` where it is one — and to nobody when the names are
+identifiers: with `sub`, write `name:` rules or use groups. The CLI says so
+when a rule is granted that the claim in use cannot match, and
+`shipwick server status` shows the claim. `shipwick access signout` takes
+the name as `shipwick access sessions` lists it.
+
+Changing the claim changes what everyone is called. Sessions that were
+named by the old claim end with their next request, rules written for the
+old names match nobody until they are rewritten, and the audit trail keeps
+the old names for what was done under them. Choose the claim before the
+rules.
+
+#### Accounts of several Microsoft Entra tenants
+
+An application registered for *Accounts in any organizational directory*
+signs people in at an address that belongs to no tenant,
+`https://login.microsoftonline.com/organizations/v2.0` (`common/v2.0` with
+personal accounts as well). Entra issues each token in the name of the
+account's own tenant, so that address has no single issuer, and its
+configuration says so with a placeholder. The agent accepts it together
+with the list of tenants that may sign in:
+
+```bash
+SHIPWICK_OIDC_ISSUER=https://login.microsoftonline.com/organizations/v2.0
+SHIPWICK_OIDC_TENANTS=8f0d4c2e-6a1b-4c3d-9e5f-0a1b2c3d4e5f,0a1b2c3d-4e5f-4a6b-8c7d-9e8f7a6b5c4d
+```
+
+Tenants are named by their id (*Entra admin center* → *Overview* → *Tenant
+ID*), separated by commas. Without the variable the agent does not start
+with such an issuer. An account of another tenant is refused before the
+rules are asked (`tenant_not_allowed`), and taking a tenant off the list
+ends its sessions with their next request. The tenant an account signed in
+from is in the detail of its `signin` entry in the audit trail.
+
+A token is believed only if its issuer is that address with the token's own
+tenant id in the placeholder's place, and the tenant is on the list; a
+token whose issuer and tenant disagree is refused, whatever the list says.
+
+Every company with a Microsoft account is a tenant, and its administrators
+decide what the accounts in it are called: their addresses, their user
+names. List the tenants whose administrators you would trust with your
+rules. `SHIPWICK_OIDC_TENANTS=*` accepts every tenant, and is taken only
+together with `SHIPWICK_OIDC_NAME_CLAIM=sub`: among all tenants the
+identifier is the one name nobody can choose, so a rule `name:…` cannot be
+met by an account someone named after yours. Access then rests on `name:`
+rules alone, one per person: the groups an account reports are its own
+tenant's to name, and with every tenant accepted the agent does not read
+them.
+
+Only the two addresses above are treated this way. A provider elsewhere
+whose configuration names a different issuer than the one configured is
+refused as before, placeholder or not. None of this was run against Entra
+itself, which cannot be run locally: the agent was checked against Entra's
+published configuration and keys, and against a provider built for the
+tests that issues tokens the way Entra documents it.
 
 **What signing in gives.** A session of ten hours: longer than a working
 day, so nobody signs in twice in one, and shorter than the night between
@@ -2858,6 +3466,14 @@ What Shipwick does about it:
   was issued by the configured issuer for this client, is within its time
   and minutes old, and carries the one-time value of this sign-in. Each such
   value is accepted once.
+- A provider whose configuration names another issuer than the configured
+  one is refused. The one exception is Entra's address for several tenants,
+  and there a token's issuer must be its own tenant's, the tenant one the
+  operator listed.
+- A name the provider reports is kept only if it is made of letters, digits
+  and punctuation without spaces, at most 254 characters: it goes into the
+  audit trail, the log and a deployment's `by`. A name that is not is
+  refused, and not repeated in the refusal.
 - The provider is only ever asked to send people back to the dashboard's
   configured hostname, never to an address taken from a request.
 - Of a session the agent keeps the SHA-256, as of a token. A failed sign-in

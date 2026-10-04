@@ -1,10 +1,75 @@
 /**
- * What the dashboard needs to know of a pasted deploy.yaml before it sends
- * it: the application's name, which is part of the address it is sent to, and
- * whether it describes something only the CLI can deploy. Pure, so it is
- * unit-tested. This is not a YAML parser and judges nothing else: the agent
- * validates the document, and its answer is what the page shows.
+ * What the dashboard does with a deploy.yaml in its editor. From 0.7 on the
+ * agent takes a document as it is (POST /validate, POST /applications) and
+ * reads the application's name itself; the page reads nothing out of it. What
+ * is here is the rest: the values the agent masked in a document it handed
+ * out, and, for an agent before 0.7 only, the name the address then needs.
+ * Pure, so it is unit-tested. None of it is a YAML parser and none of it
+ * judges the document: the agent validates it, and its answer is what the
+ * page shows.
  */
+
+/** What stands in the place of a value the agent does not hand out; a document that still carries it is refused. */
+export const MASK = '********'
+
+/** The variable a masked field is: "LOG_LEVEL" for `env.LOG_LEVEL`; "" for a field that is not a variable. */
+export function maskedVariable(field: string): string {
+  const match = /^env\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(field)
+  return match ? match[1]! : ''
+}
+
+/** The position of a masked account's password in `proxy.basic_auth`; -1 for any other field. */
+function maskedAccount(field: string): number {
+  const match = /^proxy\.basic_auth\[(\d+)\]\.password$/.exec(field)
+  return match ? Number(match[1]) : -1
+}
+
+/** What a masked field is, in words: "LOG_LEVEL", "the password of account 1 under proxy.basic_auth". */
+export function maskedLabel(field: string): string {
+  const variable = maskedVariable(field)
+  if (variable) return variable
+  const account = maskedAccount(field)
+  return account >= 0 ? `the password of account ${account + 1} under proxy.basic_auth` : field
+}
+
+/**
+ * The name to store a masked value under as a secret, for the link to the
+ * Secrets page: the variable's own, and for a password one that says what it
+ * is. The document then refers to it as `${NAME}`.
+ */
+export function maskedSecretName(field: string): string {
+  const variable = maskedVariable(field)
+  if (variable) return variable
+  const account = maskedAccount(field)
+  if (account < 0) return ''
+  return account === 0 ? 'PROXY_PASSWORD' : `PROXY_PASSWORD_${account + 1}`
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Whether the text still holds the mask where `field` had it: the variable's
+ * line, or the password line of that account. A document that was edited
+ * beyond recognition answers false, and the agent says what it finds.
+ */
+export function stillMasked(text: string, field: string): boolean {
+  const variable = maskedVariable(field)
+  if (variable) return new RegExp(`(^|[\\s{,"'])${escapeRegExp(variable)}["']?[ \\t]*:[ \\t]*["']?\\*{8}`, 'm').test(text)
+  const account = maskedAccount(field)
+  if (account < 0) return false
+  const passwords = [...text.matchAll(/(^|[\s{,"'-])password["']?[ \t]*:[ \t]*(.*)$/gm)]
+  return passwords[account]?.[2]?.includes(MASK) ?? false
+}
+
+/** The masked fields of a handed-out document that the text has not replaced yet, in the agent's order. */
+export function remainingMasks(text: string, masked: readonly string[]): string[] {
+  return masked.filter(field => stillMasked(text, field))
+}
+
+/** Whether the document still describes a folder of files: the uploaded folder is then deployed again, by its digest. */
+export function describesStatic(text: string): boolean {
+  return /^static[ \t]*:/m.test(text) || /^\s*\{[\s\S]*"static"[ \t]*:/.test(text)
+}
 
 export interface DocumentInspection {
   /** The top-level `name`; "" when the document has none that can be read. */
@@ -24,6 +89,12 @@ const APPLICATION_NAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 /** The agent refuses a larger document. */
 export const MAX_DOCUMENT_BYTES = 64 * 1024
 
+/**
+ * Reads the name and the kind out of a document, for an agent before 0.7
+ * only: it takes a document under its application's name
+ * (POST /applications/:name/deploy), so the page has to find that name, and
+ * it has no way to deploy a build or a folder from here.
+ */
 export function inspectDocument(text: string): DocumentInspection {
   const keys = text.trimStart().startsWith('{') ? jsonKeys(text) : yamlKeys(text)
   const name = keys.get('name') ?? ''

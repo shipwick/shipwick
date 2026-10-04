@@ -9,7 +9,7 @@ import { tidyDuration } from '~/utils/jobs'
 import { roleHint } from '~/utils/roles'
 import { addressOf, applicationUrl } from '~/utils/spec'
 import { applicationStatusDisplay } from '~/utils/status'
-import { applicationPath, applicationTabs } from '~/utils/tabs'
+import { applicationPath, applicationTabs, tabTitle } from '~/utils/tabs'
 
 /**
  * The frame of an application's page: who it is and how it is, the actions,
@@ -24,7 +24,6 @@ const access = useAccess()
 const name = computed(() => String(route.params.name))
 const path = computed(() => `/applications/${encodeURIComponent(name.value)}`)
 
-useHead({ title: () => name.value })
 
 // --- data ---------------------------------------------------------------------
 
@@ -77,7 +76,7 @@ function onStarted(deployment: Deployment) {
   progress.follow(deployment)
   refreshAll()
   if (route.path !== path.value) void router.push(path.value)
-  window.scrollTo({ top: 0, behavior: 'smooth' })
+  window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
 }
 
 function dismissProgress() {
@@ -134,6 +133,9 @@ const tabs = computed(() => applicationTabs({
   static: isStatic.value,
   volumes: (spec.value?.volumes?.length ?? 0) > 0,
 }))
+
+// Each tab is a page: its name is in the title.
+useHead({ title: () => tabTitle(tabs.value, route.path, name.value) })
 
 /** What the stop dialog names: the address visitors use, path included. */
 const address = computed(() => (app.data.value?.domain ? addressOf(app.data.value.domain, app.data.value.path) : ''))
@@ -207,7 +209,7 @@ provideApplication({
 
     <PageBody>
       <!-- Loading -->
-      <div v-if="app.loading.value && !app.data.value" class="space-y-3" aria-busy="true" aria-label="Loading">
+      <div v-if="app.loading.value && !app.data.value" class="space-y-3" role="progressbar" aria-busy="true" aria-label="Loading">
         <span class="skeleton h-6 w-40" />
         <span class="skeleton w-24" />
         <span class="skeleton w-64" />
@@ -247,7 +249,7 @@ provideApplication({
             </template>
             <template v-if="address">
               <span class="text-fg-faint" aria-hidden="true">·</span>
-              <a v-if="addressUrl" :href="addressUrl" target="_blank" rel="noopener noreferrer" class="mono link inline-flex min-w-0 items-center gap-1 break-all">{{ address }}<UiIcon name="external" :size="12" /></a>
+              <a v-if="addressUrl" :href="addressUrl" target="_blank" rel="noopener noreferrer" class="mono link inline-flex min-w-0 items-center gap-1 break-all">{{ address }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></a>
               <span v-else class="mono break-all">{{ address }}</span>
             </template>
           </p>

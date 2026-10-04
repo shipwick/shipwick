@@ -253,6 +253,9 @@ func (e *Engine) exportApplication(ctx context.Context, xw *exportWriter, name s
 	for _, v := range d.Spec.Volumes {
 		entry.Volumes = append(entry.Volumes, v.Name)
 	}
+	if entry.References, err = e.exportedReferences(ctx, d); err != nil {
+		return 0, err
+	}
 
 	// The image is opened before app.json is written, because app.json says
 	// whether it follows. A daemon that cannot write an image out says so at

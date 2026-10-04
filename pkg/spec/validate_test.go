@@ -50,7 +50,7 @@ func everyField() []App {
 				{From: "/store/docs", To: "https://docs.example.org/shop", Status: DefaultRedirectStatus},
 			},
 		},
-		Backups: &Backups{Schedule: "30 2 * * *", Keep: 14, Before: []string{"shop", "checkpoint"}, BeforeTimeout: Duration(2 * time.Hour), Stop: true},
+		Backups: &Backups{Schedule: "30 2 * * *", Keep: 14, Before: []string{"shop", "checkpoint"}, BeforeTimeout: Duration(2 * time.Hour), Stop: true, BeforeIn: BeforeInContainer},
 		Init:    true,
 		Restart: Restart{Policy: RestartOnFailure},
 		Deploy:  Deploy{Strategy: StrategyRecreate, StopTimeout: Duration(45 * time.Second)},

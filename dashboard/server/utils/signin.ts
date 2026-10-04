@@ -140,6 +140,9 @@ export function describeFailure(status: number, code: string, message: string, d
     const reason = details.reason
     if (reason === 'invalid_id_token') return { title: 'The agent did not accept the provider\'s answer.', message: said, copy: false }
     if (reason === 'email_missing' || reason === 'email_not_verified') return { title: 'The provider\'s account cannot be used here.', message: said, copy: false }
+    // The account has no name the agent can know it by: something for whoever runs the agent, so easy to pass on.
+    if (reason === 'name_missing') return { title: 'The provider did not say who you are in a way this server can use.', message: said, copy: true }
+    if (reason === 'tenant_not_allowed') return { title: 'Your account belongs to an organization that may not sign in to this server.', message: said, copy: true }
     return { title: 'That sign-in could not be completed. Sign in again.', message: '', copy: false }
   }
   if (code === 'SIGN_IN_NOT_CONFIGURED') return { title: 'This server takes API tokens only.', message: '', copy: false }

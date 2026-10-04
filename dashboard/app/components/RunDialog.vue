@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import type { RunDetail } from '~/types/api'
+import type { LogArchiveDetail, LogArchiveEntry, RunDetail } from '~/types/api'
 import { durationBetween, formatAbsoluteUtc, formatDuration } from '~/utils/format'
+import { archiveSupported, linesKept } from '~/utils/logArchive'
 import { describeRunOutcome, runStatusDisplay, runTitle } from '~/utils/jobs'
 import { formatArgv } from '~/utils/spec'
 
@@ -37,11 +38,44 @@ const duration = computed(() => {
 })
 
 const title = computed(() => (r.value ? `Run #${r.value.id}: ${runTitle(r.value)}` : `Run #${props.runId ?? ''}`))
+
+// The run's record keeps the last 200 lines; from 0.7 on the agent keeps the
+// whole output of a run that ended, up to ten thousand lines. Shown in its
+// place when there is such an entry; the record's own tail otherwise.
+const server = useServerInfo()
+const kept = shallowRef<LogArchiveDetail | null>(null)
+let keptFor: number | null = null
+watch(() => (props.open && r.value?.finished_at ? r.value.id : null), async (id) => {
+  if (id === null || id === keptFor) return
+  keptFor = id
+  kept.value = null
+  if (!archiveSupported(server.data.value)) return
+  try {
+    const base = `/applications/${encodeURIComponent(props.application)}/logs/archive`
+    const [entry] = await agent.get<LogArchiveEntry[]>(base, { query: { run: id, limit: 1 } })
+    if (!entry || entry.lines === 0 || keptFor !== id) return
+    const detail = await agent.get<LogArchiveDetail>(`${base}/${entry.id}`)
+    if (keptFor === id) kept.value = detail
+  }
+  catch {
+    // The record's own tail is shown instead.
+  }
+})
+watch(() => props.runId, () => {
+  keptFor = null
+  kept.value = null
+})
+
+// A run that ends while it is watched is said: the badge changes without a sound.
+const { announce } = useAnnounce()
+watch(r, (next, before) => {
+  if (next && before && next.id === before.id && before.finished_at === null && next.finished_at !== null) announce(`Run ${next.id}: ${describeRunOutcome(next)}`)
+})
 </script>
 
 <template>
   <UiDialog :open="props.open" :title="title" size="md" @close="emit('close')">
-    <div v-if="run.loading.value && !r" class="space-y-3" aria-busy="true" aria-label="Loading">
+    <div v-if="run.loading.value && !r" class="space-y-3" role="progressbar" aria-busy="true" aria-label="Loading">
       <span class="skeleton w-40" />
       <span class="skeleton h-24 w-full" />
     </div>
@@ -83,9 +117,17 @@ const title = computed(() => (r.value ? `Run #${r.value.id}: ${runTitle(r.value)
         </template>
       </dl>
 
-      <div>
+      <div v-if="kept && kept.run_id === r.id">
         <p class="label mb-1.5">
-          Output <span class="normal-case tracking-normal text-fg-faint">last 200 lines</span>
+          Output <span class="normal-case tracking-normal text-fg-subtle">{{ kept.truncated ? linesKept(kept) : `all ${linesKept(kept)}` }}, kept by the server</span>
+        </p>
+        <div class="overflow-hidden rounded-sm border border-line">
+          <LogOutput :lines="kept.output" :label="`Output of run ${r.id}`" height-class="max-h-80" />
+        </div>
+      </div>
+      <div v-else>
+        <p class="label mb-1.5">
+          Output <span class="normal-case tracking-normal text-fg-subtle">last 200 lines</span>
         </p>
         <pre
           v-if="r.output"

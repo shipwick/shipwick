@@ -8,7 +8,7 @@ useHead({ title: notFound.value ? 'Not found' : 'Error' })
 </script>
 
 <template>
-  <div class="flex min-h-dvh items-start justify-center bg-subtle px-4 pt-[16vh]">
+  <main class="flex min-h-dvh items-start justify-center bg-subtle px-4 pt-[16vh]">
     <div class="w-full max-w-[26rem] rounded-sm border border-line bg-bg p-5">
       <p class="mono text-xs text-fg-subtle">
         {{ props.error.statusCode }}
@@ -23,5 +23,5 @@ useHead({ title: notFound.value ? 'Not found' : 'Error' })
         Go to overview
       </UiButton>
     </div>
-  </div>
+  </main>
 </template>

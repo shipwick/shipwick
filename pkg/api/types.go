@@ -267,6 +267,11 @@ type Server struct {
 	// SignIn says whether people can sign in with an OpenID Connect
 	// provider; Token.Kind says whether this caller did.
 	SignIn SignInStatus `json:"sign_in"`
+	// LogArchive is what the agent keeps of ended containers' output; absent
+	// from agents older than 0.7.
+	LogArchive *LogArchiveStatus `json:"log_archive,omitempty"`
+	// Update is absent from agents older than 0.7.
+	Update *UpdateStatus `json:"update,omitempty"`
 }
 
 // ProxyStatus describes the reverse proxy in front of the applications.
@@ -1202,4 +1207,146 @@ type NetworkStatus struct {
 	// ACMEDirectory is the certificate authority the proxy obtains
 	// certificates from; "" is Let's Encrypt.
 	ACMEDirectory string `json:"acme_directory"`
+}
+
+// The configuration of an application, as a document.
+
+// ApplicationConfig is the answer of GET /applications/{name}/config: the
+// deploy.yaml that describes the application's active deployment.
+type ApplicationConfig struct {
+	Application string `json:"application"`
+	// DeploymentID, Sequence and Version say which deployment the document
+	// describes: the active one.
+	DeploymentID int64  `json:"deployment_id"`
+	Sequence     int    `json:"sequence"`
+	Version      string `json:"version"`
+	// Document is the deploy.yaml. A secret value that was written as a
+	// reference to a secret stored on the server is that reference again; any
+	// other secret value is spec.Mask.
+	Document string `json:"document"`
+	// Masked names the fields whose value is the mask: "env.API_KEY",
+	// "proxy.basic_auth[0].password". A deployment of the document is refused
+	// until each has a value or a reference. Empty: it deploys as it is.
+	Masked []string `json:"masked"`
+	// StaticDigest is set for a static application: the folder the active
+	// deployment serves, which a deployment of the document names in ?static=.
+	StaticDigest string `json:"static_digest,omitempty"`
+}
+
+// The log archive: output that outlives its container.
+
+// What an archived output is the output of.
+const (
+	LogKindReplica = "replica" // one run of a replica's container, from a start to the stop after it
+	LogKindRun     = "run"     // a run of a job, a pre-deploy command or a one-off command
+)
+
+// Why a replica's run ended, as far as the agent knows. For a run of a job
+// the reason is the run's status: succeeded, failed, timed_out, interrupted.
+const (
+	LogReasonCrashed          = "crashed"           // the process exited by itself with a code other than 0
+	LogReasonExited           = "exited"            // the process exited by itself with code 0
+	LogReasonOOMKilled        = "oom_killed"        // killed for exceeding its memory limit
+	LogReasonUnhealthy        = "unhealthy"         // restarted by the agent after failing its health check
+	LogReasonStopped          = "stopped"           // the application was stopped
+	LogReasonReplaced         = "replaced"          // a newer deployment took its place
+	LogReasonDeploymentFailed = "deployment_failed" // a replica of a deployment that failed, removed with it
+	LogReasonRemoved          = "removed"           // removed for another reason: a leftover, a rollback that failed
+	LogReasonRestarted        = "restarted"         // found running again before the run that ended was archived; why it ended is not known
+)
+
+// LogArchiveEntry is the kept output of one run of a container: what
+// GET /applications/:name/logs/archive lists.
+type LogArchiveEntry struct {
+	ID          int64  `json:"id"`
+	Application string `json:"application"`
+	Kind        string `json:"kind"`
+	// DeploymentID is the deployment the container belonged to, Deployment
+	// its number in the application's history (the #N of `shipwick status`)
+	// and Version its version; null, 0 and "" once the deployment is gone.
+	DeploymentID *int64 `json:"deployment_id"`
+	Deployment   int    `json:"deployment"`
+	Version      string `json:"version"`
+	// Replica is the replica's index; 0 for a run. Job and RunID are the
+	// job's name and the run for a run; "" and null for a replica.
+	Replica   int    `json:"replica"`
+	Job       string `json:"job"`
+	RunID     *int64 `json:"run_id"`
+	Container string `json:"container"`
+	Reason    string `json:"reason"`
+	// ExitCode is null when the process was still running as its container
+	// was removed, or when the agent did not see it exit.
+	ExitCode  *int `json:"exit_code"`
+	OOMKilled bool `json:"oom_killed"`
+	// EndedAt is when the run ended. FirstLineAt and LastLineAt are the
+	// times of the first and the last line kept; null when Lines is 0.
+	EndedAt     time.Time  `json:"ended_at"`
+	FirstLineAt *time.Time `json:"first_line_at"`
+	LastLineAt  *time.Time `json:"last_line_at"`
+	Lines       int        `json:"lines"`
+	// Bytes is the size of the lines kept, StoredBytes what they take on
+	// the server's disk. Truncated: the run printed more than is kept, and
+	// these are its last lines.
+	Bytes       int64 `json:"bytes"`
+	StoredBytes int64 `json:"stored_bytes"`
+	Truncated   bool  `json:"truncated"`
+}
+
+// LogArchiveDetail is an entry with its lines, oldest first.
+type LogArchiveDetail struct {
+	LogArchiveEntry
+	Output []LogLine `json:"output"`
+}
+
+// LogMatch is one line found by GET /applications/:name/logs/search, with
+// where it comes from: an archive entry, or a container that still exists.
+type LogMatch struct {
+	LogLine
+	// ArchiveID is the entry the line is kept in; null for a line read from
+	// a container that exists.
+	ArchiveID    *int64 `json:"archive_id"`
+	DeploymentID *int64 `json:"deployment_id"`
+	Deployment   int    `json:"deployment"`
+	Job          string `json:"job"`
+	RunID        *int64 `json:"run_id"`
+}
+
+// LogSearchResult is one page of a search, newest source first and within a
+// source the newest line first. Next continues it: "" when everything that
+// matches the question has been looked at. A page may hold fewer lines than
+// asked for, none included, and still have a Next: a request reads a bounded
+// amount.
+type LogSearchResult struct {
+	Lines []LogMatch `json:"lines"`
+	Next  string     `json:"next"`
+	// Sources and Bytes are how many containers' output this request read,
+	// and how much of it.
+	Sources int   `json:"sources"`
+	Bytes   int64 `json:"bytes"`
+}
+
+// LogArchiveStatus is what the archive holds and may hold, for GET /server.
+type LogArchiveStatus struct {
+	// Enabled is false when SHIPWICK_LOG_RETENTION_SIZE is 0: nothing is kept.
+	Enabled       bool  `json:"enabled"`
+	Entries       int   `json:"entries"`
+	Bytes         int64 `json:"bytes"`
+	MaxBytes      int64 `json:"max_bytes"`
+	RetentionDays int   `json:"retention_days"`
+}
+
+// Releases: whether a newer one exists.
+
+// UpdateStatus is what the agent knows about newer releases. It is absent
+// from agents older than 0.7.
+type UpdateStatus struct {
+	// Enabled is false when the agent was told not to ask
+	// (SHIPWICK_UPDATE_CHECK=off).
+	Enabled bool `json:"enabled"`
+	// LatestVersion is the latest release, "v0.7.1"; "" until the agent has
+	// been able to ask. CheckedAt is when it was last told, null until then.
+	LatestVersion string     `json:"latest_version"`
+	CheckedAt     *time.Time `json:"checked_at"`
+	// Available is true when LatestVersion is newer than the agent itself.
+	Available bool `json:"available"`
 }

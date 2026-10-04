@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { progressAnnouncement } from '~/utils/announce'
 import { durationBetween, formatDuration } from '~/utils/format'
 import type { DeploymentProgress } from '~/utils/deploymentProgress'
 import { deniedRegistry } from '~/utils/registries'
@@ -73,13 +74,22 @@ const tone = computed(() => {
 
 const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger' } as const
 const TONE_FRAME = { ok: 'border-line', warn: 'border-line', danger: 'border-danger-line' } as const
+
+// A screen reader hears each new step and how it ended. The panel is not a
+// live region itself: its clock changes every second and would be read out.
+// A deployment that was over when the panel appeared is not news.
+const { announce } = useAnnounce()
+watch(() => props.progress, (next, previous) => {
+  if (!previous && next.phase !== 'running') return
+  announce(progressAnnouncement(previous ?? null, next, headline.value))
+}, { immediate: true })
 </script>
 
 <template>
   <section
     class="overflow-hidden rounded-sm border bg-bg"
     :class="progress.phase === 'rolled_back' ? 'border-warn-line' : TONE_FRAME[tone]"
-    aria-live="polite"
+    :aria-label="`Deployment ${progress.sequence} of ${progress.application}`"
   >
     <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-line bg-subtle px-4 py-2">
       <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">

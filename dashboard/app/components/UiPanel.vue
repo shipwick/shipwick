@@ -11,12 +11,12 @@ const props = withDefaults(defineProps<{
 
 <template>
   <section class="min-w-0">
-    <header class="mb-2 flex min-h-6 items-center justify-between gap-3">
+    <header class="mb-2 flex min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-2">
       <h2 class="label flex items-center gap-2">
         {{ props.title }}
-        <span v-if="props.meta !== null && props.meta !== ''" class="mono font-normal tracking-normal text-fg-faint">{{ props.meta }}</span>
+        <span v-if="props.meta !== null && props.meta !== ''" class="mono font-normal tracking-normal text-fg-subtle">{{ props.meta }}</span>
       </h2>
-      <div v-if="$slots.actions" class="flex items-center gap-2">
+      <div v-if="$slots.actions" class="flex flex-wrap items-center justify-end gap-2">
         <slot name="actions" />
       </div>
     </header>

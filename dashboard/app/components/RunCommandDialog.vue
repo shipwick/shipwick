@@ -98,7 +98,7 @@ async function submit() {
             >
             <button
               type="button"
-              class="rounded-sm p-1.5 text-fg-subtle hover:bg-hover hover:text-fg"
+              class="target flex items-center justify-center rounded-sm p-1.5 text-fg-subtle hover:bg-hover hover:text-fg"
               :aria-label="`Remove argument ${index}`"
               :disabled="fields.length === 1 && field === ''"
               @click="remove(index)"

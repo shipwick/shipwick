@@ -127,6 +127,11 @@ type Config struct {
 	// SignIn is the OpenID Connect provider people sign in with; nil: tokens
 	// only. See oidc.go.
 	SignIn *SignIn
+	// Logs is how much output of ended containers is kept: see logs.go.
+	Logs LogArchive
+	// UpdateCheck is false when the agent must not ask whether a newer
+	// release exists: see updates.go.
+	UpdateCheck bool
 }
 
 func (c Config) DatabasePath() string {
@@ -241,6 +246,12 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if err := cfg.loadSignIn(getenv); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.loadLogArchive(getenv); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.loadUpdateCheck(getenv); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

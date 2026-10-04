@@ -187,10 +187,21 @@ func TestNothingOfARequestBodyReachesTheAuditTrail(t *testing.T) {
 	if err != nil || len(entries) != sent {
 		t.Fatalf("%d entries for %d requests, err = %v", len(entries), sent, err)
 	}
+	named := 0
 	for _, e := range entries {
+		// The one thing of a body that is kept: the name of the application a
+		// document is about, where the address has none, and only when it is
+		// a name.
+		if e.Application == marker && e.Action == "deploy" {
+			named++
+			e.Application = ""
+		}
 		if strings.Contains(e.Target+e.Detail+e.Code+e.Application+e.Action+e.Actor.Name, marker) {
 			t.Errorf("the entry repeats the request body: %+v", e)
 		}
+	}
+	if named != 1 {
+		t.Errorf("%d entries name the application of a document, want the one for POST /applications", named)
 	}
 }
 

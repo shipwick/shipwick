@@ -14,8 +14,18 @@ const current = computed(() => activeTab(props.tabs, route.path)?.key ?? null)
 
 const list = ref<HTMLElement | null>(null)
 
+// The row itself is scrolled, and only when the tab is cut off. scrollIntoView
+// would also make the tab the place the next Tab key starts from: on a page
+// just opened, the keyboard would begin after the tabs, past the navigation
+// and the page's actions.
 function reveal() {
-  list.value?.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  const row = list.value
+  const tab = row?.querySelector<HTMLElement>('[aria-current="page"]')
+  if (!row || !tab) return
+  const box = row.getBoundingClientRect()
+  const at = tab.getBoundingClientRect()
+  if (at.left < box.left) row.scrollLeft -= box.left - at.left
+  else if (at.right > box.right) row.scrollLeft += at.right - box.right
 }
 
 watch(current, () => nextTick(reveal))
@@ -26,11 +36,12 @@ const BADGE = { warn: 'border-warn-line bg-warn-bg text-warn', danger: 'border-d
 
 <template>
   <nav :aria-label="props.label" class="tabs border-b border-line">
+    <!-- The row scrolls, and would cut a focus ring drawn around a tab: it is drawn inside. -->
     <ul ref="list" class="-mb-px flex gap-1 overflow-x-auto">
       <li v-for="tab in props.tabs" :key="tab.key" class="shrink-0">
         <NuxtLink
           :to="tab.to"
-          class="flex h-9 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 text-sm transition-colors duration-100"
+          class="target flex h-9 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 text-sm transition-colors duration-100 focus-visible:-outline-offset-2"
           :class="current === tab.key ? 'border-fg font-medium text-fg' : 'border-transparent text-fg-muted hover:border-line-strong hover:text-fg'"
           :aria-current="current === tab.key ? 'page' : undefined"
         >

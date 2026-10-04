@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shipwick/shipwick/pkg/api"
@@ -35,14 +35,35 @@ func (c *Client) RevokeToken(ctx context.Context, name string) error {
 type AuditQuery struct {
 	Application string
 	Actor       string
-	Since       time.Time
-	Before      int64
-	Limit       int
+	// ActorKind is api.ActorToken or api.ActorUser.
+	ActorKind string
+	// Actions and Outcomes match when any of theirs does.
+	Actions  []string
+	Outcomes []string
+	Since    time.Time
+	Before   int64
+	Limit    int
 }
 
-// Audit returns the audit trail, newest first.
-func (c *Client) Audit(ctx context.Context, query AuditQuery) ([]api.AuditEntry, error) {
-	q := url.Values{"limit": {strconv.Itoa(query.Limit)}}
+// Narrowed reports whether the query uses a filter that agents older than
+// 0.7 do not know, and ignore.
+func (q AuditQuery) Narrowed() bool {
+	return q.ActorKind != "" || len(q.Actions) > 0 || len(q.Outcomes) > 0
+}
+
+// values is the query as the agent reads it; limit and before are the
+// caller's to add.
+func (query AuditQuery) values() url.Values {
+	q := url.Values{}
+	if query.ActorKind != "" {
+		q.Set("actor_kind", query.ActorKind)
+	}
+	if len(query.Actions) > 0 {
+		q.Set("action", strings.Join(query.Actions, ","))
+	}
+	if len(query.Outcomes) > 0 {
+		q.Set("outcome", strings.Join(query.Outcomes, ","))
+	}
 	if query.Application != "" {
 		q.Set("application", query.Application)
 	}
@@ -52,8 +73,5 @@ func (c *Client) Audit(ctx context.Context, query AuditQuery) ([]api.AuditEntry,
 	if !query.Since.IsZero() {
 		q.Set("since", query.Since.UTC().Format(time.RFC3339))
 	}
-	if query.Before > 0 {
-		q.Set("before", strconv.FormatInt(query.Before, 10))
-	}
-	return get[[]api.AuditEntry](ctx, c, "/audit", q)
+	return q
 }

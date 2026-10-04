@@ -29,10 +29,18 @@ domain.
   ada@example.com       one person
   group:platform        everyone the provider puts in that group
   *@example.com         everyone with an address at that domain
+  name:248289761001     one person whose name is not an address
 
 The most specific rule that matches decides: the address, else the groups,
 else the domain. Of several groups the highest role counts. Nobody without a
 matching rule gets in.
+
+People are named by the e-mail address the provider reports, unless the
+agent is told to read another claim (SHIPWICK_OIDC_NAME_CLAIM: a user name,
+or the provider's own identifier for the account). Rules by address and by
+domain then apply to names that are addresses; name: is for the others, and
+has to match the name exactly, capitals included. "shipwick server status"
+says which claim it is.
 
 A session lasts ten hours. Revoking or changing the rule a session rests on
 ends it with its next request. Managing access needs admin; tokens are not
@@ -96,11 +104,12 @@ func (c *cli) accessGrantCommand() *cobra.Command {
 		apps []string
 	)
 	cmd := &cobra.Command{
-		Use:   "grant <address | *@domain | group:name> --role read|deploy|admin",
+		Use:   "grant <address | *@domain | group:name | name:value> --role read|deploy|admin",
 		Short: "Give a person, a group or a domain a role; granting again changes it",
 		Example: `  shipwick access grant ada@example.com --role admin
   shipwick access grant group:backend --role deploy --app my-api --app worker
-  shipwick access grant '*@example.com' --role read`,
+  shipwick access grant '*@example.com' --role read
+  shipwick access grant name:248289761001 --role deploy`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, subject, err := api.ParseAccessSubject(args[0])
@@ -137,6 +146,11 @@ func (c *cli) accessGrantCommand() *cobra.Command {
 				summary += ", limited to " + strings.Join(rule.Applications, ", ")
 			}
 			c.ui.Success("%s", summary)
+			if info, err := cl.Server(cmd.Context()); err == nil {
+				if note := ruleNote(rule, info.SignIn); note != "" {
+					c.ui.Println(c.ui.Styled(ui.Dim, note))
+				}
+			}
 			c.ui.Println(c.ui.Styled(ui.Dim, "Whoever is signed in and gets something else by this is signed out with their next request, and signs in again."))
 			return nil
 		},
@@ -148,7 +162,7 @@ func (c *cli) accessGrantCommand() *cobra.Command {
 
 func (c *cli) accessRevokeCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "revoke <address | *@domain | group:name>",
+		Use:   "revoke <address | *@domain | group:name | name:value>",
 		Short: "Remove a rule; sessions that rested on it end at once",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -219,7 +233,7 @@ func (c *cli) accessSessionsCommand() *cobra.Command {
 
 func (c *cli) accessSignOutCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "signout <address>",
+		Use:   "signout <address | name>",
 		Short: "End every session of a person",
 		Long: `End every session of a person.
 
@@ -228,13 +242,24 @@ them they can sign in again. To keep someone out, disable the account at the
 provider, or revoke the rule with: shipwick access revoke`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			email, err := api.NormalizeEmail(args[0])
-			if err != nil {
-				return fmt.Errorf("%q is %w", args[0], err)
+			who := strings.TrimSpace(args[0])
+			if strings.HasPrefix(who, "group:") || strings.HasPrefix(who, "*@") {
+				return fmt.Errorf("%s is not a person: sessions are ended for one person at a time, as shipwick access sessions lists them", who)
 			}
+			who = strings.TrimPrefix(who, "name:")
 			cl, err := c.connect()
 			if err != nil {
 				return err
+			}
+			// An address is brought to lowercase, as the agent keeps it. Where
+			// the agent names people by another claim the name is sent as it
+			// was typed: there, capitals tell two people apart.
+			email, err := api.NormalizeEmail(who)
+			if info, serr := cl.Server(cmd.Context()); serr == nil && info.SignIn.NameClaim != "" && info.SignIn.NameClaim != api.DefaultNameClaim {
+				email, err = who, api.ValidatePersonName(who)
+			}
+			if err != nil {
+				return fmt.Errorf("%q is %w", args[0], err)
 			}
 			n, err := cl.EndSessions(cmd.Context(), email)
 			if err != nil {
@@ -254,4 +279,20 @@ provider, or revoke the rule with: shipwick access revoke`,
 // over. A session is the dashboard's; the CLI is meant to be given a token.
 func renderSessionOver(e *client.APIError) string {
 	return "The session this command ran with no longer works: " + e.Message + ".\n\nThe CLI and CI are meant to be given a token; an admin creates one with: shipwick token create"
+}
+
+// ruleNote says when a rule that was just granted cannot match anyone the
+// way the agent names people, or matches fewer than it reads as if it did.
+func ruleNote(rule api.AccessRule, signIn api.SignInStatus) string {
+	claim := signIn.NameClaim
+	if !signIn.Configured || claim == "" {
+		return ""
+	}
+	switch {
+	case rule.Kind == api.AccessName && claim == api.DefaultNameClaim:
+		return "This agent names people by their e-mail address: a rule by name matches an address written exactly as the agent keeps it, in lowercase. A rule for the address itself says the same more plainly."
+	case (rule.Kind == api.AccessEmail || rule.Kind == api.AccessDomain) && claim != api.DefaultNameClaim:
+		return "This agent names people by the " + claim + " claim: the rule applies to those whose " + claim + " is an address. For anyone else use name:<" + claim + ">."
+	}
+	return ""
 }

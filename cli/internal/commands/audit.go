@@ -3,110 +3,14 @@ package commands
 import (
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/spf13/cobra"
 
 	"github.com/shipwick/shipwick/cli/internal/cliconfig"
 	"github.com/shipwick/shipwick/cli/internal/client"
 	"github.com/shipwick/shipwick/cli/internal/ui"
 	"github.com/shipwick/shipwick/pkg/api"
-	"github.com/shipwick/shipwick/pkg/spec"
 )
-
-const maxAuditEntries = 500
-
-// auditCommands returns `shipwick audit`.
-func (c *cli) auditCommands() []*cobra.Command {
-	var (
-		app, actor, since string
-		limit             int
-		before            int64
-	)
-	cmd := &cobra.Command{
-		Use:   "audit",
-		Short: "Show who changed what on the server, and when",
-		Long: `Show who changed what on the server, and when.
-
-Every request that changes something is recorded with the token that made it,
-the address it came from, what it was about and how it was answered: deploys,
-rollbacks, stops and starts, runs, deletions, secrets (by name), registry
-logins, certificates, tokens, key rotation, backups, restores, exports and
-imports. A request that was refused is recorded too. Reading is not.
-
-The server keeps the trail for a year. Reading it needs admin.`,
-		Example: `  shipwick audit
-  shipwick audit --app my-api --since 7d
-  shipwick audit --actor ci -n 200`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			query := client.AuditQuery{Application: app, Actor: actor, Limit: limit, Before: before}
-			if app != "" {
-				if err := spec.ValidateName(app); err != nil {
-					return err
-				}
-			}
-			if limit < 1 || limit > maxAuditEntries {
-				return fmt.Errorf("-n must be between 1 and %d", maxAuditEntries)
-			}
-			if before < 0 {
-				return fmt.Errorf("--before takes the id of an entry, as the last line of a full page prints it")
-			}
-			if since != "" {
-				at, err := api.ParseSince(since, c.now())
-				if err != nil {
-					return fmt.Errorf("--since: %w", err)
-				}
-				query.Since = at
-			}
-			cl, err := c.connect()
-			if err != nil {
-				return err
-			}
-			entries, err := cl.Audit(cmd.Context(), query)
-			if client.IsCode(err, api.CodeEndpointNotFound) {
-				return fmt.Errorf("the agent is older than this shipwick and keeps no audit trail\n\nCompare versions with: shipwick server status")
-			} else if err != nil {
-				return err
-			}
-			if len(entries) == 0 {
-				if app != "" || actor != "" || since != "" || before != 0 {
-					c.ui.Println("Nothing recorded that matches.")
-				} else {
-					c.ui.Println("Nothing recorded yet: the trail starts with the first change made through this agent.")
-				}
-				return nil
-			}
-
-			rows := make([][]ui.Cell, 0, len(entries))
-			for _, e := range entries {
-				rows = append(rows, []ui.Cell{
-					ui.C(e.At.Local().Format("2006-01-02 15:04:05")),
-					ui.C(e.Actor.Name),
-					ui.C(e.Action),
-					ui.C(auditSubject(e)),
-					auditResult(e),
-					ui.C(auditOrigin(e)),
-					ui.C(e.Detail),
-				})
-			}
-			c.ui.Table([]string{"WHEN", "WHO", "ACTION", "ON", "RESULT", "FROM", "DETAIL"}, rows)
-			if len(entries) == limit {
-				c.ui.Println()
-				c.ui.Println(c.ui.Styled(ui.Dim, "Older entries: "+olderAuditCommand(app, actor, since, limit, entries[len(entries)-1].ID)))
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&app, "app", "", "only what was done to this application")
-	cmd.Flags().StringVar(&actor, "actor", "", "only what this token did")
-	cmd.Flags().StringVar(&since, "since", "", "how far back: days or hours (7d, 24h) or a date (2026-09-01)")
-	cmd.Flags().IntVarP(&limit, "lines", "n", 50, "how many entries, newest first")
-	cmd.Flags().Int64Var(&before, "before", 0, "continue with the entries older than the one with this id")
-	return []*cobra.Command{cmd}
-}
 
 // auditSubject is what an entry was about: the application, and what else
 // the request named.
@@ -142,23 +46,6 @@ func auditOrigin(e api.AuditEntry) string {
 		return e.ForwardedFor
 	}
 	return e.Address
-}
-
-func olderAuditCommand(app, actor, since string, limit int, last int64) string {
-	cmd := "shipwick audit"
-	if app != "" {
-		cmd += " --app " + app
-	}
-	if actor != "" {
-		cmd += " --actor " + actor
-	}
-	if since != "" {
-		cmd += " --since " + since
-	}
-	if limit != 50 {
-		cmd += " -n " + strconv.Itoa(limit)
-	}
-	return cmd + " --before " + strconv.FormatInt(last, 10)
 }
 
 // expiryText says when a token expires, and whether that is worth a
@@ -228,13 +115,15 @@ func replacementCommand(who api.TokenIdentity) string {
 // renderTokenExpired tells the holder of an expired token that it is the
 // right token and its time is up, which a wrong token is never told.
 func renderTokenExpired(e *client.APIError) string {
-	what := "The API token has expired."
+	what, admin := "The API token has expired.", "An admin creates"
 	name, _ := e.Details["name"].(string)
 	raw, _ := e.Details["expired_at"].(string)
-	if at, err := time.Parse(time.RFC3339, raw); err == nil && name != "" {
+	// The name goes into a command to copy: only what a token can be called.
+	if at, err := time.Parse(time.RFC3339, raw); err == nil && api.ValidateTokenName(name) == nil {
 		what = fmt.Sprintf("The token %s expired on %s.", name, at.Local().Format("2006-01-02 at 15:04"))
+		admin = "An admin lets it work again with: shipwick token update " + name + " --expires 90d\nOr creates"
 	}
-	return what + "\n\nAn admin creates a new one with: shipwick token create\nThen set " + cliconfig.EnvToken + " to it, or save it with: shipwick login"
+	return what + "\n\n" + admin + " a new one with: shipwick token create\nThen set " + cliconfig.EnvToken + " to it, or save it with: shipwick login"
 }
 
 // renderTokenLimited tells the user which applications the token may change.

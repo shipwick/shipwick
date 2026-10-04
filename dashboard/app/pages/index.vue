@@ -80,7 +80,7 @@ function retryAll() {
               </template>
             </p>
           </template>
-          <div v-else class="space-y-2" aria-busy="true" aria-label="Loading">
+          <div v-else class="space-y-2" role="progressbar" aria-busy="true" aria-label="Loading">
             <span class="skeleton h-5 w-72 max-w-full" />
             <span class="skeleton w-56 max-w-full" />
           </div>
@@ -146,7 +146,7 @@ function retryAll() {
 
         <UiPanel v-if="!empty && (apps.loading.value || attention.length > 0)" title="Needs attention" :meta="apps.loading.value ? null : attention.length">
           <TableSkeleton v-if="apps.loading.value" :rows="2" :columns="4" />
-          <table v-else class="data-table stack">
+          <table v-else class="data-table stack" aria-label="Applications that need attention">
             <thead>
               <tr>
                 <th>Application</th>
@@ -196,7 +196,7 @@ function retryAll() {
                 <span class="size-1.5 rounded-full" :class="item.count > 0 ? DOT[item.tone] : 'bg-muted-dot opacity-50'" aria-hidden="true" />
                 {{ item.label }}
               </dt>
-              <dd class="mono text-xl leading-none" :class="item.count === 0 ? 'text-fg-faint' : 'text-fg'">
+              <dd class="mono text-xl leading-none" :class="item.count === 0 ? 'text-fg-subtle' : 'text-fg'">
                 <span v-if="apps.loading.value" class="skeleton mt-1 h-4 w-5" />
                 <template v-else>
                   {{ item.count }}

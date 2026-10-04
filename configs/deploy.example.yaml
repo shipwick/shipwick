@@ -129,12 +129,16 @@ deploy:
 # runs inside the running replica first — a dump, a checkpoint — and a non-zero
 # exit fails the backup; `stop: true` stops the application while the archive
 # is taken. `shipwick backups` lists them, `shipwick backups verify` proves
-# that one restores.
+# that one restores. With `before_in: container` the command runs in a
+# container of its own beside the replica and is ended at before_timeout; it
+# reaches the replica as localhost and sees the volumes, not the replica's
+# other files, so pg_dump needs `-h localhost` there.
 # backups:
 #   schedule: "0 3 * * *"
 #   keep: 7       # successful backups kept; default 7, up to 365
 #   before: ["pg_dump", "-U", "postgres", "-f", "/var/lib/postgresql/data/backup.sql", "app"]
 #   before_timeout: 1h   # how long `before` may run; default 1h, up to 24h
+#   before_in: replica   # replica (default) | container
 #   stop: false   # default false
 
 # Ports that are not HTTP, published on the server itself: a database reached

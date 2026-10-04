@@ -3,21 +3,21 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 // auditedRoute says how a request to an endpoint is written into the audit
-// trail. The application comes from the path by itself; target and detail
-// name further path segments worth keeping.
+// trail. The application comes from the path by itself, or from the document
+// for an endpoint that takes one; target and detail name further path
+// segments worth keeping.
 type auditedRoute struct {
 	action string
 	// target is the path segment that names what was acted on: {job},
@@ -75,12 +75,17 @@ var auditedRoutes = map[string]auditedRoute{
 	"POST /api/v1/access/rules":              {action: "access.grant"},
 	"DELETE /api/v1/access/rules/{id}":       {action: "access.revoke", target: "id"},
 	"DELETE /api/v1/access/sessions/{email}": {action: "access.signout", target: "email"},
+
+	"PUT /api/v1/tokens/{name}": {action: "token.update", target: "name"},
+	"GET /api/v1/audit/export":  {action: "audit.export"},
+	"POST /api/v1/applications": {action: "deploy"},
 }
 
 // unauditedRoutes are the endpoints that are not GETs and change nothing.
 var unauditedRoutes = map[string]string{
 	"POST /api/v1/applications/{name}/validate":       "judges a deploy.yaml and stores nothing",
 	"POST /api/v1/applications/{name}/images/missing": "answers which layers the server lacks",
+	"POST /api/v1/validate":                           "judges a deploy.yaml and stores nothing",
 }
 
 type auditKey struct{}
@@ -109,7 +114,7 @@ func (s *Server) beginAudit(w http.ResponseWriter, r *http.Request, rt route, wh
 		ForwardedFor: forwardedFor(r),
 		Action:       rt.audit.action,
 	}
-	if name := r.PathValue("name"); rt.application && spec.ValidateName(name) == nil {
+	if name := r.PathValue("name"); (rt.application || rt.document) && spec.ValidateName(name) == nil {
 		rec.entry.Application = name
 	}
 	if rt.audit.target != "" {
@@ -238,49 +243,35 @@ const (
 // did to which application: admin's to read.
 func (s *Server) auditRoutes(routes routeTable) {
 	routes.admin("GET /api/v1/audit", s.handleAudit)
+	routes.admin("GET /api/v1/audit/export", s.handleAuditExport)
 }
 
 // handleAudit lists the audit trail, newest first. ?before= takes the id of
-// the last entry of a page and continues after it.
+// the last entry of a page and continues after it; "more" in the answer says
+// whether there is anything to continue with. One entry beyond the page is
+// read to know: a page that happens to be full says nothing about the next.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	limit, ok := intParam(w, r, "limit", defaultAuditLimit, 1, maxAuditLimit)
 	if !ok {
 		return
 	}
-	q := r.URL.Query()
-	filter := store.AuditFilter{Application: q.Get("application"), Actor: q.Get("actor"), Limit: limit}
-	if filter.Application != "" {
-		if err := spec.ValidateName(filter.Application); err != nil {
-			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
-			return
-		}
-	}
-	if len(filter.Actor) > 320 {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "actor is the name of a token or the address of a person, e.g. actor=ci", nil)
+	filter, ok := s.auditFilter(w, r)
+	if !ok {
 		return
 	}
-	if raw := q.Get("since"); raw != "" {
-		since, err := api.ParseSince(raw, s.now())
-		if err != nil {
-			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "since: "+err.Error(), nil)
-			return
-		}
-		filter.Since = since
-	}
-	if raw := q.Get("before"); raw != "" {
-		before, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || before < 1 {
-			writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "before must be the id of an audit entry", nil)
-			return
-		}
-		filter.Before = before
-	}
+	filter.Limit = limit + 1
 	entries, err := s.store.AuditEntries(r.Context(), filter)
 	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	more := len(entries) > limit
+	if more {
+		entries = entries[:limit]
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(api.AuditPage{Data: entries, More: &more})
 }
 
 // describeToken is what the audit trail says about a token that was created:

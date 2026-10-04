@@ -113,7 +113,7 @@ const title = computed(() => `Backup #${props.backupId ?? ''} of ${props.applica
 
 <template>
   <UiDialog :open="props.open" :title="title" size="md" :busy="pending" @close="emit('close')">
-    <div v-if="backup.loading.value && !b" class="space-y-3" aria-busy="true" aria-label="Loading">
+    <div v-if="backup.loading.value && !b" class="space-y-3" role="progressbar" aria-busy="true" aria-label="Loading">
       <span class="skeleton w-40" />
       <span class="skeleton h-24 w-full" />
     </div>
@@ -234,7 +234,7 @@ const title = computed(() => `Backup #${props.backupId ?? ''} of ${props.applica
 
       <div v-if="b.verify_output">
         <p class="label mb-1.5">
-          Output of the verification <span class="normal-case tracking-normal text-fg-faint">last 200 lines</span>
+          Output of the verification <span class="normal-case tracking-normal text-fg-subtle">last 200 lines</span>
         </p>
         <pre class="mono max-h-64 overflow-auto whitespace-pre rounded-sm border border-line bg-inset px-3 py-2 text-xs leading-[1.125rem]" tabindex="0">{{ b.verify_output }}</pre>
       </div>

@@ -10,7 +10,10 @@ const layout = computed(() => {
 </script>
 
 <template>
+  <!-- A page that changes without a load says its title to a screen reader. -->
+  <NuxtRouteAnnouncer />
   <NuxtLayout :name="layout">
     <NuxtPage />
   </NuxtLayout>
+  <LiveAnnouncer />
 </template>

@@ -5,16 +5,33 @@ which — only after the whole CI suite passed on that commit — publishes:
 
 | What | Where |
 |---|---|
-| `shipwick_<os>_<arch>` for Linux, macOS (amd64, arm64) and Windows (amd64) | the GitHub release |
+| `shipwick_<os>_<arch>` for Linux, macOS and Windows (amd64, arm64) | the GitHub release |
+| `shipwick-agent_<arch>.deb` and `shipwick-agent_<arch>.rpm` (amd64, arm64): the agent as a plain binary with a systemd unit | the GitHub release |
 | `compose.production.yml`, **all three images pinned to this version** | the GitHub release |
 | `install.sh`, the installer as it is at the tag, for `shipwick server bundle` | the GitHub release |
-| `checksums.txt` (SHA-256 of the files above) | the GitHub release |
 | `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard`, `ghcr.io/shipwick/caddy` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
+| `image-digests.txt`: the digests of those images, read back from the registry | the GitHub release |
+| `checksums.txt` (SHA-256 of every file above) | the GitHub release |
 
 The installer takes everything from the release, never from a branch, and
 verifies each file against `checksums.txt`. Because the compose file is pinned,
 a server runs the version it installed until the installer is run again —
 `latest` exists for people who write their own compose file.
+
+`image-digests.txt` has one line for the manifest list of each image and two
+for each platform, the manifest and the image's configuration:
+
+```text
+ghcr.io/shipwick/agent:0.7.0 index sha256:…
+ghcr.io/shipwick/agent:0.7.0 manifest sha256:… linux/amd64
+ghcr.io/shipwick/agent:0.7.0 config sha256:… linux/amd64
+```
+
+It is the one file that cannot be built before the images are pushed: each
+image's job writes its lines with `scripts/image-digests.sh` right after the
+push, and the last job puts them together, adds the file to `checksums.txt`
+and publishes. `shipwick server bundle` and the installer hold images against
+it (handbook §4, "A server with no way out").
 
 ## Cutting a release
 
@@ -28,6 +45,8 @@ a server runs the version it installed until the installer is run again —
    sh scripts/build-release.sh v0.2.0    # → ./dist
    sh scripts/release-notes.sh v0.2.0
    ```
+   The first needs Docker as well as Go: the packages are put together by
+   `dpkg-deb` and `rpmbuild` in containers (`scripts/build-packages.sh`).
 4. Tag and push:
    ```bash
    git tag -a v0.2.0 -m v0.2.0
@@ -61,9 +80,12 @@ upgrade path: those are only really tested on a real server.
 ## Dry run
 
 **Actions → Release → Run workflow** runs the whole pipeline without publishing
-anything: the checks, the binaries, every image for both platforms, the trip of
-the files from one job to the next, the notes. Nothing is pushed to the
-registry and no release is created.
+anything: the checks, the binaries, the packages, every image for both
+platforms, their digests, the trip of the files from one job to the next, the
+notes. Nothing is pushed to ghcr.io and no release is created. The images are
+pushed to a registry that runs inside each image's job and ends with it, so
+that `image-digests.txt` is made the way a release makes it; its digests are
+those of the dry run's images, under the names a release would give them.
 
 Do this after changing `release.yml`, a Dockerfile or the release scripts — and
 after merging an update of the actions the workflow uses. The CI of such a pull
@@ -77,6 +99,25 @@ request says nothing about it: the release workflow only runs on tags.
 - **A bad release is out**: do not delete or re-tag it — servers and checksums
   out there refer to it. Release `v0.2.1`. If it is dangerous to install, mark
   it as a pre-release in the GitHub UI so the installer stops picking it.
+
+## The packages
+
+`shipwick-agent_<arch>.deb` and `.rpm` are built from
+[packaging/linux](../packaging/linux): the unit, the settings file's template,
+the compose file for the proxy and the dashboard (pinned to the release's
+version like the release's own), and the scripts both formats run on
+installation and removal. The file names carry no version, so that
+`releases/latest/download/shipwick-agent_amd64.deb` is always the latest;
+the version is inside, with a pre-release as `0.7.0~rc.1`, which sorts before
+`0.7.0` for both package managers. The `.rpm` is built in a Rocky Linux 9
+container and installs on 8 and later, and on Fedora.
+
+They are not signed and there is no repository: they are files of the
+release, verified against `checksums.txt` like the others. CI builds them on
+every pull request and installs each in a container of its distribution.
+After changing anything under `packaging/linux`, install the package on a
+machine with systemd and Docker and start the agent: the unit's restrictions
+are only tested by running under them.
 
 ## One-time setup
 
@@ -110,5 +151,6 @@ its own:
   updates the formula itself. To do it now, run its *Update* workflow
   (`gh workflow run update.yml -R shipwick/homebrew-tap`).
 - **winget**: generate the manifests with `packaging/winget/update-manifests.sh`
+  — one installer entry for each Windows build, x64 and arm64 —
   and open the pull request to microsoft/winget-pkgs described in
   [packaging/winget/README.md](../packaging/winget/README.md).

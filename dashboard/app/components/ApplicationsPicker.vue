@@ -39,7 +39,7 @@ function addExtra() {
   extra.value = ''
 }
 
-const CHIP = 'inline-flex h-6 items-center gap-1 rounded-sm border px-2 text-xs transition-colors duration-100'
+const CHIP = 'target inline-flex h-6 items-center justify-center gap-1 rounded-sm border px-2 text-xs transition-colors duration-100'
 </script>
 
 <template>
@@ -74,6 +74,7 @@ const CHIP = 'inline-flex h-6 items-center gap-1 rounded-sm border px-2 text-xs 
           autocapitalize="off"
           spellcheck="false"
           :aria-invalid="problem !== '' || undefined"
+          :aria-describedby="`${props.id}-help`"
           @keydown.enter.prevent="addExtra"
         >
         <UiButton size="sm" :disabled="extra.trim() === ''" @click="addExtra">
@@ -81,7 +82,8 @@ const CHIP = 'inline-flex h-6 items-center gap-1 rounded-sm border px-2 text-xs 
         </UiButton>
       </div>
     </template>
-    <p class="mt-1.5 text-xs" :class="problem ? 'text-danger' : 'text-fg-muted'">
+    <!-- What the choice comes to, said again when it changes. -->
+    <p :id="`${props.id}-help`" class="mt-1.5 text-xs" :class="problem ? 'text-danger' : 'text-fg-muted'" aria-live="polite">
       <template v-if="problem">
         {{ problem }}
       </template>

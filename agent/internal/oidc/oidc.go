@@ -36,6 +36,9 @@ const (
 	InvalidToken
 	// NonceMismatch: the ID token is genuine and answers another sign-in.
 	NonceMismatch
+	// TenantNotAllowed: the ID token is genuine, and for an account of a
+	// tenant the operator did not list.
+	TenantNotAllowed
 )
 
 // Error is a failed sign-in step. Its message never contains the client
@@ -60,6 +63,14 @@ type Config struct {
 	Scopes       []string
 	// GroupsClaim names the ID token claim that lists the person's groups.
 	GroupsClaim string
+	// NameClaim names the ID token claim the person is known by; "email"
+	// when empty.
+	NameClaim string
+	// Tenants are the directories whose accounts may sign in, by the tid
+	// claim of their tokens, in lowercase; AnyTenant alone accepts every
+	// one. A provider that serves several tenants under one address
+	// (see tenants.go) is not used without them.
+	Tenants []string
 	// RedirectURL is where the provider sends the browser back to: the
 	// dashboard's callback.
 	RedirectURL string
@@ -105,6 +116,10 @@ type discovery struct {
 	TokenEndpoint         string   `json:"token_endpoint"`
 	JWKSURI               string   `json:"jwks_uri"`
 	TokenAuthMethods      []string `json:"token_endpoint_auth_methods_supported"`
+
+	// template is Issuer where it stands for many issuers, one per tenant,
+	// and "" for a provider that is one issuer.
+	template string
 }
 
 // New returns a provider for cfg, which ValidateIssuer has accepted. Nothing
@@ -204,7 +219,16 @@ func (p *Provider) discover(ctx context.Context) (*discovery, error) {
 	}
 	// A document that names another issuer describes another provider: its
 	// keys would sign for whoever it is.
-	if doc.Issuer != p.cfg.Issuer {
+	switch {
+	case doc.Issuer == p.cfg.Issuer:
+	case TenantTemplate(p.cfg.Issuer) != "" && doc.Issuer == TenantTemplate(p.cfg.Issuer):
+		// The one case in which the document may name another issuer than
+		// the configured one: see tenants.go.
+		if len(p.cfg.Tenants) == 0 {
+			return nil, failed(Unavailable, "the sign-in provider signs in the accounts of every Microsoft Entra tenant, and the agent is not told which may sign in here: set SHIPWICK_OIDC_TENANTS to their tenant ids")
+		}
+		doc.template = doc.Issuer
+	default:
 		return nil, failed(Unavailable, "the sign-in provider calls itself %q, and the agent is configured with %q: set SHIPWICK_OIDC_ISSUER to the issuer exactly as the provider states it", printable(doc.Issuer), p.cfg.Issuer)
 	}
 	for name, endpoint := range map[string]string{"authorization_endpoint": doc.AuthorizationEndpoint, "token_endpoint": doc.TokenEndpoint, "jwks_uri": doc.JWKSURI} {

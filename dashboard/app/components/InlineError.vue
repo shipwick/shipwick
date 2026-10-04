@@ -43,6 +43,8 @@ const hint = computed(() => {
   if (error.code === 'BACKUP_NOT_USABLE') return 'Only a backup that succeeded can be verified, restored or downloaded.'
   if (error.code === 'NO_VOLUMES') return 'A backup is an archive of volumes, and this application has none. Give it some under volumes in deploy.yaml.'
   if (error.code === 'BACKUPS_NOT_ENCRYPTED') return 'Set SHIPWICK_BACKUP_PASSPHRASE in /opt/shipwick/.env on the server, then: cd /opt/shipwick && docker compose up -d'
+  if (error.code === 'INVALID_EXPORT') return 'Nothing more was imported. Check that the file is an export and that the passphrase is the one it was written with.'
+  if (error.code === 'DOWNLOAD_EXPIRED') return ''
   if (error.code === 'IMPORT_IN_PROGRESS') return 'A server takes one import at a time. Wait for the running one to finish.'
   if (error.code === 'EXPORT_IN_PROGRESS') return 'Wait for the export that is being written; it is in the list.'
   if (error.code === 'STANDBY_NOT_CONFIGURED') return 'A standby fetches exports from the bucket the first server writes them to.'

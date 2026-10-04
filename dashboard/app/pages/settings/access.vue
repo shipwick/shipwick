@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { accessTabs } from '~/utils/tabs'
+import { accessTabs, tabTitle } from '~/utils/tabs'
 
 /**
  * Who may do what on this server: the frame of the Access pages. API tokens,
@@ -7,10 +7,11 @@ import { accessTabs } from '~/utils/tabs'
  * what was done are a tab each, with an address of its own. All three are
  * the admin's: the agent refuses them to every other role.
  */
-useHead({ title: 'Access' })
-
+const route = useRoute()
 const access = useAccess()
 const tabs = accessTabs()
+
+useHead({ title: () => tabTitle(tabs, route.path, 'Access') })
 
 /** Known not to be an admin: the agent would refuse every list on these pages. */
 const refused = computed(() => access.role.value !== null && access.role.value !== 'admin')

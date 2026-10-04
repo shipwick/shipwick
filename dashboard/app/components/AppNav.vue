@@ -34,6 +34,28 @@ const expiryWarning = computed(() => sessionExpiryWarning(access.token.value, no
 /** A person who signed in through the provider: when their session ends, instead of a warning. */
 const until = computed(() => signedInUntil(access.token.value))
 
+// The list of servers is a small popover: Escape and leaving it close it, as a menu would.
+const switcher = ref<HTMLDetailsElement | null>(null)
+
+function closeSwitcher(refocus: boolean) {
+  const el = switcher.value
+  if (!el?.open) return
+  el.open = false
+  if (refocus) el.querySelector('summary')?.focus()
+}
+
+function onSwitcherFocusOut(event: FocusEvent) {
+  const next = event.relatedTarget
+  if (next instanceof Node && !switcher.value?.contains(next)) closeSwitcher(false)
+}
+
+function onDocumentPointerDown(event: PointerEvent) {
+  if (event.target instanceof Node && !switcher.value?.contains(event.target)) closeSwitcher(false)
+}
+
+onMounted(() => document.addEventListener('pointerdown', onDocumentPointerDown))
+onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPointerDown))
+
 async function signOut() {
   signingOut.value = true
   await session.logout(access.token.value?.kind === 'user')
@@ -42,19 +64,19 @@ async function signOut() {
 
 <template>
   <div class="flex h-full flex-col">
-    <NuxtLink to="/" class="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4" @click="emit('navigate')">
+    <NuxtLink to="/" class="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4 focus-visible:-outline-offset-2" @click="emit('navigate')">
       <AppMark compact />
       <span class="text-base font-semibold tracking-tight">Shipwick</span>
     </NuxtLink>
 
     <!-- Which server all of this is about. With several servers, this is where one is chosen. -->
-    <details v-if="session.multiple.value" class="group relative mx-2 mt-2 shrink-0">
-      <summary class="flex cursor-pointer list-none items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong [&::-webkit-details-marker]:hidden" title="The server this dashboard shows; choose another">
+    <details v-if="session.multiple.value" ref="switcher" class="group relative mx-2 mt-2 shrink-0" @keydown.esc="closeSwitcher(true)" @focusout="onSwitcherFocusOut">
+      <summary class="target flex cursor-pointer list-none items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong [&::-webkit-details-marker]:hidden" title="The server this dashboard shows; choose another">
         <span class="size-1.5 shrink-0 rounded-full" :class="props.serverError ? 'bg-danger-dot' : props.server ? 'bg-ok-dot' : 'bg-muted-dot'" aria-hidden="true" />
         <span class="min-w-0 flex-1">
-          <span class="block truncate text-xs font-medium">{{ session.selected.value }}</span>
+          <span class="block truncate text-xs font-medium"><span class="sr-only">Server </span>{{ session.selected.value }}</span>
           <span v-if="props.serverError" class="block truncate text-2xs text-danger">{{ props.serverError.unreachable ? 'Agent unreachable' : 'Not responding' }}</span>
-          <span v-else-if="props.server" class="mono block truncate text-2xs text-fg-subtle" :title="props.server.hostname">{{ props.server.hostname }}</span>
+          <span v-else-if="props.server" class="mono block truncate text-2xs text-fg-subtle" :title="props.server.hostname">{{ props.server.hostname }}<span class="sr-only">, connected</span></span>
         </span>
         <UiIcon name="chevron-right" :size="12" class="rotate-90 text-fg-subtle transition-transform duration-100 group-open:-rotate-90" />
       </summary>
@@ -67,7 +89,7 @@ async function signOut() {
             <!-- A plain link: another server is loaded afresh, so nothing of this one stays on screen. -->
             <a
               :href="s.authenticated ? `/?server=${s.name}` : `/login?server=${s.name}`"
-              class="flex h-8 items-center gap-2 px-2.5 text-xs hover:bg-hover"
+              class="target flex h-8 items-center gap-2 px-2.5 text-xs hover:bg-hover focus-visible:-outline-offset-2"
               :class="s.name === session.selected.value ? 'font-medium text-fg' : 'text-fg-muted hover:text-fg'"
               :aria-current="s.name === session.selected.value ? 'true' : undefined"
             >
@@ -79,13 +101,13 @@ async function signOut() {
             </a>
           </li>
         </ul>
-        <a href="/servers" class="flex h-8 items-center gap-2 border-t border-line px-2.5 text-xs text-fg-muted hover:bg-hover hover:text-fg">
+        <a href="/servers" class="target flex h-8 items-center gap-2 border-t border-line px-2.5 text-xs text-fg-muted hover:bg-hover hover:text-fg focus-visible:-outline-offset-2">
           <span class="w-3 shrink-0" />
           All servers
         </a>
       </div>
     </details>
-    <NuxtLink v-else to="/servers" class="mx-2 mt-2 flex shrink-0 items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong" title="The server this dashboard shows" @click="emit('navigate')">
+    <NuxtLink v-else to="/servers" class="target mx-2 mt-2 flex shrink-0 items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong" title="The server this dashboard shows" @click="emit('navigate')">
       <template v-if="props.server && !props.serverError">
         <span class="size-1.5 shrink-0 rounded-full bg-ok-dot" aria-hidden="true" />
         <span class="mono min-w-0 flex-1 truncate text-xs" :title="props.server.hostname">{{ props.server.hostname }}</span>
@@ -95,7 +117,7 @@ async function signOut() {
         <span class="size-1.5 shrink-0 rounded-full bg-danger-dot" aria-hidden="true" />
         <span class="min-w-0 flex-1 truncate text-xs text-danger">{{ props.serverError.unreachable ? 'Agent unreachable' : 'Not responding' }}</span>
       </template>
-      <span v-else class="skeleton my-1 w-24" />
+      <span v-else class="skeleton my-1 w-24" /><span v-if="!props.server && !props.serverError" class="sr-only">Server</span>
     </NuxtLink>
 
     <nav aria-label="Main" class="flex-1 overflow-y-auto p-2">
@@ -107,7 +129,7 @@ async function signOut() {
           <li v-for="item in group.items" :key="item.to">
             <NuxtLink
               :to="item.to"
-              class="flex h-8 items-center gap-2.5 rounded-sm px-2 transition-colors duration-100"
+              class="target flex h-8 items-center gap-2.5 rounded-sm px-2 transition-colors duration-100"
               :class="isActive(item, route.path) ? 'bg-active font-medium text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg'"
               :aria-current="isActive(item, route.path) ? 'page' : undefined"
               @click="emit('navigate')"
@@ -142,7 +164,7 @@ async function signOut() {
         </span>
       </div>
 
-      <div class="flex items-center justify-between gap-2">
+      <div class="flex flex-wrap items-center justify-between gap-2">
         <ThemeToggle />
         <UiButton variant="ghost" size="sm" :pending="signingOut" @click="signOut">
           <UiIcon name="logout" :size="14" />

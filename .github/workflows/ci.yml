@@ -49,7 +49,7 @@ jobs:
           for target in linux/amd64 linux/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./agent/cmd/shipwick-agent
           done
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cli/cmd/shipwick
           done
 
@@ -90,6 +90,7 @@ jobs:
         run: |
           docker compose config --quiet
           SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml config --quiet
+          docker compose -f packaging/linux/compose.yml config --quiet
 
   scripts:
     name: Scripts
@@ -97,4 +98,35 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck -s sh scripts/*.sh packaging/winget/*.sh
+        run: shellcheck -s sh scripts/*.sh packaging/winget/*.sh packaging/linux/*.sh
+
+  packages:
+    name: Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build the .deb and the .rpm
+        run: sh scripts/build-packages.sh v0.0.0-ci
+      # Installed where they are meant for: the files, the settings file with
+      # its token, and an agent that runs and was not started.
+      - name: The .deb installs on Debian
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:stable-slim sh -ec '
+            dpkg -i /dist/shipwick-agent_amd64.deb
+            test "$(shipwick-agent version)" = v0.0.0-ci
+            test "$(stat -c %a /etc/shipwick/agent.env)" = 600
+            grep -Eq "^SHIPWICK_AGENT_TOKEN=[0-9a-f]{64}$" /etc/shipwick/agent.env
+            test -f /usr/lib/systemd/system/shipwick-agent.service
+            dpkg -r shipwick-agent'
+      - name: The .rpm installs on Rocky Linux
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9 sh -ec '
+            rpm -i /dist/shipwick-agent_amd64.rpm
+            test "$(shipwick-agent version)" = v0.0.0-ci
+            test "$(stat -c %a /etc/shipwick/agent.env)" = 600
+            grep -Eq "^SHIPWICK_AGENT_TOKEN=[0-9a-f]{64}$" /etc/shipwick/agent.env
+            test -f /usr/lib/systemd/system/shipwick-agent.service
+            rpm -e shipwick-agent'

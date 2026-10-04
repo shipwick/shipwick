@@ -5,6 +5,7 @@ import { errorFromResponse, toAgentError } from '~/utils/agentError'
 import { summarizeAlerts, worstAlertTone } from '~/utils/alerts'
 import { pluralize } from '~/utils/format'
 import { agentBase, wantedServer } from '~/utils/servers'
+import { updateNotice } from '~/utils/updates'
 import { REQUEST_HEADERS } from '~/composables/useSession'
 
 /**
@@ -63,7 +64,9 @@ function state(name: string): { tone: 'ok' | 'warn' | 'danger' | 'muted', text: 
   }
   const info = row.info!
   const alerts = info.alerts ?? []
-  const parts = [info.hostname, `agent ${info.agent_version}`, pluralize(info.applications, 'application')]
+  // Each server says for itself whether a newer release exists.
+  const newer = updateNotice(info)
+  const parts = [info.hostname, `agent ${info.agent_version}${newer ? ` (${newer.latest} is available)` : ''}`, pluralize(info.applications, 'application')]
   if (alerts.length > 0) parts.push(summarizeAlerts(alerts))
   return { tone: worstAlertTone(alerts) ?? 'ok', text: parts.join(' · ') }
 }
@@ -108,7 +111,7 @@ const TEXT = { ok: 'text-fg-muted', warn: 'text-warn', danger: 'text-danger', mu
           </div>
           <div class="flex shrink-0 items-center gap-2">
             <template v-if="signedIn(s.name, s.authenticated)">
-              <UiButton size="sm" variant="ghost" :pending="leaving === s.name" @click="signOut(s.name)">
+              <UiButton size="sm" variant="ghost" :pending="leaving === s.name" :aria-label="`Sign out of ${s.name}`" @click="signOut(s.name)">
                 Sign out
               </UiButton>
               <a :href="`/?server=${s.name}`" class="inline-flex h-7 items-center rounded-sm border border-primary bg-primary px-2.5 text-xs font-medium text-primary-fg hover:border-primary-hover hover:bg-primary-hover">Open</a>

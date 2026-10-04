@@ -27,7 +27,7 @@ const TYPE_LABEL: Record<string, string> = { state: 'Phase', step: 'Step', log: 
     >
       <div class="flex items-baseline gap-3 text-xs text-fg-subtle">
         <TimeAgo :time="event.created_at" :class="props.absolute ? 'w-[4.5rem] shrink-0' : ''" />
-        <span v-if="props.absolute" class="mono text-fg-faint">{{ formatAbsoluteUtc(event.created_at) }}</span>
+        <span v-if="props.absolute" class="mono text-fg-subtle">{{ formatAbsoluteUtc(event.created_at) }}</span>
       </div>
       <div class="flex min-w-0 gap-2" :class="event.type === 'log' ? 'items-start' : 'items-baseline'">
         <span v-if="props.showType" class="label w-20 shrink-0" :title="event.type">{{ TYPE_LABEL[event.type] ?? event.type }}</span>

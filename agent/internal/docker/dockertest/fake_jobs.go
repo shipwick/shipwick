@@ -25,6 +25,7 @@ func (f *Fake) WaitContainer(ctx context.Context, id string) (int, error) {
 	}
 	if c.Job != "" && !f.HoldJobs {
 		c.Running, c.State, c.ExitCode, c.IP = false, "exited", f.JobExits[c.Job], ""
+		f.finish(c)
 		f.signalStopped(id)
 		f.mu.Unlock()
 		return c.ExitCode, nil
@@ -54,6 +55,7 @@ func (f *Fake) ReleaseJob(job string, exitCode int) bool {
 	for id, c := range f.containers {
 		if c.Job == job && c.Running {
 			c.Running, c.State, c.ExitCode, c.IP = false, "exited", exitCode, ""
+			f.finish(c)
 			f.signalStopped(id)
 			return true
 		}

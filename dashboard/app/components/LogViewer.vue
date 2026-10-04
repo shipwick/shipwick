@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { LOG_BUFFER_LINES } from '~/composables/useLogStream'
-import { formatLogTime } from '~/utils/format'
 
 /**
  * Log tail/follow for one application. Used full-height on the Logs page and
@@ -178,9 +177,9 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
       </label>
 
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted">
-        <label class="flex cursor-pointer items-center gap-1.5"><input v-model="follow" type="checkbox" class="accent-[var(--fg)]"> Follow</label>
-        <label class="flex cursor-pointer items-center gap-1.5"><input v-model="timestamps" type="checkbox" class="accent-[var(--fg)]"> Timestamps</label>
-        <label class="flex cursor-pointer items-center gap-1.5"><input v-model="wrap" type="checkbox" class="accent-[var(--fg)]"> Wrap</label>
+        <label class="target flex cursor-pointer items-center gap-1.5"><input v-model="follow" type="checkbox" class="accent-[var(--fg)]"> Follow</label>
+        <label class="target flex cursor-pointer items-center gap-1.5"><input v-model="timestamps" type="checkbox" class="accent-[var(--fg)]"> Timestamps</label>
+        <label class="target flex cursor-pointer items-center gap-1.5"><input v-model="wrap" type="checkbox" class="accent-[var(--fg)]"> Wrap</label>
       </div>
 
       <div class="ml-auto flex items-center gap-1.5">
@@ -210,8 +209,8 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
         v-for="replica in replicas"
         :key="replica"
         type="button"
-        class="mono inline-flex h-6 items-center gap-1.5 rounded-sm border px-1.5 text-xs transition-colors duration-100"
-        :class="hiddenReplicas.has(replica) ? 'border-line text-fg-faint line-through' : 'border-line-strong text-fg hover:bg-hover'"
+        class="target mono inline-flex h-6 items-center justify-center gap-1.5 rounded-sm border px-1.5 text-xs transition-colors duration-100"
+        :class="hiddenReplicas.has(replica) ? 'border-line text-fg-subtle line-through' : 'border-line-strong text-fg hover:bg-hover'"
         :aria-pressed="!hiddenReplicas.has(replica)"
         :title="hiddenReplicas.has(replica) ? `Show replica ${replica}` : `Hide replica ${replica}`"
         @click="toggleReplica(replica)"
@@ -224,7 +223,7 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
     <!-- Lines -->
     <div
       ref="scroller"
-      class="mono overflow-auto bg-inset py-1.5 text-xs leading-[1.125rem]"
+      class="mono overflow-auto bg-inset py-1.5 text-xs leading-[1.125rem] focus-visible:-outline-offset-2"
       :class="props.heightClass"
       role="log"
       aria-live="off"
@@ -254,20 +253,7 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
         {{ dropped.toLocaleString('en-US') }} older lines dropped (buffer holds {{ LOG_BUFFER_LINES.toLocaleString('en-US') }}).
       </p>
 
-      <div :class="wrap ? '' : 'w-max min-w-full'">
-        <template v-for="line in visible" :key="line.seq">
-          <div v-if="line.notice" class="log-row my-1 border-y border-line px-3 py-1 font-sans text-fg-subtle">
-            {{ line.message }}
-          </div>
-          <div v-else class="log-row flex items-start gap-3 px-3 hover:bg-hover">
-            <span v-if="timestamps" class="shrink-0 select-none text-fg-subtle" :title="line.time">{{ formatLogTime(line.time) }}</span>
-            <span class="flex w-7 shrink-0 select-none items-center gap-1 text-fg-subtle" :title="line.container">
-              <span class="h-3 w-0.5 rounded-full" :style="{ background: replicaColor(line.replica) }" aria-hidden="true" />r{{ line.replica }}
-            </span>
-            <span class="min-w-0" :class="wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'"><span v-if="line.stream === 'stderr'" class="mr-2 select-none text-2xs uppercase tracking-wider text-fg-subtle">err</span>{{ line.message }}</span>
-          </div>
-        </template>
-      </div>
+      <LogRows :lines="visible" :timestamps="timestamps" :wrap="wrap" />
     </div>
 
     <!-- Status -->
@@ -287,11 +273,3 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
     </div>
   </div>
 </template>
-
-<style scoped>
-/* Let the browser skip layout and paint for rows far outside the viewport: 5,000 rows stay cheap. */
-.log-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 1.125rem;
-}
-</style>

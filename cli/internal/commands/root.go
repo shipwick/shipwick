@@ -155,6 +155,7 @@ context use" changes the current one.`,
 	root.AddCommand(c.backupCommands()...)
 	root.AddCommand(c.auditCommands()...)
 	root.AddCommand(c.accessCommands()...)
+	root.AddCommand(c.configCommand())
 	return c, root
 }
 

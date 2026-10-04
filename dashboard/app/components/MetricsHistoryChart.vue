@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { MetricsHistory, MetricsRange } from '~/types/api'
 import type { ChartPoint, HistoryMetric } from '~/utils/metricsHistory'
-import { timeTicks, toChartData } from '~/utils/metricsHistory'
+import { pointFigures, timeTicks, toChartData } from '~/utils/metricsHistory'
 import { formatAbsoluteUtc, formatLogTime } from '~/utils/format'
 
 /**
@@ -99,19 +99,7 @@ const hovered = computed<{ t: number, rows: HoverRow[] } | null>(() => {
 const pct = (value: number, total: number) => `${(value / total) * 100}%`
 
 /** Per-replica figures for the table view, the accessible alternative to the plot. */
-const table = computed(() => chart.value.series.map((s) => {
-  const values = s.segments.flat().map(p => p.value)
-  const n = values.length
-  return {
-    replica: s.replica,
-    color: colorOf(s.replica),
-    samples: n,
-    min: n ? Math.min(...values) : null,
-    avg: n ? values.reduce((a, b) => a + b, 0) / n : null,
-    max: n ? Math.max(...values) : null,
-    latest: s.latest?.value ?? null,
-  }
-}))
+const table = computed(() => chart.value.series.map(s => ({ replica: s.replica, color: colorOf(s.replica), ...pointFigures(s.segments) })))
 </script>
 
 <template>
@@ -230,10 +218,10 @@ const table = computed(() => chart.value.series.map((s) => {
     </div>
 
     <details v-if="!empty" class="mt-2 text-xs">
-      <summary class="cursor-pointer select-none text-fg-subtle hover:text-fg">
+      <summary class="target w-fit cursor-pointer select-none text-fg-subtle hover:text-fg">
         Show as table
       </summary>
-      <table class="data-table mt-2 !text-xs">
+      <table class="data-table mt-2 !text-xs" :aria-label="`${props.label} by replica over the last ${props.range}`">
         <thead>
           <tr>
             <th>Replica</th>

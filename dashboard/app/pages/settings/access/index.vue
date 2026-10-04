@@ -31,6 +31,9 @@ const createError = shallowRef<AgentError | null>(null)
 /** Shown once, right after creation; gone with the next navigation or "Done". */
 const created = shallowRef<CreatedToken | null>(null)
 const copied = ref(false)
+const result = ref<HTMLElement | null>(null)
+useFocusWhenShown(result)
+const { announce } = useAnnounce()
 
 const trimmedName = computed(() => name.value.trim().toLowerCase())
 const nameProblem = computed(() => {
@@ -89,7 +92,14 @@ async function copy() {
   }
   catch {
     // No clipboard access (http, or denied): the value is selectable right there.
+    announce('Could not copy. Select the token and copy it by hand.')
   }
+}
+
+/// The form is back where the token was: its first field takes the focus the button had.
+function done() {
+  created.value = null
+  void nextTick(() => document.getElementById('token-name')?.focus())
 }
 
 // --- revoke ---------------------------------------------------------------------
@@ -123,6 +133,20 @@ function closeRevoke() {
   revokeError.value = null
 }
 
+// --- change ---------------------------------------------------------------------
+
+/** The token whose applications or end are being changed; the value it carries stays what it is. */
+const editing = ref<Token | null>(null)
+const changedName = ref('')
+
+function onChanged(token: Token) {
+  editing.value = null
+  changedName.value = token.name
+  // The row shows what the agent stored, without waiting for the next poll.
+  tokens.data.value = (tokens.data.value ?? []).map(t => (t.id === token.id ? token : t))
+  void tokens.refresh()
+}
+
 const own = computed(() => (access.token.value?.kind === 'user' ? '' : access.token.value?.name ?? ''))
 const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-warn', danger: 'text-danger' } as const
 </script>
@@ -144,7 +168,7 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
         Create one below for CI, a teammate or a read-only dashboard, so the root token can stay on the server.
       </EmptyState>
       <div v-else class="overflow-x-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="API tokens">
           <thead>
             <tr>
               <th>Name</th>
@@ -188,21 +212,30 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
                 <span v-else>never</span>
               </td>
               <td class="right">
-                <UiButton variant="danger" size="sm" @click="revoking = t">
-                  Revoke
-                </UiButton>
+                <span class="inline-flex flex-wrap justify-end gap-2">
+                  <UiButton size="sm" :aria-label="`Edit ${t.name}`" @click="changedName = ''; editing = t">
+                    Edit
+                  </UiButton>
+                  <UiButton variant="danger" size="sm" :aria-label="`Revoke ${t.name}`" @click="revoking = t">
+                    Revoke
+                  </UiButton>
+                </span>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p v-if="changedName" class="flex items-center gap-2 border-t border-line px-4 py-2 text-xs font-medium text-ok" role="status">
+        <UiIcon name="check" :size="12" />
+        Changed {{ changedName }}. Its value is the same: nothing that uses it has to change.
+      </p>
       <p class="border-t border-line px-4 py-2 text-xs text-fg-subtle">
-        The root token is configured on the agent (<span class="mono">SHIPWICK_AGENT_TOKEN</span>, or generated on first start) and is not listed here: it has the admin role, does not expire and cannot be revoked through the API. A token that has expired stays listed until it is revoked, so that whoever holds it is told why it stopped working.
+        The root token is configured on the agent (<span class="mono">SHIPWICK_AGENT_TOKEN</span>, or generated on first start) and is not listed here: it has the admin role, does not expire and cannot be revoked through the API. A token that has expired stays listed until it is revoked, so that whoever holds it is told why it stopped working; <span class="text-fg-muted">Edit</span> gives it a new end.
       </p>
     </UiPanel>
 
     <UiPanel title="New token">
-      <div v-if="created" class="space-y-3 px-4 py-4" role="status">
+      <div v-if="created" ref="result" tabindex="-1" class="space-y-3 px-4 py-4 focus-visible:-outline-offset-2" role="status">
         <p class="flex items-center gap-2 font-medium text-ok">
           <UiIcon name="check" :size="14" />
           Token <span class="mono">{{ created.name }}</span> created with the {{ created.role }} role
@@ -236,7 +269,7 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
         <p class="text-fg-muted">
           Copy it now: it will not be shown again. The agent keeps only a hash. Use it as <span class="mono text-fg">shipwick login --token</span> or as the token of a CI job.
         </p>
-        <UiButton size="sm" variant="ghost" @click="created = null">
+        <UiButton size="sm" variant="ghost" @click="done">
           Done
         </UiButton>
       </div>
@@ -316,6 +349,8 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
         </p>
       </form>
     </UiPanel>
+
+    <TokenEditDialog :token="editing" :known="known" @close="editing = null" @changed="onChanged" />
 
     <ConfirmDialog
       :open="revoking !== null"

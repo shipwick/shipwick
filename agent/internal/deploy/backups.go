@@ -439,7 +439,7 @@ func (e *Engine) takeBackup(ctx context.Context, d store.Deployment, run *store.
 
 	if b := d.Spec.Backups; b != nil {
 		if len(b.Before) > 0 {
-			if err := e.backupBefore(ctx, source, b); err != nil {
+			if err := e.runBefore(ctx, d, source, run, b); err != nil {
 				return err
 			}
 		}
@@ -474,7 +474,8 @@ func (e *Engine) takeBackup(ctx context.Context, d store.Deployment, run *store.
 // dump of a large database takes its time, a command that hangs must not hold
 // the application's lock for ever. At the limit the backup is given up; the
 // command itself is the container's, since Docker cannot end what it started
-// there (Runtime.Exec).
+// there (Runtime.Exec); `before_in: container` runs it where it can be ended
+// (backups_before.go).
 func (e *Engine) backupBefore(ctx context.Context, containerID string, b *spec.Backups) error {
 	limit := b.BeforeLimit()
 	code, output, err := e.rt.Exec(ctx, containerID, b.Before, limit)

@@ -18,6 +18,14 @@ import (
 //	docker build -t ghcr.io/shipwick/agent:0.0.0-test . (and caddy, dashboard)
 //	SHIPWICK_BUNDLE_DIST=$PWD/dist SHIPWICK_BUNDLE_TAG=v0.0.0-test SHIPWICK_BUNDLE_OUT=/tmp/bundle.tar.gz \
 //	  go test -tags integration -run TestServerBundleWithRealDocker ./cli/internal/commands/
+//
+// With SHIPWICK_BUNDLE_PULL set the images are pulled from the registry and
+// held against the release's digests: for a dist whose compose file names
+// images that are published, and whose image-digests.txt (written with
+// scripts/image-digests.sh, and added to checksums.txt as the release
+// workflow adds it) says what they are. DOCKER_HOST chooses the daemon, and
+// with it how the archive is written: the classic image store, or
+// containerd's.
 func TestServerBundleWithRealDocker(t *testing.T) {
 	dist, tag, out := os.Getenv("SHIPWICK_BUNDLE_DIST"), os.Getenv("SHIPWICK_BUNDLE_TAG"), os.Getenv("SHIPWICK_BUNDLE_OUT")
 	if dist == "" || tag == "" || out == "" {
@@ -33,13 +41,18 @@ func TestServerBundleWithRealDocker(t *testing.T) {
 		arch = "amd64"
 	}
 	// The images of a release that was never published exist only here.
-	stdout, _, err := f.run(t.TempDir(), "server", "bundle", "--version", tag, "--arch", arch, "--no-pull", "-o", out)
+	args, want := []string{"server", "bundle", "--version", tag, "--arch", arch, "-o", out, "--no-pull"}, 7
+	if os.Getenv("SHIPWICK_BUNDLE_PULL") != "" {
+		// And image-digests.txt.
+		args, want = args[:len(args)-1], 8
+	}
+	stdout, stderr, err := f.run(t.TempDir(), args...)
 	if err != nil {
 		t.Fatalf("server bundle: %v\n%s", err, stdout)
 	}
 	files, _ := readBundle(t, out)
-	if len(files) != 7 {
-		t.Errorf("the bundle holds %d entries, want the directory and six files", len(files))
+	if len(files) != want {
+		t.Errorf("the bundle holds %d entries, want the directory and %d files", len(files), want-1)
 	}
-	t.Log(stdout)
+	t.Log(stdout, stderr)
 }

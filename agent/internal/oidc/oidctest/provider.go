@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,12 @@ type User struct {
 	// EmailVerified is left out of the ID token when nil.
 	EmailVerified *bool
 	Groups        []string
+	// Tenant is the directory the account belongs to, for a provider that
+	// serves several (ServeTenants): the tid claim, and part of the issuer.
+	Tenant string
+	// Claims are added to the ID token as they are: preferred_username,
+	// upn. An empty Email leaves the email claim out when there are any.
+	Claims map[string]any
 }
 
 // Provider is the fake. URL is its issuer.
@@ -55,6 +62,8 @@ type Provider struct {
 	mutate   func(claims map[string]any)
 	down     bool
 	postOnly bool
+	tenants  bool
+	keyOwner string
 	requests []string
 }
 
@@ -124,6 +133,23 @@ func (p *Provider) Down(down bool) { p.set(func() { p.down = down }) }
 // form only.
 func (p *Provider) PostOnly() { p.set(func() { p.postOnly = true }) }
 
+// ServeTenants makes the provider one for the accounts of many tenants, the
+// way Microsoft Entra is: reached at MultiTenantIssuer, its discovery
+// document names an issuer with a placeholder for the tenant, and each ID
+// token is issued by the tenant of its account.
+func (p *Provider) ServeTenants() { p.set(func() { p.tenants = true }) }
+
+// MultiTenantIssuer is the issuer an agent is configured with for a provider
+// that serves tenants.
+func (p *Provider) MultiTenantIssuer() string { return p.URL + "/organizations/v2.0" }
+
+// TenantIssuer is the issuer of the tokens of one tenant.
+func (p *Provider) TenantIssuer(tenant string) string { return p.URL + "/" + tenant + "/v2.0" }
+
+// KeysSignFor makes the published keys say which issuer they sign for, as
+// the keys of a tenant of its own do among Entra's; "" stops that.
+func (p *Provider) KeysSignFor(issuer string) { p.set(func() { p.keyOwner = issuer }) }
+
 func (p *Provider) set(fn func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -163,14 +189,23 @@ func (p *Provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "down for maintenance", http.StatusServiceUnavailable)
 		return
 	}
-	switch r.URL.Path {
+	path, issuer := r.URL.Path, p.URL
+	if p.tenants {
+		// Only the address for every tenant has a discovery document here.
+		path, issuer = strings.TrimPrefix(path, "/organizations/v2.0"), p.URL+"/{tenantid}/v2.0"
+		if path == r.URL.Path && path == "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	switch path {
 	case "/.well-known/openid-configuration":
 		methods := []string{"client_secret_basic", "client_secret_post"}
 		if p.postOnly {
 			methods = []string{"client_secret_post"}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"issuer":                                p.URL,
+			"issuer":                                issuer,
 			"authorization_endpoint":                p.URL + "/authorize",
 			"token_endpoint":                        p.URL + "/token",
 			"jwks_uri":                              p.URL + "/keys",
@@ -179,12 +214,18 @@ func (p *Provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/keys":
 		// The uncompressed point: 4, then x and y, 32 bytes each.
 		point, _ := p.ecKey.PublicKey.Bytes()
-		writeJSON(w, http.StatusOK, map[string]any{"keys": []map[string]string{
+		keys := []map[string]string{
 			{"kty": "RSA", "use": "sig", "kid": p.keyID, "alg": "RS256",
 				"n": b64(sharedRSA.N.Bytes()), "e": "AQAB"},
 			{"kty": "EC", "use": "sig", "kid": p.keyID + "-ec", "crv": "P-256",
 				"x": b64(point[1:33]), "y": b64(point[33:])},
-		}})
+		}
+		if p.keyOwner != "" {
+			for _, k := range keys {
+				k["issuer"] = p.keyOwner
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 	case "/token":
 		p.token(w, r)
 	default:
@@ -223,6 +264,15 @@ func (p *Provider) token(w http.ResponseWriter, r *http.Request) {
 		"iss": p.URL, "aud": ClientID, "sub": g.user.Subject, "nonce": g.nonce,
 		"iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(),
 		"email": g.user.Email,
+	}
+	if g.user.Email == "" && len(g.user.Claims) > 0 {
+		delete(claims, "email")
+	}
+	for name, value := range g.user.Claims {
+		claims[name] = value
+	}
+	if p.tenants {
+		claims["iss"], claims["tid"] = p.URL+"/"+g.user.Tenant+"/v2.0", g.user.Tenant
 	}
 	if claims["sub"] == "" {
 		claims["sub"] = "sub-" + g.user.Email

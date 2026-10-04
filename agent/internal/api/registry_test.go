@@ -244,7 +244,9 @@ func TestRotateKeyReencryptsWhileTheAgentRunsAndLogsWhoAsked(t *testing.T) {
 		t.Fatalf("rotate: status = %d, body = %s", status, body)
 	}
 	rotation := decode[api.KeyRotation](t, body)
-	if rotation.Values != 2 || rotation.Deployments != 1 || rotation.KeySource != api.KeySourceFile || rotation.KeyFile != keyFile {
+	// The secret, the registry password, and the references of the deployment
+	// that referred to the secret.
+	if rotation.Values != 3 || rotation.Deployments != 1 || rotation.KeySource != api.KeySourceFile || rotation.KeyFile != keyFile {
 		t.Errorf("rotation = %+v", rotation)
 	}
 	after, _ := os.ReadFile(keyFile)
@@ -255,7 +257,7 @@ func TestRotateKeyReencryptsWhileTheAgentRunsAndLogsWhoAsked(t *testing.T) {
 		t.Errorf("a key the agent keeps in its file must not be in the response: %s", body)
 	}
 	logs := f.logs.String()
-	if !strings.Contains(logs, `msg="encryption key rotated" by=ops values=2 deployments=1`) {
+	if !strings.Contains(logs, `msg="encryption key rotated" by=ops values=3 deployments=1`) {
 		t.Errorf("the log must record the rotation and the token that asked:\n%s", logs)
 	}
 	if strings.Contains(logs, strings.TrimSpace(string(after))) || strings.Contains(logs, strings.TrimSpace(string(before))) {

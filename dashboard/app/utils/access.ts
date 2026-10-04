@@ -1,4 +1,4 @@
-import type { AccessRule, AuditEntry, TokenIdentity } from '~/types/api'
+import type { AccessRule, AuditEntry, AuditPage, Token, TokenIdentity, UpdateTokenRequest } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { formatRelativeTime } from '~/utils/format'
 import type { StatusDisplay, Tone } from '~/utils/status'
@@ -149,6 +149,7 @@ export function sessionEndedMessage(error: Pick<AgentError, 'code' | 'message' |
   if (error.code === 'SESSION_ENDED') {
     if (error.details.reason === 'access_changed') return 'What you may do on this server was changed. Sign in again to continue.'
     if (error.details.reason === 'signed_out') return 'An admin ended your session. Sign in again.'
+    if (error.details.reason === 'sign_in_changed') return 'How people sign in to this server was changed. Sign in again.'
     return said
   }
   return ''
@@ -163,10 +164,11 @@ function sentence(text: string): string {
 
 // --- who may sign in ------------------------------------------------------------
 
-/** A rule's subject as people write it: "ada@example.com", "group:developers", "*@example.com". */
+/** A rule's subject as people write it: "ada@example.com", "group:developers", "*@example.com", "name:svc-deploy". */
 export function ruleSubject(rule: Pick<AccessRule, 'kind' | 'subject'>): string {
   if (rule.kind === 'group') return `group:${rule.subject}`
   if (rule.kind === 'domain') return `*@${rule.subject}`
+  if (rule.kind === 'name') return `name:${rule.subject}`
   return rule.subject
 }
 
@@ -176,7 +178,69 @@ export function ruleSubjectProblem(kind: string, subject: string): string {
   if (value === '') return ''
   if (kind === 'email') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? '' : 'Not an e-mail address; use one like ada@example.com.'
   if (kind === 'domain') return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(value) ? '' : 'Use the part after the @, e.g. example.com.'
+  if (kind === 'name') return /^[A-Za-z0-9._%+'@|:=#~-]{1,254}$/.test(value) ? '' : 'A name as the provider issues it: letters, digits and . _ % + \' @ | : = # ~ - without spaces, at most 254.'
   return value.length > 256 ? 'At most 256 characters.' : ''
+}
+
+/**
+ * A subject as it is sent: an address and a domain in lowercase, without the
+ * `*@` a domain is often typed with; a group and a name exactly as typed, for
+ * the provider's own spelling is what is compared.
+ */
+export function cleanRuleSubject(kind: string, raw: string): string {
+  const value = raw.trim()
+  return kind === 'group' || kind === 'name' ? value : value.toLowerCase().replace(/^\*?@/, '')
+}
+
+/**
+ * The claim the agent names people by, when it is not their address: "" for
+ * `email`, for an agent that does not say (before 0.7), and without sign-in.
+ */
+export function otherNameClaim(signIn: { configured?: boolean, name_claim?: string } | null | undefined): string {
+  const claim = signIn?.name_claim ?? ''
+  return claim === '' || claim === 'email' ? '' : claim
+}
+
+export interface RuleKindChoice {
+  value: 'email' | 'group' | 'domain' | 'name'
+  /** In the select: "One person", "A group", … */
+  label: string
+  /** The field's label. */
+  field: string
+  placeholder: string
+  help: string
+}
+
+/**
+ * The kinds of rule the form offers, the one for a single person first. Where
+ * people are named by another claim than their address that is a rule by
+ * name, and rules by address and by domain say whom they reach; an agent
+ * before 0.7 knows no rule by name.
+ */
+export function ruleKinds(claim: string, supportsNames: boolean): RuleKindChoice[] {
+  const group: RuleKindChoice = { value: 'group', label: 'A group', field: 'Group', placeholder: 'developers', help: 'A group of the provider\'s, written exactly as the provider sends it.' }
+  if (claim !== '') {
+    const reach = `This server names people by the ${claim} claim: the rule applies to those whose ${claim} is an address.`
+    return [
+      { value: 'name', label: 'One person', field: 'Name', placeholder: 'ada', help: `The person's ${claim}, exactly as the provider issues it. Upper and lower case count.` },
+      group,
+      { value: 'email', label: 'One person, by address', field: 'Address', placeholder: 'ada@example.com', help: reach },
+      { value: 'domain', label: 'Everyone at a domain', field: 'Domain', placeholder: 'example.com', help: `${reach} The domain is the part after the @.` },
+    ]
+  }
+  return [
+    { value: 'email', label: 'One person', field: 'Address', placeholder: 'ada@example.com', help: 'The address the provider names for the account.' },
+    group,
+    { value: 'domain', label: 'Everyone at a domain', field: 'Domain', placeholder: 'example.com', help: 'Every address at the domain: the part after the @.' },
+    ...(supportsNames
+      ? [{ value: 'name' as const, label: 'One person, by name', field: 'Name', placeholder: 'ada@example.com', help: 'This server names people by their e-mail address: a rule by name matches an address written exactly as the agent keeps it, in lowercase. A rule for the address itself says the same more plainly.' }]
+      : []),
+  ]
+}
+
+/** Under a rule in the list: whom a rule by address or domain reaches where people are named by another claim; "" otherwise. */
+export function ruleReach(rule: Pick<AccessRule, 'kind'>, claim: string): string {
+  return claim !== '' && (rule.kind === 'email' || rule.kind === 'domain') ? 'applies to names that are addresses' : ''
 }
 
 /** The host of the provider's issuer, for the sign-in button: "accounts.example.com"; the text itself when it is not a URL. */
@@ -219,6 +283,55 @@ export function expiryFromChoice(choice: ExpiryChoice, date: string, now: number
 
 function rfc3339(ms: number): string {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/** What the form that changes a token does with its end: leave it, take it away, or move it. */
+export type EditExpiryChoice = 'keep' | ExpiryChoice
+
+/** The choices for a token's end when it is changed; the first leaves it as it is, in words that say what that is. */
+export function editExpiryChoices(token: Pick<Token, 'expires_at'>, now: number = Date.now()): { value: EditExpiryChoice, label: string }[] {
+  const display = tokenExpiryDisplay(token.expires_at, now)
+  const keep = !display ? 'Leave it: no end' : display.expired ? `Leave it: ${display.label}` : `Leave it: ends ${display.label}`
+  return [
+    { value: 'keep', label: keep },
+    // Nothing to take away from a token that has no end.
+    ...(token.expires_at ? [{ value: 'never' as const, label: 'No end' }] : []),
+    { value: '30', label: 'In 30 days' },
+    { value: '90', label: 'In 90 days' },
+    { value: '365', label: 'In a year' },
+    { value: 'date', label: 'On a date…' },
+  ]
+}
+
+export interface TokenEdit {
+  /** The chosen applications; [] for all. Only a deploy token's are looked at. */
+  applications: readonly string[]
+  expiry: EditExpiryChoice
+  /** For `expiry: 'date'`. */
+  date: string
+}
+
+/**
+ * The body of PUT /tokens/:name for what the form changed, and only that: the
+ * agent replaces what it is sent. `body` is null when nothing differs from
+ * the token as it is; `problem` says why a date cannot be used.
+ */
+export function tokenChanges(token: Pick<Token, 'role' | 'applications' | 'expires_at'>, edit: TokenEdit, now: number = Date.now()): { body: UpdateTokenRequest | null, problem: string } {
+  const body: UpdateTokenRequest = {}
+  if (token.role === 'deploy') {
+    const before = [...(token.applications ?? [])].sort()
+    const after = [...new Set(edit.applications)].sort()
+    if (before.join('\n') !== after.join('\n')) body.applications = after
+  }
+  if (edit.expiry === 'never') {
+    if (token.expires_at) body.never_expires = true
+  }
+  else if (edit.expiry !== 'keep') {
+    const end = expiryFromChoice(edit.expiry, edit.date, now)
+    if (end.problem) return { body: null, problem: end.problem }
+    if (end.value) body.expires_at = end.value
+  }
+  return { body: Object.keys(body).length > 0 ? body : null, problem: '' }
 }
 
 /**
@@ -264,7 +377,9 @@ const ACTION_LABEL: Record<string, string> = {
   'certificate.set': 'Store certificate',
   'certificate.delete': 'Remove certificate',
   'token.create': 'Create token',
+  'token.update': 'Change token',
   'token.revoke': 'Revoke token',
+  'audit.export': 'Export audit trail',
   'key.rotate': 'Rotate encryption key',
   'export.download': 'Download export',
   'export.create': 'Export to backups',
@@ -311,4 +426,81 @@ export function auditDetailLink(detail: string): string | null {
 /** Whether a page of the trail was full, so that older entries may exist. */
 export function auditHasOlder(page: readonly unknown[], limit: number): boolean {
   return page.length >= limit
+}
+
+/**
+ * Whether older entries match: what the agent says (`more`, from 0.7 on), and
+ * for an agent that does not say, whether the page came back full.
+ */
+export function auditMore(page: AuditPage, limit: number): boolean {
+  return page.more ?? auditHasOlder(page.data, limit)
+}
+
+/** Groups of actions to look for at once. A value ending in a dot is the agent's own word for a family: `token.` is every action on tokens. */
+export const AUDIT_FAMILIES: readonly { value: string, label: string, actions: string }[] = [
+  { value: '', label: 'Everything', actions: '' },
+  { value: 'deployments', label: 'Deployments', actions: 'deploy,redeploy,rollback,image.,static.' },
+  { value: 'running', label: 'Stop, start and delete', actions: 'stop,start,application.' },
+  { value: 'runs', label: 'Jobs and commands', actions: 'run,job.' },
+  { value: 'backups', label: 'Backups and volumes', actions: 'backup.,volume.,server.' },
+  { value: 'values', label: 'Secrets, registries and certificates', actions: 'secret.,registry.,certificate.,key.' },
+  { value: 'tokens', label: 'Tokens', actions: 'token.' },
+  { value: 'access', label: 'Sign-ins and access', actions: 'signin,signout,access.' },
+  { value: 'transfer', label: 'Exports, imports and the standby', actions: 'export.,import,standby.,audit.' },
+]
+
+const AUDIT_ACTION = /^[a-z]{1,20}(\.[a-z]{1,20})?$|^[a-z]{1,20}\.$/
+
+/** Why a typed action cannot be searched for; "" when it can, and for an empty field. */
+export function auditActionProblem(text: string): string {
+  const value = text.trim()
+  if (value === '' || AUDIT_ACTION.test(value)) return ''
+  return 'An action as the trail names it, or the start of a family with its dot: deploy, token.create, backup.'
+}
+
+export interface AuditFilters {
+  application: string
+  /** A token's name or a person's, matched exactly. */
+  actor: string
+  /** '' for both, `token`, or `user` for people. */
+  actorKind: string
+  /** One of AUDIT_FAMILIES' values. */
+  family: string
+  /** One action or family typed by hand; it replaces the chosen family. */
+  action: string
+  /** Of ok, refused, failed; none chosen means all. */
+  outcomes: readonly string[]
+  since: string
+}
+
+export const NO_AUDIT_FILTERS: AuditFilters = { application: '', actor: '', actorKind: '', family: '', action: '', outcomes: [], since: '' }
+
+/** The query of GET /audit and of its export for a set of filters: only what is set. */
+export function auditQuery(filters: AuditFilters): Record<string, string> {
+  const typed = filters.action.trim()
+  const action = typed !== '' ? typed : AUDIT_FAMILIES.find(f => f.value === filters.family)?.actions ?? ''
+  // All three chosen is the same as none.
+  const outcomes = filters.outcomes.length === 3 ? [] : filters.outcomes
+  const query: Record<string, string> = {}
+  if (filters.application) query.application = filters.application
+  if (filters.actor.trim()) query.actor = filters.actor.trim()
+  if (filters.actorKind) query.actor_kind = filters.actorKind
+  if (action) query.action = action
+  if (outcomes.length > 0) query.outcome = outcomes.join(',')
+  if (filters.since) query.since = filters.since
+  return query
+}
+
+/** The filters an agent before 0.7 does not know and ignores, among those that are set: in words, for the notice that says so. */
+export function newAuditFilters(query: Record<string, string>): string[] {
+  return [query.action ? 'the action' : '', query.outcome ? 'the result' : '', query.actor_kind ? 'tokens or people' : ''].filter(word => word !== '')
+}
+
+/**
+ * An answer without `more` to a question that used a filter 0.7 added came
+ * from an older agent, which ignored the filter: the list is not what was
+ * asked for, and the page says so instead of showing it.
+ */
+export function auditFiltersIgnored(page: AuditPage, query: Record<string, string>): boolean {
+  return page.more === undefined && newAuditFilters(query).length > 0
 }

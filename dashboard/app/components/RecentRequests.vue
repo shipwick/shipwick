@@ -43,11 +43,11 @@ const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', mut
     </EmptyState>
     <template v-else>
       <div class="max-h-96 overflow-auto">
-        <table class="data-table stack">
+        <table class="data-table stack" aria-label="Recent requests">
           <thead>
             <tr>
               <th class="sticky top-0">
-                Time <span class="normal-case tracking-normal text-fg-faint">UTC</span>
+                Time <span class="normal-case tracking-normal text-fg-subtle">UTC</span>
               </th>
               <th class="sticky top-0">
                 Status
@@ -74,7 +74,7 @@ const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', mut
               <td data-label="Status" class="mono font-medium" :class="TONE_TEXT[statusTone(r.status)]">
                 {{ r.status }}
               </td>
-              <td data-primary class="mono max-sm:order-first">
+              <td data-primary class="mono cards:order-first">
                 <span class="text-fg-muted">{{ r.method }}</span> <span class="break-all">{{ r.path }}</span>
               </td>
               <td data-label="Duration" class="mono right whitespace-nowrap text-fg-muted">
