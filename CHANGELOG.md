@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-04
+
 ### Added
 
 - **Output that outlives its container.** The agent keeps the last lines of
@@ -1079,7 +1081,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/shipwick/shipwick/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/shipwick/shipwick/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/shipwick/shipwick/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/shipwick/shipwick/compare/v0.4.1...v0.5.0
