@@ -56,15 +56,14 @@ produces it, the behaviour that test pins down, and a page that says what the
 operator sees and does. Some of this is tested today; none of it is in one
 place.
 
-**An address that changed hands.** Docker gives the address of a container
-that is gone to the next one that starts, on the network every application
-shares, and the proxy uses what it learned about a name for a second — ten
-while Docker's DNS is silent. A replica that stops while another
-application's starts could, within that time, leave the proxy sending one
-application's requests to the other. Nobody has seen it; nothing rules it
-out. A test that tries to produce it under deployments in parallel, and then
-either the proof that the order of a rollout prevents it or a change that
-does.
+**Applications deployed together, as fast as one.** An address rests for 2.5
+seconds before another application's container may take it, which is what
+keeps one application's requests from reaching another, and which makes
+applications that are deployed at once wait for each other: three of two
+replicas each take 18 to 20 seconds where they took 6. The rest is as long
+as the proxy may remember an address. Telling the proxy to forget the
+replicas the agent has just stopped would make it a matter of milliseconds
+for every stop the agent does itself, and leave the wait to crashes.
 
 **More than one distribution in CI.** The integration tests run on one Ubuntu
 image with one Docker version. A matrix over the distributions the installer

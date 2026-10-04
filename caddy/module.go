@@ -49,7 +49,7 @@ type Replicas struct {
 	Wait caddy.Duration `json:"wait,omitempty"`
 
 	// How long the last answer is used while questions go unanswered.
-	// Default: 10s
+	// Default: 2s
 	Keep caddy.Duration `json:"keep,omitempty"`
 
 	logger *zap.Logger
@@ -76,7 +76,7 @@ func (r *Replicas) Provision(ctx caddy.Context) error {
 		r.Wait = caddy.Duration(200 * time.Millisecond)
 	}
 	if r.Keep <= 0 {
-		r.Keep = caddy.Duration(10 * time.Second)
+		r.Keep = caddy.Duration(2 * time.Second)
 	}
 	logger := r.logger
 	names.setChanged(func(name string, err error) {
@@ -108,8 +108,10 @@ func (r *Replicas) GetUpstreams(req *http.Request) ([]*reverseproxy.Upstream, er
 }
 
 // lookupTimeout ends a question to Docker's DNS, which answers in
-// milliseconds or not at all. The resolver's own patience is five seconds.
-const lookupTimeout = 2 * time.Second
+// milliseconds or not at all. The resolver's own patience is five seconds;
+// this one ends before the last answer has been kept for too long, so that
+// the next question is out by then.
+const lookupTimeout = 800 * time.Millisecond
 
 var (
 	_ caddy.Provisioner           = (*Replicas)(nil)

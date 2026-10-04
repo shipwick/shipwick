@@ -32,6 +32,10 @@ func newIntegrationRuntime(t *testing.T) (*Runtime, context.Context) {
 	if err := rt.Ping(ctx); err != nil {
 		t.Skipf("docker is not available: %v", err)
 	}
+	// Addresses do not rest between these tests' containers: each test has
+	// one application, and the daemon may hold the stopped containers of
+	// anything else. The test of the rest sets its own.
+	rt.rest = newAddressRest(0)
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()

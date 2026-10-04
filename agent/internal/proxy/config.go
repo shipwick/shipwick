@@ -116,11 +116,13 @@ const (
 	// DNS answers in a few milliseconds or, now and then, not at all.
 	resolveWait = "200ms"
 	// resolveKeep is how long the last answer is used while the name goes
-	// unanswered: long enough for a lost answer or two, which is what
+	// unanswered: long enough for a lost answer, which is what
 	// happens, and no longer. Docker gives the address of a container that
 	// is gone to the next one that starts, so an old answer may name a
-	// container of another application.
-	resolveKeep = "10s"
+	// container of another application; the agent keeps such an address
+	// unused for a little longer than this (docker.AddressRest), and the two
+	// must be changed together.
+	resolveKeep = "2s"
 
 	// sourceKept is the source of replicas in Shipwick's Caddy (caddy/ in
 	// this repository): it keeps the last answer while Docker's DNS is slow

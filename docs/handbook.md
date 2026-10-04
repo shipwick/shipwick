@@ -2544,10 +2544,21 @@ address per replica that carries the name, and Caddy asks it again every
 second.
 
 Now and then Docker's DNS does not answer. The proxy then goes on with the
-replicas of the last answer, for up to 10 seconds, and asks again in the
+replicas of the last answer, for up to two seconds, and asks again in the
 background: a request waits a fifth of a second at most, and the requests of
 one application never wait for the name of another. Its log says when a name
-stopped being answered and when it was answered again.
+stopped being answered and when it was answered again. If the silence lasts
+longer, requests wait for it to end, up to five seconds each.
+
+**One application's requests never reach another.** Docker gives the address
+of a container that stopped to the next container that starts, and for a
+moment the proxy still holds that address for the application that had it.
+So the agent lets such an address rest: after a container of one application
+stops — retired by a deployment, stopped, crashed — a container of another
+application starts no sooner than 2.5 seconds later. A deployment of one
+application never waits for itself. Deploying several at once
+(`shipwick.yaml`) takes longer for it: three applications of two replicas
+each, redeployed together, took 18 to 20 seconds where they had taken 6.
 
 - **Only healthy replicas receive traffic.** A replica that fails its health
   check is taken off the name within a second and put back once it passes

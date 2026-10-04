@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-var patient = settings{refresh: time.Second, wait: 200 * time.Millisecond, keep: 10 * time.Second, timeout: 2 * time.Second}
+var patient = settings{refresh: time.Second, wait: 200 * time.Millisecond, keep: 2 * time.Second, timeout: time.Second}
 
 // lab is a table whose DNS, clock and timers the test holds.
 type lab struct {
@@ -191,15 +191,20 @@ func TestALostAnswerDelaysNobodyForLong(t *testing.T) {
 	l.pass(300 * time.Millisecond)
 	l.want(l.request(context.Background(), "api_8080"), "172.18.0.5")
 
-	// The resolver gives up; the answer is kept and the name asked again.
-	l.pass(1700 * time.Millisecond)
+	// The question gives up before the answer has been kept for too long,
+	// and a request still goes to the replicas it names while the name is
+	// asked again.
+	l.pass(600 * time.Millisecond)
 	lost.answer <- answer{err: context.DeadlineExceeded}
 	l.settled("api_8080")
+	l.want(l.request(context.Background(), "api_8080"), "172.18.0.5")
+
+	// Then the kept answer is too old to trust, and a request waits for the
+	// next one: milliseconds, when Docker's DNS answers at all.
+	l.pass(100 * time.Millisecond)
 	again := l.request(context.Background(), "api_8080")
-	l.want(again, "172.18.0.5")
 	l.question("api_8080").answer <- answer{addrs: []string{"172.18.0.5", "172.18.0.6"}}
-	l.settled("api_8080")
-	l.want(l.request(context.Background(), "api_8080"), "172.18.0.5", "172.18.0.6")
+	l.want(again, "172.18.0.5", "172.18.0.6")
 
 	if got, want := l.reported(2), []string{"api_8080 unanswered", "api_8080 answered"}; !slices.Equal(got, want) {
 		t.Errorf("reported %v, want %v", got, want)
@@ -244,11 +249,11 @@ func TestTheLastAnswerIsNotKeptForever(t *testing.T) {
 
 	// Unanswered for longer than an address can be trusted to belong to the
 	// same container.
-	l.pass(11 * time.Second)
+	l.pass(3 * time.Second)
 	done := l.request(context.Background(), "api_8080")
 	l.question("api_8080").answer <- answer{err: context.DeadlineExceeded}
 	if r := <-done; r.err == nil {
-		t.Fatalf("an answer 11s old was used: %v", r.addrs)
+		t.Fatalf("an answer 3s old was used: %v", r.addrs)
 	}
 
 	// Not asked again before the refresh interval has passed.

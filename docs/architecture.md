@@ -999,13 +999,37 @@ routing = for every replica that should serve: give it its names
   request to every application for five seconds and ended some with a `503`,
   on a server where nothing was being deployed. And a request that was
   abandoned took the lookup with it. The `shipwick` source asks per name, in
-  the background, with a timeout of its own (2 s); a request waits 200 ms for
-  an answer that is on its way and otherwise goes to the replicas of the last
-  one, for as long as that answer is younger than 10 s. Ten seconds covers
-  a lost answer or two and no more, because an address must not outlive its
-  container by long: Docker gives the address of a container that is gone
-  to the next one that starts. "Nobody carries the name" is an answer, not a failure, and is
+  the background, with a timeout of its own (0.8 s); a request waits 200 ms
+  for an answer that is on its way and otherwise goes to the replicas of the
+  last one, for as long as that answer is younger than 2 s. Two seconds is
+  one lost answer: asked at one second, given up at 1.8, asked again at two.
+  It is no longer because an address must not outlive its container by long
+  (below). "Nobody carries the name" is an answer, not a failure, and is
   never replaced by an older one.
+- **An address rests before another application gets it.** Docker gives
+  the address of a container that stopped to the next container that starts
+  (Docker 29 does; nothing promises otherwise) — and the proxy still holds
+  it for the application that had it, for a second by itself and for two
+  while Docker's DNS is silent. Produced on purpose (one application's
+  replica killed while another's was being started, both on port 80), a
+  request for the first was answered by the second in four rounds of nine.
+  The runtime therefore keeps an address unused for 2.5 s
+  (`docker.AddressRest`, which must stay above `resolveKeep`): before a
+  container starts or joins the services network again, which is when it
+  takes an address, it waits until no container of *another* application has
+  stopped, been removed or left that network within the rest — whether the
+  agent did it, which it records, or the container stopped by itself, which
+  Docker reports as the time it finished. A container of another application
+  that stops while this one starts may still have handed it its address;
+  this one then leaves the services network and joins again after the rest,
+  which costs a container that has only just started nothing. Within one
+  application the worst case is a replica reached a moment before it is
+  ready, which is refused and retried, so its containers do not wait for
+  each other and a rollout is as fast as before. What the agent cannot see is
+  not covered: a container removed with `docker rm`, which leaves no record
+  of when. After the change the same experiment gave 0 of 2,400. The price is
+  paid by applications deployed together: three of two replicas each, rolled
+  at once, took 18–20 s instead of 6.
 - **A proxy without the source still serves.** Caddy rejects a configuration
   that names a module it lacks, and keeps the one it runs. The agent then
   renders the same routes with the `a` source, loads those, reports

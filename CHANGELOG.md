@@ -26,8 +26,19 @@ says so under **Changed** and explains how to upgrade.
   the requests to every application waited five seconds for the resolver to
   give up, and some ended with a `503`. The proxy now asks per application
   and in the background, and goes on with the replicas of the last answer for
-  up to 10 seconds: a request waits a fifth of a second at most. Its log says
-  when a name stopped being answered and when it was answered again.
+  up to two seconds: a request waits a fifth of a second at most. Its log
+  says when a name stopped being answered and when it was answered again.
+- **A request for one application could be answered by another.** Docker
+  gives the address of a container that stopped to the next one that starts,
+  and for up to a second the proxy still held that address for the
+  application that had it: when a replica of one application stopped — a
+  crash, a deployment — just as a container of another started, and both
+  listened on the same port, a request for the first could reach the second.
+  Produced on purpose, it happened in four rounds of nine. An address now
+  rests for 2.5 seconds before a container of another application may take
+  one. A deployment of one application is as fast as before; several
+  deployed at once (`shipwick.yaml`) wait for each other's addresses, and
+  three of two replicas each took 18 to 20 seconds instead of 6.
 
 ### Changed
 

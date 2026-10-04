@@ -64,7 +64,7 @@ func TestBackendsAreResolvedByName(t *testing.T) {
 	}
 	// What makes a lookup nobody answered invisible: the last answer is
 	// used, soon and for a while.
-	if dynamic.Wait != "200ms" || dynamic.Keep != "10s" {
+	if dynamic.Wait != "200ms" || dynamic.Keep != "2s" {
 		t.Errorf("resolver = %+v, want a short wait and a kept answer", dynamic)
 	}
 }
