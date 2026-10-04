@@ -6,61 +6,34 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.7 — Logs and distribution
+## 0.8 — Hardening
 
-Output that outlives its container, more ways to install, and first what
-0.6 — access for teams, a corporate network, a dashboard that deploys — left
-unfinished.
+No new features. The release before 1.0 is for finding out what the earlier
+ones got wrong: stability under failure, the last checks, and security looked
+at by someone other than the people who wrote it.
 
-### Left over from 0.6
+### Left over from 0.7
 
-**A bundle whose images are proven.** `shipwick server bundle` checks the
-compose file, the installer and the CLI against the release's checksums; the
-three images are what the registry serves under the release's tags, as for
-any install. The release should publish their digests, and the bundle should
-check them.
+Small things 0.7 says in its documentation rather than hides. None of them is
+a feature; each is a loose end of one that exists.
 
-**A `backups.before` that is ended.** When the command runs past
-`backups.before_timeout` the backup fails and the application is free again,
-but the command itself stays in the container until it exits: Docker cannot
-end a command it started in a running container. Running it in a way that
-can be ended.
+**A configuration that comes back whole.** `shipwick config` returns
+references to stored secrets as references and every other value of `env` as
+a mask, a log level as much as a password: the agent cannot tell which of the
+values it was sent were secret. The CLI knows which ones it filled in, and
+should say.
 
-**A configuration that can be edited where it is shown.** The dashboard
-deploys a pasted `deploy.yaml` and cannot prefill it from what runs, because
-the agent returns secrets masked. An endpoint that returns the document with
-its `${NAME}` references kept, and one that takes a document without a name
-in its address.
+**The dashboard, listened to.** Every page works with the keyboard and passes
+an automated check of names, roles and contrast. Nobody has used it with a
+screen reader, and what a tooltip explains — an absolute time, why a button
+is disabled — is still out of reach without a pointer.
 
-**A token's applications, changed.** The applications a token is limited to
-are fixed when it is created; widening them means a new token.
+**Packages on a hardened host.** The `.deb` and the `.rpm` were installed
+and run on Debian and Rocky Linux. With SELinux enforcing, or with a host
+firewall between Docker's networks and the bridge address, they were not.
 
-**Sign-in for accounts without an address.** A provider account without an
-`email` claim is refused, and Microsoft Entra's multi-tenant issuers are not
-accepted. A claim of the operator's choice as the name.
-
-**The audit trail, searched.** It filters by application, by who and by time;
-not by kind of action, and it cannot be exported.
-
-**Exports and imports in the dashboard.** The dashboard writes an export to
-the backups and promotes a standby; a file of one's own, and an import from
-one, are the CLI's.
-
-**Credential helpers.** `shipwick registry login` stores a credential on the
-server. A `credsStore` in the server's `~/.docker/config.json` is not read.
-
-**The dashboard without a mouse.** Its pages were looked at on a desktop and a
-phone, light and dark. A walk through every page with the keyboard alone, at
-tablet widths and with a screen reader has not been done.
-
-### Logs and distribution
-
-**Log archiving.** A run's output and a replica's last log lines kept beyond
-the container's life, searchable from the dashboard.
-
-**Distribution.** A Windows arm64 build of the CLI; Debian and RPM packages for
-the agent as a plain binary; an update notice in the dashboard when a newer
-release exists.
+**Windows on Arm, run.** The build exists and `shipwick upgrade` chooses it;
+it has been compiled and never started on such a machine.
 
 **`winget install` in the documentation.** The package is submitted to
 winget-pkgs and waits for review; once it is accepted, `winget install
@@ -74,11 +47,7 @@ GitHub token with write access to a fork of winget-pkgs stored in this
 repository, which the Homebrew tap deliberately avoids; worth it once the
 cadence makes the two commands a chore.
 
-## 0.8 — Hardening
-
-No new features. The release before 1.0 is for finding out what the earlier
-ones got wrong: stability under failure, the last checks, and security looked
-at by someone other than the people who wrote it.
+### Hardening
 
 **What happens when things break, written down and tested.** A full disk, a
 Docker daemon that stops answering, a network that drops in the middle of a
@@ -117,7 +86,7 @@ new privileges, without host mounts and without ports they did not ask for.
 `security` in `deploy.yaml` for the rest: a read-only root filesystem,
 dropped capabilities, a refusal to run as root.
 
-**Signed releases.** Every binary and image signed at release time, with a
+**Signed releases.** Every binary, package and image signed at release time, with a
 software bill of materials and build provenance, so that what a server runs as
 root can be traced to a commit in this repository.
 
@@ -183,6 +152,12 @@ replacement with health checks and automatic rollback is the strategy, and
 `recreate` the exception for what cannot run twice. Canary releases need
 traffic splitting and a way to judge the canary, for a benefit that shows at
 a scale one server does not reach.
+
+**Credential helpers.** A helper is a program on the server that the agent
+would have to execute, and the agent executes nothing. Registries whose
+credentials expire, such as Amazon ECR and Google Artifact Registry, are
+served by piping the cloud CLI's token into `shipwick registry login` on a
+schedule; the handbook has the commands.
 
 **Automatic failover.** See *A second server kept ready* in the handbook for
 what is offered instead, and *Scheduling across machines* below for why.
