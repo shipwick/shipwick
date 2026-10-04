@@ -68,8 +68,8 @@ const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', mut
           </thead>
           <tbody>
             <tr v-for="(r, index) in rows" :key="`${r.time}-${index}`">
-              <td data-label="Time" class="mono whitespace-nowrap text-fg-muted" :title="r.time">
-                {{ formatLogTime(r.time) }}
+              <td data-label="Time" class="mono whitespace-nowrap text-fg-muted">
+                <UiTooltip repeats :text="r.time">{{ formatLogTime(r.time) }}</UiTooltip>
               </td>
               <td data-label="Status" class="mono font-medium" :class="TONE_TEXT[statusTone(r.status)]">
                 {{ r.status }}

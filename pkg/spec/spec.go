@@ -85,6 +85,9 @@ type App struct {
 	// container of the application: it passes signals on and reaps children,
 	// which a process running as PID 1 does not do for itself.
 	Init bool `json:"init,omitempty"`
+	// Security is what the application's containers go without, beyond what
+	// every container goes without.
+	Security *Security `json:"security,omitempty"`
 }
 
 // Volume is a named Docker volume mounted into every replica. It belongs to

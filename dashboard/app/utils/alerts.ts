@@ -29,6 +29,7 @@ const KIND_LABEL: Record<string, string> = {
   disk: 'Disk',
   restarts: 'Restarts',
   unhealthy: 'Unhealthy',
+  docker: 'Docker',
 }
 
 /** "Memory", "Disk": the kind as a short label. */

@@ -112,8 +112,13 @@ func (e *Engine) StoreStatic(ctx context.Context, name string, archive io.Reader
 	defer tmp.Close()
 
 	sum := sha256.New()
-	body := io.TeeReader(archive, io.MultiWriter(tmp, sum))
+	kept := &writeFailure{w: tmp}
+	body := io.TeeReader(archive, io.MultiWriter(kept, sum))
 	files, err := inspectStaticArchive(body)
+	if kept.err != nil {
+		// Not the archive's fault, whatever reading it made of the error.
+		return api.StaticUpload{}, fmt.Errorf("write upload: %w", kept.err)
+	}
 	if err != nil {
 		return api.StaticUpload{}, err
 	}

@@ -95,7 +95,7 @@ func exposition(sc deploy.Scrape) []byte {
 	for _, a := range sc.Alerts {
 		active[[2]string{a.Kind, a.Severity}]++
 	}
-	for _, kind := range []string{api.AlertDisk, api.AlertMemory, api.AlertRestarts, api.AlertUnhealthy} {
+	for _, kind := range []string{api.AlertDisk, api.AlertDocker, api.AlertMemory, api.AlertRestarts, api.AlertUnhealthy} {
 		for _, severity := range []string{api.SeverityCritical, api.SeverityWarning} {
 			p.series(float64(active[[2]string{kind, severity}]), "kind", kind, "severity", severity)
 		}

@@ -37,6 +37,7 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request) {
 	}
 	server.Token = principalFrom(r.Context())
 	server.SignIn = s.signInStatus()
+	server.OpenToApplications = s.reach != nil && s.reach.Open
 	writeJSON(w, http.StatusOK, server)
 }
 

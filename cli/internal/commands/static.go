@@ -24,10 +24,11 @@ import (
 // is sent as it is, so run the site's build first.
 
 // startDeployment starts the deployment of one config: for a static
-// application, the folder goes first.
-func (c *cli) startDeployment(ctx context.Context, cl *client.Client, file string, app spec.App, data []byte) (api.Deployment, error) {
+// application, the folder goes first. plain is what the file said about its
+// env values (placeholders.plainOf); a static application has none.
+func (c *cli) startDeployment(ctx context.Context, cl *client.Client, file string, app spec.App, data []byte, plain []string) (api.Deployment, error) {
 	if app.Static == nil {
-		return cl.Deploy(ctx, app.Name, data)
+		return cl.DeployWith(ctx, app.Name, data, plain)
 	}
 	return c.deployStatic(ctx, cl, file, app, data)
 }

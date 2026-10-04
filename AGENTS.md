@@ -30,6 +30,7 @@ make lint               # gofmt + go vet
 make test               # Go unit tests; no Docker, a few seconds
 make test-race-docker   # the same under the race detector, in a container
 make test-integration   # needs a Docker daemon
+make test-full-disk     # what a disk without room does, on a small filesystem in a container
 make test-dashboard     # npm ci, typecheck, vitest, production build
 make dev                # the whole stack: dashboard :3000, agent :9000, Caddy :8080/:8443
 ```
@@ -91,6 +92,10 @@ once its image is rebuilt (`docker compose up --build`).
 - An API change is four changes: `pkg/api` and the handler, `docs/api.md`,
   the CLI client, and the dashboard (`app/types/api.ts` **and**
   `mock/agent.mjs`, which must keep answering like the real agent).
+- A Docker Engine API call the agent did not make before is three changes:
+  the call, its line in the allow-list of `configs/compose.socket-proxy.yml`,
+  and its row in the handbook's table. `scripts/test-socket-proxy.sh` fails
+  when the proxy refused the agent anything.
 
 ## Style
 

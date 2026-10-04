@@ -168,8 +168,8 @@ If one fails, what depends on it is skipped and the rest finishes.
 ## A new version, and back again
 
 ```bash
-shipwick deploy --image ghcr.io/company/api:2.3.1     # rolling: one replica at a time
-shipwick rollback api                                  # the previous version, with its whole configuration
+shipwick deploy api --image ghcr.io/company/api:2.3.1  # api and nothing else; rolling: one replica at a time
+shipwick rollback api                                   # the previous version, with its whole configuration
 ```
 
 A deployment that fails is undone on its own. The version that works keeps

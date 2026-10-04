@@ -441,5 +441,6 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		Network:         e.networkStatus(info),
 		LogArchive:      e.logArchiveStatus(ctx),
 		Update:          e.updateStatus(),
+		Docker:          dockerStatus(info),
 	}, nil
 }

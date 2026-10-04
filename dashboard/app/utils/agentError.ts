@@ -10,6 +10,15 @@ export type ClientErrorCode = 'NETWORK' | 'BAD_RESPONSE'
  */
 export const RATE_LIMITED_MESSAGE = 'Too many failed attempts from this address; try again in a minute.'
 
+/**
+ * What a 403 APPLICATION_CALLER means here. The agent refuses whoever calls
+ * from a network applications are on, without looking at the token, and its
+ * own sentence is written for a container. The caller in this case is the
+ * dashboard server, so this says what is wrong with where it runs: it is
+ * never reported as a wrong token or a missing role.
+ */
+export const APPLICATION_CALLER_MESSAGE = 'The agent refuses this dashboard: it calls from a network applications are on. On the server, run the compose command again (handbook, Installation from a package).'
+
 /** The agent counts failures over a minute, so that is the longest a refusal lasts. */
 const RATE_LIMIT_WINDOW_MS = 60_000
 
@@ -63,9 +72,28 @@ export class AgentError extends Error {
     return this.status === 429 || this.code === 'RATE_LIMITED'
   }
 
-  /** The message to show: the agent's, except for a rate limit, which is worded for the person instead of the client. */
+  /** The agent refused the dashboard server for the network it calls from; the token was not looked at. */
+  get applicationCaller(): boolean {
+    return this.code === 'APPLICATION_CALLER'
+  }
+
+  /**
+   * The Docker daemon does not answer the agent. RUNTIME_UNAVAILABLE is also
+   * what an agent that is shutting down answers, so the agent's sentence
+   * decides: every request that needs Docker then fails with the same one.
+   */
+  get dockerSilent(): boolean {
+    return this.code === 'RUNTIME_UNAVAILABLE' && this.message.startsWith('Docker does not answer')
+  }
+
+  /**
+   * The message to show: the agent's, which for a silent Docker and a full
+   * disk already says what to do. A rate limit and a refusal of the dashboard
+   * itself are worded for the person instead of the client.
+   */
   get displayMessage(): string {
-    return this.rateLimited ? RATE_LIMITED_MESSAGE : this.message
+    if (this.rateLimited) return RATE_LIMITED_MESSAGE
+    return this.applicationCaller ? APPLICATION_CALLER_MESSAGE : this.message
   }
 
   /** The URL the proxy tried, when it told us. */
@@ -81,6 +109,22 @@ export class AgentError extends Error {
     return fields.filter((f): f is { field: string, message: string, expected?: string } =>
       typeof f === 'object' && f !== null && typeof (f as { field?: unknown }).field === 'string')
   }
+}
+
+/**
+ * The heading over a failure that left a page or a panel with nothing to
+ * show. `subject` is what failed to load, e.g. "applications"; it is named
+ * only where the failure is about it, and not where everything that asks the
+ * agent fails for the same reason.
+ */
+export function failureTitle(error: AgentError, subject: string): string {
+  if (error.unreachable) return 'Agent unreachable'
+  if (error.code === 'NETWORK') return 'Dashboard server unreachable'
+  if (error.applicationCaller) return 'Refused by the agent'
+  if (error.dockerSilent) return 'Docker does not answer'
+  if (error.code === 'DISK_FULL') return 'The server\'s disk is full'
+  if (error.notFound) return 'Not found'
+  return `Could not load ${subject}`
 }
 
 export function isAbortError(error: unknown): boolean {

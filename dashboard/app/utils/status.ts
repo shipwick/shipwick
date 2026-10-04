@@ -62,6 +62,19 @@ export function deploymentStatusDisplay(status: DeploymentStatus | string): Stat
   return DEPLOYMENT_STATUS[status as DeploymentStatus] ?? { tone: 'muted', label: titleCase(status) }
 }
 
+/**
+ * A state event of a deployment's timeline. Its message is the status the
+ * deployment entered and, for a failure, the cause after it: "FAILED: <cause>".
+ * The status is said in the page's words; the cause is the agent's sentence
+ * and stays as it was written, since it names keys and commands.
+ */
+export function stateEventLabel(message: string): string {
+  const at = message.indexOf(': ')
+  const status = at < 0 ? message : message.slice(0, at)
+  if (at < 0 || !(status in DEPLOYMENT_STATUS)) return deploymentStatusDisplay(message).label
+  return `${deploymentStatusDisplay(status).label}: ${message.slice(at + 2)}`
+}
+
 export function replicaHealthDisplay(health: ReplicaHealth | string): StatusDisplay {
   return REPLICA_HEALTH[health as ReplicaHealth] ?? UNKNOWN
 }

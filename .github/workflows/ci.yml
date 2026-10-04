@@ -103,6 +103,8 @@ jobs:
           docker compose config --quiet
           SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml config --quiet
           docker compose -f packaging/linux/compose.yml config --quiet
+          SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml -f configs/compose.socket-proxy.yml config --quiet
+          SHIPWICK_AGENT_TOKEN=ci XDG_RUNTIME_DIR=/run/user/1000 docker compose -f configs/compose.production.yml -f configs/compose.rootless.yml config --quiet
 
   scripts:
     name: Scripts
@@ -111,6 +113,126 @@ jobs:
       - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck -s sh scripts/*.sh packaging/winget/*.sh packaging/linux/*.sh
+
+  # The four jobs below are the wide ones. A pull request runs one cell of
+  # the installer's; main and a release run all of them. What each cell proves
+  # and what it cannot: CONTRIBUTING.md, "What CI runs where".
+
+  # The installer of this commit installs the latest release, with each
+  # distribution's own sh, awk, coreutils and downloader, against a daemon of
+  # its own (scripts/test-install.sh). The distribution is a container: its
+  # userland is tested, not its kernel and not its packaging of Docker.
+  installer:
+    name: Installer on ${{ matrix.distribution }} (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["ubuntu-24.04", "ubuntu-24.04-arm"]') }}
+        distribution: ${{ fromJSON(github.event_name == 'pull_request' && '["alpine:latest"]' || '["debian:12", "debian:13", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "rockylinux/rockylinux:8", "rockylinux/rockylinux:9", "rockylinux/rockylinux:10", "fedora:latest", "alpine:latest"]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install, then upgrade
+        env:
+          DISTRIBUTION: ${{ matrix.distribution }}
+        run: sh scripts/test-install.sh "$DISTRIBUTION"
+
+  # The same with the Engine a distribution packages itself instead of the
+  # current one. Debian 12's is 20.10 and comes without the Compose plugin,
+  # so the plugin is the current one there; 26.1, which Debian 13 packages,
+  # with the Compose that Docker's image of it carries.
+  installer-engines:
+    name: Installer on ${{ matrix.distribution }}, Docker ${{ matrix.docker }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: debian:12
+            docker: "20.10"
+            client: latest
+          - distribution: debian:13
+            docker: "26.1"
+            client: ""
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install, then upgrade
+        env:
+          DISTRIBUTION: ${{ matrix.distribution }}
+          SHIPWICK_TEST_DOCKER: ${{ matrix.docker }}
+          SHIPWICK_TEST_CLIENT: ${{ matrix.client }}
+        run: sh scripts/test-install.sh "$DISTRIBUTION"
+
+  # The integration tests against the Docker versions servers still run:
+  # 20.10 is what Debian 12 packages and 26.1 what Debian 13 does, 28 and 29
+  # are Docker's own last two. The daemon is Docker's image of that version,
+  # on the runner's kernel.
+  docker-versions:
+    name: Docker ${{ matrix.docker }} (${{ matrix.runner }})
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        docker: ["20.10", "26.1", "28", "29"]
+    services:
+      docker:
+        image: docker:${{ matrix.docker }}-dind
+        env:
+          DOCKER_TLS_CERTDIR: ""
+        ports: ["2375:2375"]
+        options: --privileged
+    env:
+      DOCKER_HOST: tcp://127.0.0.1:2375
+      DOCKER_VERSION: ${{ matrix.docker }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: The daemon is of the version this cell names
+        run: |
+          for _ in $(seq 60); do
+            docker version --format '{{.Server.Version}}' > version.txt 2>/dev/null && break
+            sleep 1
+          done
+          cat version.txt
+          grep -q "^$DOCKER_VERSION\." version.txt
+      # The tests skip when no daemon answers, which here would be a cell
+      # that passed without testing anything.
+      - name: Integration tests
+        run: |
+          go test -tags integration -count=1 -v -run Integration ./agent/internal/docker/ > tests.txt 2>&1 || { cat tests.txt; exit 1; }
+          grep -E '^(--- |ok|FAIL)' tests.txt
+          ! grep -q '^--- SKIP' tests.txt
+
+  # The same tests against the daemon and the kernel of GitHub's other Ubuntu
+  # images, and on arm64: the cells in which the kernel is not the one every
+  # other job runs on. ubuntu-24.04 on amd64 is the Go job above.
+  integration:
+    name: Integration (${{ matrix.runner }})
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Docker and kernel
+        run: |
+          docker version --format 'Docker {{.Server.Version}}'
+          uname -srm
+      - name: Integration tests
+        run: |
+          go test -tags integration -count=1 -v -run Integration ./agent/internal/docker/ > tests.txt 2>&1 || { cat tests.txt; exit 1; }
+          grep -E '^(--- |ok|FAIL)' tests.txt
+          ! grep -q '^--- SKIP' tests.txt
 
   packages:
     name: Packages
@@ -142,3 +264,24 @@ jobs:
             grep -Eq "^SHIPWICK_AGENT_TOKEN=[0-9a-f]{64}$" /etc/shipwick/agent.env
             test -f /usr/lib/systemd/system/shipwick-agent.service
             rpm -e shipwick-agent'
+
+  # An installation of each of the last two releases, put to use and then
+  # upgraded to this commit; for the last one, the way back as well. It
+  # installs releases and pulls their images, which is too much for every
+  # pull request: on main, and before a release.
+  upgrade:
+    name: Upgrade from the last two releases
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Upgrade, and back
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t releases < <(gh release list --repo shipwick/shipwick --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[].tagName')
+          sh scripts/test-upgrade.sh --back "${releases[0]}"
+          sh scripts/test-upgrade.sh "${releases[1]}"

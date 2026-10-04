@@ -137,6 +137,7 @@ func run() error {
 	if err := rt.EnsureNetwork(startCtx); err != nil {
 		return err
 	}
+	warnUnenforcedLimits(startCtx, rt, log)
 	// Health checks are HTTP requests to container addresses, so the agent
 	// has to be able to reach the application network.
 	attached, err := rt.AttachSelf(startCtx)
@@ -149,6 +150,12 @@ func run() error {
 		log.Warn("the agent runs outside Docker on " + runtime.GOOS + ", where container networks are unreachable from the host: " +
 			"applications with a health check will fail to deploy. Run the agent in a container (docker compose up)")
 	}
+	// After AttachSelf: where the API listens depends on the networks the agent
+	// is on.
+	reach, err := openAPI(startCtx, rt, cfg, log)
+	if err != nil {
+		return err
+	}
 
 	opts := deploy.Options{Logger: log, ReservedHostPorts: reservedHostPorts(cfg.ListenAddr), UploadDir: cfg.UploadDir()}
 	opts.LookupHost, opts.Network = lookupHost(cfg, log), networkOptions(cfg)
@@ -158,10 +165,15 @@ func run() error {
 			return fmt.Errorf("%s: %w", config.EnvCaddyAdmin, err)
 		}
 		opts.Proxy = caddy
+		// The address of a replica the agent stops is free for another
+		// application once the proxy has forgotten it, not seconds later.
+		rt.ForgetWith(caddy.Forget)
 		if cfg.AgentDomain != "" {
-			upstream, err := ownAddress(cfg.ListenAddr, attached)
-			if err != nil {
-				return err
+			upstream := reach.upstream
+			if upstream == "" {
+				if upstream, err = ownAddress(cfg.ListenAddr, attached); err != nil {
+					return err
+				}
 			}
 			// Streaming: log following must not be buffered by the proxy.
 			opts.ExtraRoutes = append(opts.ExtraRoutes, proxy.Route{Domain: cfg.AgentDomain, Upstreams: []string{upstream}, Streaming: true})
@@ -255,16 +267,17 @@ func run() error {
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 * 1024,
 	}
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
-	}
+	apiServer.UseReach(reach.guard)
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(listener) }()
+	serveErr := make(chan error, len(reach.listeners))
+	addrs := make([]string, 0, len(reach.listeners))
+	for _, listener := range reach.listeners {
+		go func() { serveErr <- srv.Serve(listener) }()
+		addrs = append(addrs, listener.Addr().String())
+	}
 	log.Info("shipwick agent started",
 		"version", version.Version,
-		"addr", listener.Addr().String(),
+		"addr", strings.Join(addrs, ", "),
 		"data_dir", cfg.DataDir,
 		"network", cfg.Network,
 	)

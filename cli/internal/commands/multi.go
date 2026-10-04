@@ -71,7 +71,7 @@ func (c *cli) loadMany(path string, envFiles []string) (entries []spec.Entry, va
 // deployMany deploys the applications of a shipwick.yaml in dependency order,
 // several at a time. It reports whether the command was about such a file at
 // all; if not, deploy proceeds as with any deploy.yaml.
-func (c *cli) deployMany(ctx context.Context, cmd *cobra.Command, files, envFiles []string, image string, noWait bool, parallel int) (bool, error) {
+func (c *cli) deployMany(ctx context.Context, cmd *cobra.Command, files, envFiles, names []string, image string, noWait bool, parallel int) (bool, error) {
 	file, err := c.manyFile(cmd, files)
 	if err != nil {
 		return true, err
@@ -79,16 +79,30 @@ func (c *cli) deployMany(ctx context.Context, cmd *cobra.Command, files, envFile
 	if file == "" {
 		return false, nil
 	}
-	if image != "" {
-		return true, fmt.Errorf("--image applies to one application, and %s describes several\n\nSet each image in the file, or deploy one application with its own deploy.yaml", file)
+	if image != "" && len(names) == 0 {
+		return true, fmt.Errorf("--image applies to one application, and %s describes several\n\nName the one it is for: shipwick deploy <name> --image %s", file, image)
 	}
 	if parallel < 1 {
 		return true, errors.New("--parallel must be at least 1")
 	}
 
-	entries, vars, err := c.loadMany(file, envFiles)
+	all, vars, err := c.loadMany(file, envFiles)
 	if err != nil {
 		return true, err
+	}
+	chosen, err := selectEntries(file, all, names)
+	if err != nil {
+		return true, err
+	}
+	if image != "" {
+		if err := chosen.withImage(image); err != nil {
+			return true, err
+		}
+	}
+	entries := chosen.entries
+	plain := make([][]string, len(entries))
+	for i, e := range entries {
+		plain[i] = vars.plainOf(chosen.index[i], e.App)
 	}
 	cl, err := c.connect()
 	if err != nil {
@@ -100,7 +114,10 @@ func (c *cli) deployMany(ctx context.Context, cmd *cobra.Command, files, envFile
 		c.ui.Println("Deploying " + c.ui.Styled(ui.Bold, entries[0].App.Name) + "...")
 		c.ui.Println()
 		c.ui.Success("Validated %s%s", file, substitutedNote(vars))
-		if o := c.deployEntry(ctx, cl, file, entries[0], c.ui, noWait); o != deployed && o != begun {
+		if line := chosen.assumedLine(); line != "" {
+			c.ui.Println(line)
+		}
+		if o := c.deployEntry(ctx, cl, file, entries[0], plain[0], c.ui, noWait); o != deployed && o != begun {
 			return true, ErrReported
 		}
 		return true, nil
@@ -109,13 +126,16 @@ func (c *cli) deployMany(ctx context.Context, cmd *cobra.Command, files, envFile
 	c.ui.Println(fmt.Sprintf("Deploying %d applications...", len(entries)))
 	c.ui.Println()
 	c.ui.Success("Validated %s%s", file, substitutedNote(vars))
+	if line := chosen.assumedLine(); line != "" {
+		c.ui.Println(line)
+	}
 	c.ui.Println()
-	return true, c.runMany(ctx, cl, file, entries, noWait, parallel)
+	return true, c.runMany(ctx, cl, file, entries, plain, noWait, parallel)
 }
 
 // runMany drives the schedule: one goroutine per application in flight, the
 // next one started as soon as a slot is free and its dependencies are done.
-func (c *cli) runMany(ctx context.Context, cl *client.Client, file string, entries []spec.Entry, noWait bool, parallel int) error {
+func (c *cli) runMany(ctx context.Context, cl *client.Client, file string, entries []spec.Entry, plain [][]string, noWait bool, parallel int) error {
 	names := make([]string, len(entries))
 	width := 0
 	for i, e := range entries {
@@ -143,7 +163,7 @@ func (c *cli) runMany(ctx context.Context, cl *client.Client, file string, entri
 		for _, i := range start {
 			prefixed := c.ui.Prefixed(c.ui.Styled(ui.Cyan, fmt.Sprintf("%-*s", width, names[i])) + "  ")
 			go func() {
-				results <- result{i, c.deployEntry(ctx, cl, file, entries[i], prefixed, noWait)}
+				results <- result{i, c.deployEntry(ctx, cl, file, entries[i], plain[i], prefixed, noWait)}
 			}()
 		}
 		if noWait {
@@ -177,7 +197,7 @@ func (c *cli) runMany(ctx context.Context, cl *client.Client, file string, entri
 
 // deployEntry deploys one application of a shipwick.yaml, narrating through
 // u, and says how it went. Nothing it returns is left unexplained on screen.
-func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e spec.Entry, u *ui.UI, noWait bool) outcome {
+func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e spec.Entry, plain []string, u *ui.UI, noWait bool) outcome {
 	// followDeployment narrates through c.ui; a copy of the command state
 	// with the prefixed UI keeps one implementation for one and for many.
 	cc := *c
@@ -190,14 +210,14 @@ func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e
 	var err error
 	if e.App.Build != nil {
 		if config, err = cc.buildImage(ctx, cl, file, e.Config, e.App); err != nil {
-			u.Failure("%s", strings.TrimSpace(Render(err)))
+			u.Failure("%s", strings.TrimSpace(Render(explainUnknownKeys(ctx, cl, err))))
 			return failed
 		}
 	}
 
 	started := c.now()
 	// A static entry uploads its folder first, as a deploy.yaml does.
-	d, err := cc.startDeployment(ctx, cl, file, e.App, config)
+	d, err := cc.startDeployment(ctx, cl, file, e.App, config, plain)
 	if err == nil {
 		err = cc.followDeployment(ctx, cl, d, started, noWait)
 	}
@@ -213,7 +233,7 @@ func (c *cli) deployEntry(ctx context.Context, cl *client.Client, file string, e
 	}
 	// The request itself was refused — the application is busy, the agent
 	// found a mistake — which followDeployment never got to explain.
-	u.Failure("%s", strings.TrimSpace(Render(err)))
+	u.Failure("%s", strings.TrimSpace(Render(explainUnknownKeys(ctx, cl, err))))
 	return failed
 }
 
@@ -338,8 +358,10 @@ func (s *schedule) summary(noWait bool) string {
 }
 
 // validateMany is validate for a shipwick.yaml: every application's summary
-// in file order, preceded by the order they deploy in.
-func (c *cli) validateMany(cmd *cobra.Command, files, envFiles []string) (bool, error) {
+// in file order, preceded by the order they deploy in. With names, the whole
+// file is still checked, and what is shown is what a deployment of those
+// names would do.
+func (c *cli) validateMany(cmd *cobra.Command, files, envFiles, names []string) (bool, error) {
 	file, err := c.manyFile(cmd, files)
 	if err != nil {
 		return true, err
@@ -347,10 +369,15 @@ func (c *cli) validateMany(cmd *cobra.Command, files, envFiles []string) (bool, 
 	if file == "" {
 		return false, nil
 	}
-	entries, vars, err := c.loadMany(file, envFiles)
+	all, vars, err := c.loadMany(file, envFiles)
 	if err != nil {
 		return true, err
 	}
+	chosen, err := selectEntries(file, all, names)
+	if err != nil {
+		return true, err
+	}
+	entries := chosen.entries
 	c.ui.Success("%s is valid%s", file, substitutedNote(vars))
 	c.ui.Println()
 	if len(entries) > 1 {
@@ -365,6 +392,10 @@ func (c *cli) validateMany(cmd *cobra.Command, files, envFiles []string) (bool, 
 			}
 			c.ui.Println(line)
 		}
+		c.ui.Println()
+	}
+	if len(chosen.assumed) > 0 {
+		c.ui.Println(fmt.Sprintf("shipwick deploy %s leaves out %s and assumes %s running.", strings.Join(names, " "), strings.Join(chosen.assumed, ", "), pluralIt(len(chosen.assumed))))
 		c.ui.Println()
 	}
 	for i, e := range entries {

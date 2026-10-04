@@ -335,6 +335,11 @@ type Engine struct {
 	archive logArchive
 	// updates is what the agent last learned about releases: see updates.go.
 	updates updateCheck
+	// unsettled are the deployments whose end the database refused to take:
+	// see settle.go. Guarded by mu.
+	unsettled []unsettled
+	// outage is since when the Docker daemon has not answered: see outage.go.
+	outage dockerOutage
 }
 
 // appLock records who holds an application, because the two kinds of holder
@@ -451,15 +456,7 @@ func (e *Engine) release(app string) {
 // as soon as the PENDING record exists; progress is observable through the
 // deployment's status and events.
 func (e *Engine) Deploy(ctx context.Context, app spec.App) (store.Deployment, error) {
-	return e.start(ctx, app.Name, func(ctx context.Context) (origin, error) {
-		// The one place a spec arrives from outside: whatever the CLI left
-		// for the server to fill in is filled in here, and stored filled in.
-		resolved, err := e.resolveSecrets(ctx, app)
-		if err != nil {
-			return origin{}, err
-		}
-		return origin{spec: resolved, kind: api.KindDeploy, references: spec.ReferencesOf(app)}, nil
-	})
+	return e.DeployWith(ctx, app, nil)
 }
 
 // admit is what every deployment passes before it is recorded, whatever its
@@ -570,11 +567,7 @@ func (e *Engine) launch(r *rollout) {
 			// and whoever polls it keeps polling.
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		if err := e.store.CompleteDeployment(ctx, d.ID, time.Now()); err != nil {
-			e.log.Error("could not stamp deployment completion", "deployment", d.ID, "error", err)
-		}
+		e.settle(r)
 	}()
 }
 

@@ -14,6 +14,13 @@ name: Release
 # digests are read back the way a release reads them. Use it after changing
 # this file, the Dockerfiles or the release scripts.
 #
+# What is published is signed, without a key: Sigstore issues a certificate
+# to the identity GitHub gives this run — this file, at the tag — and the
+# signatures are checked against exactly that identity before anything is
+# published. A dry run signs too, as this file at the branch it was started
+# from: an identity no verification of a release accepts. Provenance is
+# attested by a release only; an attestation is kept by GitHub for good.
+#
 # How to cut a release, step by step: docs/releasing.md
 
 on:
@@ -34,6 +41,10 @@ concurrency:
 env:
   VERSION: ${{ inputs.version || github.ref_name }}
   PUBLISH: ${{ github.event_name == 'push' }}
+  # Who the signatures must be from: for the tag v0.8.0,
+  # https://github.com/shipwick/shipwick/.github/workflows/release.yml@refs/tags/v0.8.0
+  SIGNER: https://github.com/${{ github.workflow_ref }}
+  SIGNER_ISSUER: https://token.actions.githubusercontent.com
 
 jobs:
   checks:
@@ -73,6 +84,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # The identity to sign with, and leave to record provenance.
+      id-token: write
+      attestations: write
     # A dry run pushes here instead of to ghcr.io; a release leaves it idle.
     services:
       registry:
@@ -131,14 +145,44 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: true
+          # For each platform a bill of materials (SPDX, written by BuildKit
+          # from the image's files) and the full record of the build. Both
+          # are manifests of the list the tag points at, so the signature of
+          # the list covers them.
+          sbom: true
+          provenance: mode=max
       # Read back from the registry, not taken from the build: these lines say
       # what a server that pulls the tag is given. `shipwick server bundle`
       # and the installer hold images against them.
       - name: Digests of what was pushed
+        id: digests
         run: |
           sh scripts/image-digests.sh "$REGISTRY/shipwick/${{ matrix.image }}:${VERSION#v}" \
             "ghcr.io/shipwick/${{ matrix.image }}:${VERSION#v}" > "image-digests-${{ matrix.image }}.txt"
           cat "image-digests-${{ matrix.image }}.txt"
+          echo "index=$(awk '$2 == "index" { print $3 }' "image-digests-${{ matrix.image }}.txt")" >> "$GITHUB_OUTPUT"
+      # No major tag to follow: the installer is pinned to a release, which
+      # also decides the cosign it installs.
+      - uses: sigstore/cosign-installer@v4.1.2
+      # By digest: the manifest list, which is what a tag resolves to and what
+      # image-digests.txt calls the index. A tag can be moved; this cannot.
+      - name: Sign the image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/shipwick/${{ matrix.image }}@${{ steps.digests.outputs.index }}
+        run: |
+          cosign sign --yes "$IMAGE"
+          cosign verify "$IMAGE" --certificate-identity "$SIGNER" --certificate-oidc-issuer "$SIGNER_ISSUER" > /dev/null
+      # Kept by GitHub and next to the image: which commit, which workflow,
+      # which run. No storage record: that is an inventory for organizations,
+      # and would need a permission of its own.
+      - name: Provenance of the image
+        if: env.PUBLISH == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/shipwick/${{ matrix.image }}
+          subject-digest: ${{ steps.digests.outputs.index }}
+          push-to-registry: true
+          create-storage-record: false
       - uses: actions/upload-artifact@v7
         with:
           name: image-digests-${{ matrix.image }}
@@ -153,6 +197,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The identity to sign with, and leave to record provenance.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -178,6 +225,24 @@ jobs:
           sha256sum image-digests.txt >> checksums.txt
           sha256sum -c checksums.txt
           cat image-digests.txt
+      - uses: sigstore/cosign-installer@v4.1.2
+      # One signature for the whole release: checksums.txt names every file,
+      # the digests of the images among them, and is complete only now. The
+      # bundle holds the signature, the certificate and the transparency
+      # log's entry; it is a file of the release and, being the signature of
+      # checksums.txt, the one file that is not listed in it.
+      - name: Sign checksums.txt
+        run: |
+          cosign sign-blob --yes --bundle checksums.txt.sigstore.json dist/checksums.txt
+          cosign verify-blob --bundle checksums.txt.sigstore.json \
+            --certificate-identity "$SIGNER" --certificate-oidc-issuer "$SIGNER_ISSUER" dist/checksums.txt
+          mv checksums.txt.sigstore.json dist/
+      # One attestation whose subjects are the files checksums.txt lists.
+      - name: Provenance of the release's files
+        if: env.PUBLISH == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
       - name: Release notes from CHANGELOG.md
         run: sh scripts/release-notes.sh "$VERSION" > notes.md
       - name: Publish

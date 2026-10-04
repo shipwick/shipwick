@@ -2,7 +2,7 @@
 import type { BackupRun, BackupStatus } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
-import { durationBetween, formatBytes, formatDuration } from '~/utils/format'
+import { durationBetween, formatAbsoluteUtc, formatBytes, formatDuration } from '~/utils/format'
 import { backupBusy, backupSize, backupStatusDisplay, backupUsable, describeDestination, describeDestinations, stateBackupDisplay, triggerLabel } from '~/utils/backups'
 import { roleHint } from '~/utils/roles'
 
@@ -73,10 +73,10 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
   <UiPanel title="Backups">
     <template #actions>
       <!-- Admin only, and rarely needed: after the agent's state was restored, it finds the backups taken since. -->
-      <UiButton v-if="props.admin" size="sm" variant="ghost" title="Record backups that are in the backup destination and missing from the agent's lists" @click="adopting = true">
+      <UiButton v-if="props.admin" size="sm" variant="ghost" hint="Record backups that are in the backup destination and missing from the agent's lists" @click="adopting = true">
         Adopt backups…
       </UiButton>
-      <UiButton size="sm" :disabled="!props.admin || !display.possible || anyBusy" :pending="starting" :title="startTitle" @click="backUpNow">
+      <UiButton size="sm" :disabled="!props.admin || !display.possible || anyBusy" :pending="starting" :hint="startTitle" @click="backUpNow">
         <UiIcon name="download" :size="12" />
         Back up state now
       </UiButton>
@@ -104,7 +104,7 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
           The agent's own state
         </dt>
         <dd class="mt-0.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-          <StatusBadge :tone="display.tone" :label="display.label" :raw="props.status.state_last_at ?? undefined" />
+          <StatusBadge :tone="display.tone" :label="display.label" :detail="props.status.state_last_at ? formatAbsoluteUtc(props.status.state_last_at) : undefined" />
           <span class="min-w-0 break-words" :class="display.tone === 'danger' ? 'text-danger' : display.tone === 'warn' ? 'text-warn' : 'text-fg-muted'">{{ display.detail }}</span>
         </dd>
       </div>
@@ -143,15 +143,15 @@ const duration = (r: BackupRun) => (r.completed_at ? formatDuration(durationBetw
               <td data-label="Started by" class="text-fg-muted">
                 {{ triggerLabel(r.trigger, 'daily schedule') }}
               </td>
-              <td data-label="Size" class="mono right text-fg-muted" :title="r.volumes.map(v => `${v.volume} ${formatBytes(v.size_bytes)}`).join(' · ') || undefined">
-                {{ backupUsable(r) ? formatBytes(backupSize(r)) : '—' }}
+              <td data-label="Size" class="mono right text-fg-muted">
+                <UiTooltip :text="r.volumes.map(v => `${v.volume} ${formatBytes(v.size_bytes)}`).join(' · ')">{{ backupUsable(r) ? formatBytes(backupSize(r)) : '—' }}</UiTooltip>
               </td>
               <td data-label="Kept in" class="mono text-fg-muted">
                 {{ describeDestinations(r) }}
               </td>
               <td data-label="Status">
                 <StatusBadge v-bind="backupStatusDisplay(r)" :raw="r.status" />
-                <span v-if="r.status === 'failed' && r.error" class="block max-w-sm truncate text-xs text-danger" :title="r.error">{{ r.error }}</span>
+                <span v-if="r.status === 'failed' && r.error" class="block max-w-sm break-words text-xs text-danger">{{ r.error }}</span>
               </td>
               <td data-label="Took" class="mono right text-fg-muted">
                 {{ duration(r) }}

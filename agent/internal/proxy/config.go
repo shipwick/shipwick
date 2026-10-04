@@ -121,7 +121,8 @@ const (
 	// is gone to the next one that starts, so an old answer may name a
 	// container of another application; the agent keeps such an address
 	// unused for a little longer than this (docker.AddressRest), and the two
-	// must be changed together.
+	// must be changed together. A replica the agent stops itself does not
+	// wait that out: the proxy is told to forget it (Forget).
 	resolveKeep = "2s"
 
 	// sourceKept is the source of replicas in Shipwick's Caddy (caddy/ in
@@ -530,7 +531,9 @@ func handlerFor(r Route) obj {
 			"protocol": "http",
 			// 2. ...provided the failure is noticed in time. Replicas are one
 			//    bridge hop away; a connection that takes half a second is not
-			//    going to happen.
+			//    going to happen. An address the proxy was told to forget
+			//    stays unused for as long (docker.ForgottenRest): a
+			//    connection on its way there has been given up by then.
 			"dial_timeout": "500ms",
 			// Caddy would send requests to replicas through the proxy its
 			// environment names (HTTP_PROXY), which is there for the

@@ -1,0 +1,28 @@
+# A service with a volume, a published port, a hook, a job and backups:
+# everything a database asks of the server, without a database.
+name: data
+image: alpine:3.22
+command: ["sh", "-c", "date >> /data/started; exec nc -lk -p 5000 -e echo hello from data"]
+init: true
+volumes:
+  - name: files
+    path: /data
+publish:
+  - port: 5000
+    host: 15000
+    address: 127.0.0.1
+health:
+  tcp: 5000
+  interval: 2s
+pre_deploy:
+  command: ["sh", "-c", "echo before the replicas"]
+jobs:
+  - name: tick
+    schedule: "0 0 1 1 *"
+    command: ["sh", "-c", "echo tick"]
+backups:
+  schedule: "0 0 1 1 *"
+  before: ["sh", "-c", "date > /data/dumped"]
+deploy:
+  strategy: recreate
+  stop_timeout: 2s

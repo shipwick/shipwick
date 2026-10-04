@@ -82,33 +82,33 @@ watch(() => props.application, () => {
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label" title="Answers with a 5xx status: the application or the proxy failed">
-            Server errors
+          <dt class="label">
+            <UiTooltip text="Answers with a 5xx status: the application or the proxy failed">Server errors</UiTooltip>
           </dt>
-          <dd class="mono mt-0.5" :class="totals.status_5xx > 0 ? 'text-danger' : ''" :title="`${formatCount(totals.status_5xx)} of ${formatCount(totals.requests)} requests`">
+          <dd class="mono mt-0.5" :class="totals.status_5xx > 0 ? 'text-danger' : ''">
             {{ errorShare(totals) }}
             <span v-if="totals.status_5xx > 0" class="text-fg-subtle">· {{ formatCount(totals.status_5xx) }}</span>
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label" title="Answers with a 4xx status: the request was refused, such as 404 or 401">
-            Refused (4xx)
+          <dt class="label">
+            <UiTooltip text="Answers with a 4xx status: the request was refused, such as 404 or 401">Refused (4xx)</UiTooltip>
           </dt>
           <dd class="mono mt-0.5">
             {{ formatCount(totals.status_4xx) }}
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label" title="Half of the requests were answered within the first time (p50), 95 in 100 within the second (p95)">
-            Response time
+          <dt class="label">
+            <UiTooltip text="Half of the requests were answered within the first time (p50), 95 in 100 within the second (p95)">Response time</UiTooltip>
           </dt>
           <dd class="mono mt-0.5">
             {{ any ? `${formatLatency(totals.p50_ms)} typical · ${formatLatency(totals.p95_ms)} p95` : '—' }}
           </dd>
         </div>
         <div class="bg-bg px-4 py-2.5">
-          <dt class="label" title="99 in 100 requests were answered within this time (p99)">
-            Slowest 1%
+          <dt class="label">
+            <UiTooltip text="99 in 100 requests were answered within this time (p99)">Slowest 1%</UiTooltip>
           </dt>
           <dd class="mono mt-0.5">
             {{ any ? formatLatency(totals.p99_ms) : '—' }}
@@ -116,9 +116,9 @@ watch(() => props.application, () => {
         </div>
         <div class="bg-bg px-4 py-2.5">
           <dt class="label">
-            Data sent
+            <UiTooltip text="Response bodies as sent, after compression">Data sent</UiTooltip>
           </dt>
-          <dd class="mono mt-0.5" title="Response bodies as sent, after compression">
+          <dd class="mono mt-0.5">
             {{ formatBytes(totals.bytes) }}
           </dd>
         </div>

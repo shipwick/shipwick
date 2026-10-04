@@ -28,6 +28,9 @@ fi
 
 COMPOSE_FILE="compose.yml"
 
+# Set, nothing is installed from a release whose signature was not verified.
+REQUIRE_SIGNATURE="${SHIPWICK_REQUIRE_SIGNATURE:-}"
+
 # A bundle made by `shipwick server bundle` and copied here: a directory, or
 # its .tar.gz. With one, nothing is downloaded and nothing is pulled. Run from
 # inside an unpacked bundle, the files next door are the bundle.
@@ -99,8 +102,14 @@ fetch_release_asset() {
         # damaged on the way here is refused like a bad download.
         [ -f "$BUNDLE/$1" ] || return 1
         cp "$BUNDLE/$1" "$2"
-        [ -f "$WORK_DIR/checksums.txt" ] || cp "$BUNDLE/checksums.txt" "$WORK_DIR/checksums.txt" 2>/dev/null \
-            || { rm -f "$2"; die "The bundle has no checksums.txt; refusing to install unverified files."; }
+        if [ ! -f "$WORK_DIR/checksums.txt" ]; then
+            cp "$BUNDLE/checksums.txt" "$WORK_DIR/checksums.txt" 2>/dev/null \
+                || { rm -f "$2"; die "The bundle has no checksums.txt; refusing to install unverified files."; }
+            # A bundle's signature is checked where the bundle is made: cosign
+            # asks Sigstore for the keys to trust, and from here nothing
+            # answers. Whoever requires it has given cosign those keys.
+            [ -z "$REQUIRE_SIGNATURE" ] || verify_signature
+        fi
     else
         download "$(release_url "$1")" "$2" 2>/dev/null || return 1
     fi
@@ -108,6 +117,7 @@ fetch_release_asset() {
     if [ ! -f "$WORK_DIR/checksums.txt" ]; then
         download "$(release_url checksums.txt)" "$WORK_DIR/checksums.txt" \
             || { rm -f "$2"; die "Could not download checksums.txt; refusing to install unverified files."; }
+        verify_signature
     fi
     expected="$(awk -v f="$1" '$2 == f || $2 == "*"f { print $1 }' "$WORK_DIR/checksums.txt")"
     [ -n "$expected" ] || { rm -f "$2"; die "checksums.txt has no entry for $1."; }
@@ -122,6 +132,54 @@ sha256_of() {
     else
         shasum -a 256 "$1" | awk '{print $1}'
     fi
+}
+
+# verify_signature holds checksums.txt against the signature the release
+# workflow made of it, checksums.txt.sigstore.json. The checksums say that the
+# files are the ones the release lists; the signature says who wrote the list:
+# the workflow .github/workflows/release.yml of this repository, run for a
+# version tag, and nobody who merely got to change the release's files.
+#
+# Verifying takes cosign, which a new server does not have and need not have:
+# without it the installer says that it did not check, and goes on. With
+# SHIPWICK_REQUIRE_SIGNATURE set, anything short of a verified signature stops
+# the installation: that is the only setting under which a release whose
+# signature was taken away is refused rather than reported.
+verify_signature() {
+    signature="$WORK_DIR/checksums.txt.sigstore.json"
+    if ! have cosign; then
+        [ -z "$REQUIRE_SIGNATURE" ] || die "SHIPWICK_REQUIRE_SIGNATURE is set and cosign is not installed: the release's signature cannot be checked.
+  Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/) and run the installer again. Nothing was installed."
+        info "The release's signature was not checked: cosign is not installed. Every file is checked against the release's checksums."
+        return 0
+    fi
+    if [ -n "$BUNDLE" ]; then
+        if [ -f "$BUNDLE/checksums.txt.sigstore.json" ]; then cp "$BUNDLE/checksums.txt.sigstore.json" "$signature"; fi
+    else
+        download "$(release_url checksums.txt.sigstore.json)" "$signature" 2>/dev/null || true
+    fi
+    if [ ! -f "$signature" ]; then
+        [ -z "$REQUIRE_SIGNATURE" ] || die "SHIPWICK_REQUIRE_SIGNATURE is set and this release has no signature (checksums.txt.sigstore.json).
+  Releases before 0.8.0 were not signed. Nothing was installed."
+        warn "This release has no signature to check: releases before 0.8.0 were not signed. Every file is checked against its checksums."
+        return 0
+    fi
+    # A named version must be signed for that tag. "latest" is whichever
+    # release GitHub calls so, and never a pre-release: any plain version tag.
+    workflow="https://github.com/$REPO/.github/workflows/release.yml@refs/tags/"
+    if [ "$VERSION" = "latest" ]; then
+        set -- --certificate-identity-regexp "^$(printf '%s' "$workflow" | sed 's/[.]/[.]/g')v[0-9]+[.][0-9]+[.][0-9]+\$"
+    else
+        set -- --certificate-identity "$workflow$VERSION"
+    fi
+    if ! cosign verify-blob --bundle "$signature" "$@" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        "$WORK_DIR/checksums.txt" >"$WORK_DIR/cosign.out" 2>&1; then
+        die "The signature of the release's checksums.txt did not verify as one made by the release workflow of github.com/$REPO.
+  cosign: $(tail -n 1 "$WORK_DIR/cosign.out")
+  cosign 2.4 or later reads this signature; an older one fails here whatever the file. Nothing was installed."
+    fi
+    step "The release is signed by the release workflow of github.com/$REPO"
 }
 
 # --- a bundle ---------------------------------------------------------------
@@ -306,6 +364,19 @@ check_server_requirements() {
     step "Docker $(docker version --format '{{.Server.Version}}') with Compose $(docker compose version --short)"
 }
 
+# check_compose_file FILE — the Compose on this server reads the release's
+# compose file. Asked of Compose itself rather than of its version number,
+# and before the file replaces the one in use: a Compose before 2.23.1, such
+# as the 2.17 that Docker's images of 20.10 carry, rejects it, and said by
+# `docker compose pull` that reads as a failed pull.
+check_compose_file() {
+    said="$(SHIPWICK_AGENT_TOKEN=check docker compose -f "$1" config --quiet 2>&1)" && return 0
+    die "Docker Compose $(docker compose version --short) does not accept this release's compose file:
+  $(printf '%s\n' "$said" | tail -n 1)
+  A Compose older than 2.23.1 cannot read it: upgrade the Compose plugin ('docker-compose-plugin' from Docker's
+  repository) and run this installer again. The compose file in use was not replaced."
+}
+
 # setting NAME DEFAULT — NAME from the environment, else from an existing .env.
 setting() {
     eval "value=\${$1:-}"
@@ -396,7 +467,11 @@ install_server() {
     ( umask 077; mkdir -p "$INSTALL_DIR" )
     chmod 0700 "$INSTALL_DIR"
     [ -z "$BUNDLE" ] || load_bundle_images
+    # Kept for a release that turns out to be unable to run here: see
+    # start_previous_release.
+    [ ! -f "$INSTALL_DIR/$COMPOSE_FILE" ] || cp "$INSTALL_DIR/$COMPOSE_FILE" "$WORK_DIR/compose.previous"
     if [ -n "$COMPOSE_SOURCE" ] && [ -z "$BUNDLE" ]; then
+        check_compose_file "$COMPOSE_SOURCE"
         cp "$COMPOSE_SOURCE" "$INSTALL_DIR/$COMPOSE_FILE"
     else
         # The release's compose file pins the images to the release's version.
@@ -406,6 +481,7 @@ install_server() {
             || die "Could not download $(release_url compose.production.yml)
   Behind a proxy, set HTTPS_PROXY for this installer (with sudo:  sudo -E sh). On a server with no way out,
   install from a bundle made elsewhere with:  shipwick server bundle"
+        check_compose_file "$WORK_DIR/compose.yml"
         mv "$WORK_DIR/compose.yml" "$INSTALL_DIR/$COMPOSE_FILE"
     fi
     step "Installed $INSTALL_DIR/$COMPOSE_FILE"
@@ -449,6 +525,7 @@ install_server() {
     printf '%s' "  Waiting for the agent"
     i=0
     until docker compose exec -T agent shipwick-agent healthcheck >/dev/null 2>&1; do
+        start_previous_release
         i=$((i + 1))
         if [ "$i" -ge 60 ]; then
             printf '\n'
@@ -478,6 +555,24 @@ forget_unreadable_proxy_config() {
         caddy validate --config "$SAVED" 2>&1 | grep -q "unknown module" || exit 0
         rm -f "$SAVED" && echo forgotten' 2>/dev/null | grep -q forgotten || return 0
     warn "The proxy's saved configuration was written by a newer release and was removed; the agent loads the routes again."
+}
+
+# start_previous_release is for going back to a release whose agent cannot
+# read the database: a newer release added to it, and an older agent refuses
+# what it does not know rather than guess. It would be restarted forever, with
+# nothing to load the routes into the proxy. The release that ran is started
+# again from its compose file, and the reason is said.
+start_previous_release() {
+    [ -f "$WORK_DIR/compose.previous" ] || return 0
+    docker compose logs --no-log-prefix --tail 5 agent 2>&1 | grep -q 'is newer than this agent supports' || return 0
+    printf '\n'
+    cp "$WORK_DIR/compose.previous" "$INSTALL_DIR/$COMPOSE_FILE"
+    docker compose up -d --remove-orphans \
+        || die "The agent of this release cannot read the database, and the release that ran before could not be started again.
+  Run the installer of the newer release:  curl -fsSL https://get.shipwick.com | sh"
+    die "The agent of this release cannot read the database: the release that ran here has added to it.
+  That release was started again; the proxy was replaced twice, and requests went unanswered for some seconds.
+  Going back takes the agent's data as it was before the upgrade: docs/handbook.md, \"Upgrading\"."
 }
 
 # daemon_proxy_advice is for a pull that failed while this installer has a
@@ -634,6 +729,9 @@ user who runs the installer: the URL and the token are saved as a context, so
 
 Environment:
   SHIPWICK_VERSION            release to install (default: latest)
+  SHIPWICK_REQUIRE_SIGNATURE  set to 1: install nothing unless cosign is here and verifies the
+                              release's signature (default: verified when cosign is installed,
+                              said when it is not)
   SHIPWICK_AGENT_DOMAIN       hostname for the API; asked for when run in a terminal
   SHIPWICK_DASHBOARD_DOMAIN   hostname for the dashboard; likewise
   SHIPWICK_WEBHOOK_URL        where the agent posts notifications (optional)

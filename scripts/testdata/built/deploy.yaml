@@ -1,0 +1,6 @@
+# An image built where the CLI runs and sent through the agent.
+name: built
+build: .
+command: ["sleep", "86400"]
+deploy:
+  stop_timeout: 1s

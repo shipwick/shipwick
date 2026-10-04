@@ -5,6 +5,8 @@
 # before this one starts. `shipwick deploy` uses this file when there is no
 # deploy.yaml next to it, and deploys the applications whose dependencies are
 # done at the same time, up to four at once (--parallel N).
+# `shipwick deploy api` deploys the named application and nothing else; what it
+# waits for and is not named with it is assumed to be running.
 #
 # ${NAME} placeholders work in every entry; names must be unique in the file.
 apps:

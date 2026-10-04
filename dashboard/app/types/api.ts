@@ -91,7 +91,12 @@ export type ApiErrorCode =
   | 'PROMOTION_IN_PROGRESS'
   /** The bucket holds another installation's backups; nothing in it is adopted. */
   | 'FOREIGN_BUCKET'
+  /** The agent is shutting down or, from 0.8, the Docker daemon does not answer; the message says which, and for Docker where to look. Answered 503. */
   | 'RUNTIME_UNAVAILABLE'
+  /** The server's disk has no room for what the request writes; nothing was changed. Answered 507, from 0.8. */
+  | 'DISK_FULL'
+  /** The request came from a network applications are on; answered 403 without looking at the token, from 0.8. */
+  | 'APPLICATION_CALLER'
   | 'INTERNAL_ERROR'
   // Added by the dashboard's server-side proxy, never by the agent:
   | 'AGENT_UNREACHABLE'
@@ -312,6 +317,8 @@ export interface AppSpec {
   logging?: SpecLogging
   /** Replicas, jobs and commands run under an init process that passes signals on and reaps what they leave behind; absent when unset. */
   init?: boolean
+  /** What the containers go without; absent without the block, and for a block that asks for nothing. Absent on agents before 0.8. */
+  security?: SpecSecurity
   /** The part of the domain the application serves; absent when it serves all of it. */
   path?: string
   proxy?: SpecProxy
@@ -319,6 +326,28 @@ export interface AppSpec {
   restart: { policy: 'always' | 'on-failure' | 'never' | string }
   /** `stop_timeout`: how long a replica gets after SIGTERM before it is killed, a Go duration ("2m0s"); absent means the agent's default. */
   deploy: { strategy: 'rolling' | 'recreate' | string, stop_timeout?: string }
+}
+
+/** The `security` block: every key takes something away from the containers, none adds. */
+export interface SpecSecurity {
+  /** The root filesystem cannot be written; volumes and `tmpfs` paths can. Absent when false. */
+  read_only?: boolean
+  /** Directories kept in memory, empty at every start. Absent when there are none. */
+  tmpfs?: SpecTmpfs[]
+  /**
+   * The Linux capabilities the containers keep, upper case without CAP_, sorted.
+   * Three states: absent keeps Docker's default set, [] keeps none, a list
+   * keeps those. Absent is never read as [].
+   */
+  capabilities?: string[]
+  /** A container that would run as root is not started. Absent when false. */
+  non_root?: boolean
+}
+
+export interface SpecTmpfs {
+  path: string
+  /** 67108864 (64 MB) when the document named no size. */
+  size_bytes: number
 }
 
 export interface SpecHook {
@@ -534,6 +563,21 @@ export interface Server {
   log_archive?: LogArchiveStatus
   /** Whether a newer release exists, as the agent last heard. Absent on agents before 0.7: treated as a check that is off. */
   update?: UpdateStatus
+  /** Present and true when the containers of applications can reach the API, so that only the token keeps them out. Absent otherwise, and on agents before 0.8, which never say. */
+  open_to_applications?: boolean
+  /** What the Docker daemon says of itself. Absent on agents before 0.8: nothing is known then, least of all that limits are enforced. */
+  docker?: DockerStatus
+}
+
+/** A limit of `resources` in deploy.yaml, as the agent names the ones Docker does not apply. */
+export type ResourceLimit = 'memory' | 'cpu'
+
+/** The `docker` object of GET /server. */
+export interface DockerStatus {
+  /** The daemon runs as an ordinary user. */
+  rootless: boolean
+  /** The limits the daemon accepts and does not apply: it has no cgroup controller for them. [] where it applies both. */
+  unenforced_limits: (ResourceLimit | string)[]
 }
 
 export interface SignInStatus {
@@ -601,17 +645,18 @@ export interface NetworkStatus {
   acme_directory: string
 }
 
-export type AlertKind = 'memory' | 'disk' | 'restarts' | 'unhealthy'
+/** `docker`: the Docker daemon has not answered for 30 seconds. From 0.8. */
+export type AlertKind = 'memory' | 'disk' | 'restarts' | 'unhealthy' | 'docker'
 export type AlertSeverity = 'warning' | 'critical'
 
 /** A condition that holds right now and that somebody should look at. */
 export interface Alert {
   kind: AlertKind | string
-  /** Only `disk` and `unhealthy` become critical. */
+  /** Only `disk` and `unhealthy` become critical; `docker` always is. */
   severity: AlertSeverity | string
-  /** "" for `disk`. */
+  /** "" for `disk` and `docker`. */
   application: string
-  /** 0 for `disk` and `unhealthy`. */
+  /** 0 for `disk`, `unhealthy` and `docker`. */
   replica: number
   /** A complete sentence, with what to do about it. */
   message: string
@@ -659,6 +704,13 @@ export interface ApplicationMetrics {
   /** 0 when unlimited. */
   memory_limit_bytes: number
   replicas: ReplicaMetrics[]
+  /**
+   * The limits Docker on this server does not apply: the limits above are
+   * then what deploy.yaml asks for and nothing holds a replica to. With both
+   * listed the usage is that of everything the daemon runs, not the replica's.
+   * Absent where Docker applies them, and on agents before 0.8.
+   */
+  unenforced_limits?: (ResourceLimit | string)[]
 }
 
 /** Accepted values of `since` on the metrics history endpoint. */
@@ -1162,7 +1214,8 @@ export interface ExportRequest {
 /**
  * GET /applications/:name/config: the deploy.yaml of the active deployment,
  * for those who may deploy the application. A value that referred to a stored
- * secret comes back as that reference; every other env value and basic-auth
+ * secret comes back as that reference; an env value whose deployment called
+ * it plain comes back as it is; every other env value and basic-auth
  * password is "********", and a document that still holds one is refused.
  */
 export interface ApplicationConfig {
@@ -1176,6 +1229,13 @@ export interface ApplicationConfig {
   masked: string[]
   /** Only for a static application: what POST /applications?static= takes to serve the same folder again. */
   static_digest?: string
+  /**
+   * The env values the document holds as they are, `env.<NAME>`: whoever
+   * deployed them said they stood in the file in plain sight. A deployment
+   * that names them again in `?plain=` keeps them so. Absent from an agent
+   * before 0.8, which masks them all.
+   */
+  plain?: string[]
 }
 
 export type LogKind = 'replica' | 'run'

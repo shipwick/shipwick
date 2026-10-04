@@ -17,11 +17,11 @@ for a machine with an Arm processor, from the
 | Command | |
 |---|---|
 | `shipwick init [dir]` | Recognise the project (Nuxt, Next, SvelteKit, Remix, Astro, Node, .NET, Go, Python, or a folder of static files) and write a `Dockerfile`, a `.dockerignore` and a `deploy.yaml` with `build: .` or `static: <dir>`; existing Dockerfiles are kept. A Node project whose Dockerfile it writes gets `init: true`. Otherwise prompts in a terminal; `--image` skips detection and makes it non-interactive, `--static <dir>` forces a static site. Next to a `shipwick.yaml` it appends an entry to that file instead, for the project here or in `dir` |
-| `shipwick validate` | Check `deploy.yaml` offline — placeholders filled in, defaults applied — and show how it will be applied. A `shipwick.yaml` entry by entry, with the order the applications deploy in |
-| `shipwick deploy` | Deploy and wait for the result. With `build:` in the file, builds the image here with `docker build` and sends it to the server first; a `static:` folder is uploaded first, then deployed. `--image` overrides the image (CI; not with `build:`), `--no-wait` returns at once, `--verbose` shows everything `docker build` prints, `--env-file` supplies `${NAME}` values. A `shipwick.yaml` deploys several applications at the same time, `--parallel N` at once; `-f` repeated deploys several `deploy.yaml` in order. Without a `deploy.yaml`, in a terminal, it runs `init` first |
+| `shipwick validate [name...]` | Check `deploy.yaml` offline — placeholders filled in, defaults applied — and show how it will be applied. A `shipwick.yaml` entry by entry, with the order the applications deploy in; with names, the whole file is checked and those applications are shown |
+| `shipwick deploy [name...]` | Deploy and wait for the result. With `build:` in the file, builds the image here with `docker build` and sends it to the server first; a `static:` folder is uploaded first, then deployed. `--image` overrides the image (CI; not with `build:`), `--no-wait` returns at once, `--verbose` shows everything `docker build` prints, `--env-file` supplies `${NAME}` values. A `shipwick.yaml` deploys several applications at the same time, `--parallel N` at once; names deploy those applications of it and nothing else (`shipwick deploy api --image …` in a pipeline), and what they wait for and is left out is assumed to be running; `-f` repeated deploys several `deploy.yaml` in order. Without a `deploy.yaml`, in a terminal, it runs `init` first |
 | `shipwick rollback [app]` | Go back to the previous successful deployment, or `--to N` (the #number from `status`). A full, ordinary deployment of the stored configuration |
 | `shipwick redeploy [app]` | Deploy the running configuration again, `--image` to change the image. Needs no `deploy.yaml` |
-| `shipwick config <app> [-o file]` | Print the `deploy.yaml` of what the application runs, or write it to a file (`--force` to overwrite): the file back when it was lost. A value that referred to a secret on the server is that `${NAME}` again; any other env value or basic-auth password is `"********"` and is listed on standard error — write it again or store it as a secret, `deploy` refuses the file until then. Needs a token that may deploy the application |
+| `shipwick config <app> [-o file]` | Print the `deploy.yaml` of what the application runs, or write it to a file (`--force` to overwrite): the file back when it was lost. A value that referred to a secret on the server is that `${NAME}` again, and an env value that stood in the deployed file as it is comes back as it is; one that `deploy` filled in from the environment or `--env-file`, and a basic-auth password, is `"********"` and is listed on standard error — write it again or store it as a secret, `deploy` refuses the file until then. Needs a token that may deploy the application |
 | `shipwick status [app]` | Version, CPU and memory, replica health and restart counts, recent deployments, and what the supervisor has been doing. A replaced container that is still on its way out is listed as `stopping`, below the replicas. A hostname whose certificate is being obtained, waiting for DNS or about to expire gets a line; `--verbose` lists every hostname's certificate |
 | `shipwick ps` | All applications on the server. One with a certificate that is not in order, or with active alerts, says so at the end of its line: `certificate waiting for DNS, 2 alerts` |
 | `shipwick logs [app]` | `-n 100` lines, `-f` to follow, `-t` for timestamps |
@@ -41,9 +41,9 @@ for a machine with an Arm processor, from the
 | `shipwick standby` | What a standby server holds: the applications that were imported stopped, and how its scheduled import from the bucket is doing. `standby pull` imports the newest export now; `standby promote` starts the applications in order, follows the promotion across a lost connection or a restart of the agent, and prints the DNS records to change (asks; `--yes`) |
 | `shipwick server status` | Is the agent reachable, what does it run on, how full is its disk, which token and role am I using, which alerts are active, and whether a newer release exists (the agent asks GitHub once a day) |
 | `shipwick server install <user@host>` | Install or upgrade the server over SSH, from here: Docker when it is missing, then the installer with `--agent-domain` and `--dashboard-domain`; saves the token as a context (`--context` names it) and prints the DNS records to create. `--version` picks a release |
-| `shipwick server bundle` | Make one file that installs or upgrades a server with no connection: the release's compose file, installer and checksums, the `shipwick` binary and the three images for `--arch amd64` or `arm64`. `--version` picks a release, `-o` the file. The archive of images is checked against the digests the release published (0.7.0 and later) before the bundle is written; `--no-pull` takes the images this machine has, unchecked. Needs Docker here; on the server, unpack it and run its `install.sh` |
+| `shipwick server bundle` | Make one file that installs or upgrades a server with no connection: the release's compose file, installer and checksums, the `shipwick` binary and the three images for `--arch amd64` or `arm64`. `--version` picks a release, `-o` the file. The archive of images is checked against the digests the release published (0.7.0 and later) before the bundle is written, and the release's signature is verified when `cosign` is on this machine (a release from 0.8.0 on without one is refused) and carried in the bundle; `--no-pull` takes the images this machine has, unchecked. Needs Docker here; on the server, unpack it and run its `install.sh` |
 | `shipwick server rotate-key` | Replace the key the server encrypts env values, secrets and registry passwords with; the running agent re-encrypts everything and nothing restarts. With the key in `SHIPWICK_ENCRYPTION_KEY`, prints the new key once for you to put there |
-| `shipwick doctor` | One screen: CLI and agent versions against the latest release, token, Docker, proxy, ports 80 and 443, the server's active alerts, and for every domain whether DNS points at the server — or at Cloudflare's proxy, which is in order when the agent has a Cloudflare token — and `https://` answers. Exits non-zero when something is broken |
+| `shipwick doctor` | One screen: CLI and agent versions against the latest release, token, Docker and the limits it does not enforce, the proxy and whether it is Shipwick's image, whether application containers can reach the API, the running applications without a memory limit, a server without swap, ports 80 and 443, the server's active alerts, and for every domain whether DNS points at the server — or at Cloudflare's proxy, which is in order when the agent has a Cloudflare token — and `https://` answers. Exits non-zero when something is broken |
 | `shipwick open [app]` | Open `https://<domain>` in the browser; `--dashboard`, or no application and no `deploy.yaml` here, opens the server's dashboard |
 | `shipwick login` | Save the agent URL and token; `--context <name>` saves them under that name and makes it current; `--no-check` saves without asking the agent |
 | `shipwick context ls\|use\|rm\|current` | List the saved servers (`*` marks the current one), switch, forget one (`--yes` skips the question), print the current name |
@@ -66,7 +66,7 @@ for a machine with an Arm processor, from the
 | `shipwick cert set <hostname> --cert <file> --key <file>` | Serve the hostnames a certificate covers with that certificate instead of one the server obtains: the PEM chain (the hostname's certificate first) and its key. A wildcard is stored under `'*.example.com'`. The server checks them and says why it refuses |
 | `shipwick cert ls` | The certificates you supplied: hostname, issuer, expiry, and the names each covers. Never a key |
 | `shipwick cert rm <hostname>` | Remove a certificate; the server obtains its own for those hostnames again. `--yes` skips the question |
-| `shipwick upgrade` | Replace this binary with the latest release, verified against its checksums, and report whether the server is behind. `--check` only reports |
+| `shipwick upgrade` | Replace this binary with the latest release, verified against its checksums (and those against the release's signature, where cosign is installed), and report whether the server is behind. `--check` only reports |
 
 Commands taking `[app]` default to the application named in `./deploy.yaml`
 (`-f`/`--file` selects another file; for `logs`, where `-f` means `--follow`,
@@ -144,13 +144,18 @@ Several applications in one `shipwick.yaml` — an `apps` list of complete
 deploy at the same time, in dependency order, at most four at once
 (`--parallel N`). An application whose dependency did not deploy is skipped
 and the command exits non-zero; every line of output carries its application's
-name. The file is used when there is no `deploy.yaml`. Several `deploy.yaml`
+name. The file is used when there is no `deploy.yaml`. Names deploy those
+applications of the file and nothing else: `after` still orders the named
+ones, an application that is left out is assumed to be running (the output
+says so), `--image` applies when exactly one is named, and a name the file
+does not have is an error that lists the ones it has. Several `deploy.yaml`
 files deploy in the order given, one after the other, stopping at the first
 failure:
 
 ```bash
 shipwick secret set DATABASE_PASSWORD     # once, on the server
 shipwick deploy                                                     # shipwick.yaml
+shipwick deploy api --image ghcr.io/company/api:$GIT_SHA            # one application of it
 shipwick deploy -f api/deploy.yaml -f worker/deploy.yaml
 ```
 
@@ -204,7 +209,12 @@ anything other than this machine.
   and that Ctrl-C stops it.
 - **`upgrade` replaces only itself.** The new binary is written next to the
   old one and renamed over it once its SHA-256 matches the release's
-  `checksums.txt`; a binary under Homebrew's Cellar or winget's Packages
+  `checksums.txt`. With cosign on the machine, `checksums.txt` is first
+  verified against the release's signature (`cosign verify-blob`, run as a
+  program with arguments, with the release workflow at that tag as the
+  identity), and a signature that does not verify changes nothing; without
+  cosign the command says that the signature was not checked. `server
+  bundle` does the same where the bundle is made. A binary under Homebrew's Cellar or winget's Packages
   directory is recognized by its path and left to the package manager. The
   server is upgraded by the installer, on the server: it needs Docker there,
   which the CLI does not have.

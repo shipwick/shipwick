@@ -54,7 +54,7 @@ app/
                     application's page and [name]/ its tabs), deployments/, logs/, servers.vue and
                     servers/ (the server's page and its tabs), volumes/, certificates/,
                     settings/ (secrets, registries, access), login
-  components/       hand-rolled UI: UiButton, UiDialog (native <dialog>), UiTabs, StatusBadge, FindingList, LiveAnnouncer,
+  components/       hand-rolled UI: UiButton, UiDialog (native <dialog>), UiTabs, UiTooltip, StatusBadge, FindingList, LiveAnnouncer,
                     Sparkline and MetricsHistoryChart (SVG), LogViewer, DeploymentProgressPanel,
                     VolumesPanel, JobsSection, dialogs (deploy, rollback, delete, restore,
                     run, run command), …
@@ -63,7 +63,8 @@ app/
                     sign-ins, the one this tab is on), useTheme, useNow, useServerInfo
                     (+ useAccess: the token's role and its applications), useApplication
                     (what the application page shares with its tabs), useAnnounce (what a
-                    screen reader is told), useFocusTrap, useRovingFocus, useFocusWhenShown
+                    screen reader is told), useFocusTrap, useRovingFocus, useFocusWhenShown,
+                    useTooltip
   middleware/       auth.global (which server an address is about, and whether it is signed
                     in), moved.global (addresses that moved)
   plugins/          server-links.client (with several servers, every link names its server),
@@ -74,8 +75,10 @@ app/
                     (what is wrong with an application), overview (the verdict), marks
                     (alerts and certificates in a list), access (limited and expiring
                     tokens, rules, the audit trail), servers (several servers),
-                    deployDocument (a pasted deploy.yaml), network, focus (roving focus, the
-                    focus trap), announce (what is news for a screen reader)
+                    deployDocument (a pasted deploy.yaml), network, limits (what Docker does
+                    not enforce), focus (roving focus, the
+                    focus trap), announce (what is news for a screen reader), tooltip (when
+                    one shows, where it goes, a button that is off for a reason)
   types/api.ts      wire types, mirroring pkg/api/types.go and pkg/spec/spec.go
   assets/css/       design tokens (light/dark), Tailwind v4 theme
 server/
@@ -88,7 +91,8 @@ server/
   utils/agents.ts   SHIPWICK_AGENTS; forwarded.ts: the browser's address; signin.ts: PKCE,
                     the sign-in cookie, what a failed sign-in says
 mock/agent.mjs      dependency-free mock of the agent API, for development (yaml.mjs reads
-                    the deploy.yaml it is sent)
+                    the deploy.yaml it is sent, security.mjs its security block, faults.mjs
+                    answers for a silent Docker and a full disk)
 tests/              vitest unit tests
 ```
 
@@ -322,6 +326,28 @@ internet access and makes no request to any third party.
   `NOT_FOUND` (no such application or deployment) by its code.
 - **Log tail** follows the agent: per replica when following, merged total
   otherwise; the control says so.
+- **The security block** (`spec.security`) is a list on the Configuration tab
+  and on a deployment's page: read-only root filesystem, scratch space,
+  capabilities, refusing root. `capabilities` absent says nothing; `[]` reads
+  "Capabilities: none". An agent before 0.8 refuses the key as unknown, and
+  the editor says that the agent is older than the key.
+- **Limits Docker does not apply.** `docker.unenforced_limits` of
+  `GET /server` and `unenforced_limits` of a metrics sample (`utils/limits.ts`):
+  the server's page says "rootless" and which limits are not enforced; an
+  application that sets such a limit has a finding, the limit is marked "not
+  enforced", and no usage is drawn against it, live or in the history. With
+  both listed the usage is the daemon's own and is not shown at all. An agent
+  that does not send `docker` is never read as enforcing.
+- **`open_to_applications`** is a warning row on the server's page, only when
+  the agent sends it.
+- **`503 RUNTIME_UNAVAILABLE` and `507 DISK_FULL`** are shown with the agent's
+  message, which says what to do. A page with nothing to show is headed
+  "Docker does not answer" whatever it was loading (`failureTitle`); the
+  overview says it once. Signing in while Docker is silent works: the agent
+  checks the token before it asks Docker (`server/utils/tokenCheck.ts`).
+- **`403 APPLICATION_CALLER`** is the agent refusing the dashboard server for
+  the network it calls from. It reads "The agent refuses this dashboard…",
+  on the login page too, and never as a rejected token.
 
 ## Keyboard, screen readers and touch
 
@@ -343,7 +369,7 @@ use.
   focus back to the control that opened it. A popover that is not a dialog
   closes on Escape and when the focus leaves it (the server switcher in
   `AppNav`). A `UiButton` that is `pending` keeps the focus, and one that is
-  `disabled` with a `title` stays a Tab stop so the reason can be read; do not
+  `disabled` with a `hint` stays a Tab stop so the reason can be read; do not
   set the native `disabled` on a button while it has the focus. A result that
   replaces the form which produced it takes the focus (`useFocusWhenShown`,
   on an element with `tabindex="-1"`); when it goes away again, focus the
@@ -366,6 +392,15 @@ use.
   while it is wrong. A table has an `aria-label`. A chart is `role="img"`
   with a sentence, and a `Show as table` below it (`pointFigures`). A status
   is a word next to its color (`StatusBadge`), never the color alone.
+- **A tooltip is a `UiTooltip`**, never a `title` attribute, which only a
+  mouse can read (a test fails on one). It shows on hover, on keyboard focus
+  and on a tap, goes away with Escape before the dialog around it does, and
+  is the element's `aria-describedby`. A button says what it does, or why it
+  is off, with `UiButton`'s `hint`. Text that explains itself this way becomes
+  a Tab stop, so in a table prefer saying it in the cell, or once for the
+  column; `repeats` is for a tooltip that only says again what is on screen
+  (cut-off text in full, the API's own word for a status): it adds no stop and
+  no description. The rules are in `utils/tooltip.ts`.
 - **What changes without a navigation is said once.** Call
   `useAnnounce().announce(text)`; the two live regions are in `app.vue`
   (`LiveAnnouncer`). Never put `aria-live` or `role="status"` on a container
@@ -563,6 +598,12 @@ the real agent, so the log viewer's reconnect can be seen.
 | `MOCK_NAME_CLAIM=preferred_username` | People are named by that claim instead of their address; rules of kind `name`. |
 | `MOCK_EXPORT_MB=64`, `MOCK_EXPORT=trailer\|breaks` | The size of the file `POST /export` streams, and an export that stops half-way: with the agent's error trailer, or with the connection cut. |
 | `MOCK_IMPORT_MS=1500` | How long an import takes per application. |
+| `MOCK_AGENT=0.7` | Answers like an agent before 0.8: `GET /server` has no `swap_bytes`, `unlimited_memory`, `docker` or `open_to_applications`, `…/config` has no `plain`, metrics have no `unenforced_limits`, `security` in a document is `unknown field "security"`, and the four switches below answer as that agent would or do nothing. |
+| `MOCK_OPEN_API=1` | `open_to_applications` on `GET /server` is true: application containers can reach the API. |
+| `MOCK_REFUSES_DASHBOARD=1` | Every request, `GET /health` included, is `403 APPLICATION_CALLER` before the token is looked at. |
+| `MOCK_DOCKER=rootless\|nocgroups\|nomemory\|silent` | The Docker daemon: rootless with its limits enforced; rootless without cgroup controllers (`unenforced_limits` names `memory` and `cpu`, every replica reports the daemon's whole usage, a deployment with limits records the `warn` step, no `memory` alert); one that enforces no memory limit; or one that does not answer: what asks Docker is `503 RUNTIME_UNAVAILABLE`, what the agent reads from its database is answered. |
+| `MOCK_DISK=full` | What writes is `507 DISK_FULL`: a deployment, a redeploy, a rollback, a static folder, an image. Validation is answered. |
+| `MOCK_ALERTS=docker` | The warnings plus the critical `docker` alert. |
 | `MOCK_PORT`, `MOCK_HOST`, `MOCK_TOKEN` | `9100`, `127.0.0.1`, `mock-token-0123456789abcdef` |
 
 What 0.5 added is served with the agent's shapes and refusals: `path`, `proxy`
@@ -595,6 +636,14 @@ itself, three seconds an application, and `shop` ends `started`, not ready.
 `web` has a hostname waiting for DNS and an alert, `shop` a certificate that
 expires: the marks in the lists.
 
+What 0.8 added: `security` in specs, read and refused as the agent does
+(`mock/security.mjs`) and written into the document of what runs; `my-api`
+keeps no capability, runs as `1000:1000` and refuses root, `postgres` keeps
+five capabilities. A document with `security.non_root: true` and no `user`
+is accepted and fails after the pull with the agent's sentence, unless the
+image's tag contains `nonroot`. What the switches above answer is in
+`mock/faults.mjs`.
+
 Signing in: `GET /auth`, `POST /auth/exchange` and a stand-in for the
 provider at `/mock-idp/authorize`, a page of four accounts —
 `ada@example.com` (admin by a rule for her address), `grace@example.com`
@@ -622,7 +671,7 @@ SHIPWICK_AGENTS=production=http://127.0.0.1:9100,staging=http://127.0.0.1:9101 n
 |---|---|
 | `npm run dev` | Nuxt dev server with HMR on :3000 |
 | `npm run mock` | Mock agent on :9100 |
-| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, and the titles of tabs |
+| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, the titles of tabs, the security block and the mock's reading of it, limits Docker does not enforce, and a silent Docker, a full disk and a refused dashboard |
 | `npm run typecheck` | `vue-tsc` over app, server and config, strict + `noUncheckedIndexedAccess` |
 | `npm run build` | Production build into `.output/` |
 | `npm start` | `node .output/server/index.mjs` |

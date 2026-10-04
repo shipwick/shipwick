@@ -89,6 +89,7 @@ and the **dashboard**. When it is done it prints the API token, once.
 
 ```text
 ✓ Docker 29.8.0 with Compose 5.5.1
+  The release's signature was not checked: cosign is not installed. Every file is checked against the release's checksums.
 ✓ Installed /opt/shipwick/compose.yml
 ✓ Wrote /opt/shipwick/.env
 ✓ Started the Shipwick services
@@ -110,7 +111,22 @@ a Cloudflare API token — `SHIPWICK_CLOUDFLARE_API_TOKEN`, given to the
 installer like the hostnames, or added to `.env` later: see
 [Behind Cloudflare](#11-caddy). Running the installer again upgrades; it never
 touches an existing `.env`, and so never changes your token. What it does, step
-by step, and how to test it: [scripts/README.md](../scripts/README.md).
+by step, and how to test it: [scripts/README.md](../scripts/README.md). What it
+does not do, and the server needs before it carries real data — SSH keys,
+security updates, swap, a firewall, backups elsewhere — is in
+[Preparing a server](#preparing-a-server).
+
+**What the server needs.** Docker Engine and the Compose plugin, the plugin
+in version 2.23.1 or later: an older Compose cannot read Shipwick's compose
+file, and the installer says so before it changes anything. The Engine may be
+as old as 20.10, the one Debian 12 packages — its package brings no Compose
+plugin, which then comes from Docker's repository. Before every release the
+agent's integration tests are run against Docker 20.10, 26.1, 28 and 29, and
+the installer on Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04, Rocky
+Linux 8, 9 and 10, Fedora and Alpine, on amd64 and arm64. The distributions
+are run as containers there: what is tested is the installer with their
+shell and tools, not their kernels or their own packages of Docker
+([CONTRIBUTING.md](../CONTRIBUTING.md) has the table).
 
 **On the server**, `shipwick` is installed too, and with a hostname for the
 API it is signed in: the installer saves `https://<that hostname>` and the
@@ -171,19 +187,38 @@ Or with Homebrew, on macOS and Linux: `brew install shipwick/tap/shipwick`.
 **Upgrading.** The server is upgraded by running the installer again, on the
 server: it needs Docker there, which the CLI does not have. The CLI upgrades
 itself with `shipwick upgrade`: it fetches the latest release, verifies it
-against the release's checksums and swaps the binary in place; a binary that
+against the release's checksums — and the checksums against the release's
+signature, where cosign is installed — and swaps the binary in place; a binary that
 came from Homebrew or winget is left to them, and the command prints the
 `brew upgrade` or `winget upgrade` line instead. Upgrading the server
 restarts the agent; applications keep running, and a deployment that is under
 way at that moment [continues afterwards](#7-deployment). Either way it then compares
 the server's version and tells you when the server is behind. `--check` only
-reports.
+reports. What an upgrade does to a server, from which release, and the way
+back: [Upgrading](#upgrading).
 
 Everything the installer fetches comes from one
 [release](https://github.com/shipwick/shipwick/releases) and is verified against
 its checksums; the images are pinned to that release, so a server runs the
 version it installed until you run the installer again. A specific version:
 `curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.3.0 sh`.
+
+**The signature.** From 0.8.0 on, a release's `checksums.txt` is signed by
+the workflow that published it. Where [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+(2.4 or later) is installed, the installer and `shipwick upgrade` verify
+that signature before they use the checksums, and stop if it is not the
+workflow's. Where it is not, which is every new server, they say so in one
+line — the second of the output above — and go by the checksums alone, as
+before. Nothing installs cosign for you, and nothing needs it. To make the check a
+condition, set `SHIPWICK_REQUIRE_SIGNATURE=1` for the installer: it then
+installs nothing without cosign, from a release without a signature, or from
+one whose signature does not verify. Without that setting a release that
+has no signature is installed with a warning — releases before 0.8.0 have
+none, and the installer cannot tell one of those from a release whose
+signature somebody removed. `shipwick upgrade` and `shipwick server bundle`
+can, because they know which release they asked for: with cosign installed
+they refuse a release from 0.8.0 on that has no signature. What the signature proves, and the commands to
+check it yourself, images included: [§12](#12-security).
 
 > **From source**, without a release: build the images on the server —
 > `docker build -t ghcr.io/shipwick/agent .`,
@@ -202,7 +237,10 @@ published the agent has none: the installer saves no context, and `shipwick`
 run on the server itself finds nothing at `http://127.0.0.1:9000` and says
 so. With the port published it works there without a tunnel, after `shipwick
 login`. To give the API a hostname later, set `SHIPWICK_AGENT_DOMAIN` in
-`/opt/shipwick/.env` and run the installer again.
+`/opt/shipwick/.env` and run the installer again. A published port wants
+Docker 28 or later: before that, Docker forwards it over the network the
+applications are on, and the agent has to listen there ([Security](#12-security),
+"Who can reach the API").
 
 **Your own changes** — that loopback port, a mount for registry credentials —
 go into `/opt/shipwick/compose.override.yml`. Compose merges it with
@@ -233,6 +271,110 @@ The last answer is kept in `update-check.json` in the data directory, so a
 restart asks nothing. `SHIPWICK_UPDATE_CHECK=off` stops the question; the
 agent says at startup, once, that it asks and how to stop it.
 
+### Upgrading
+
+From every release since 0.1.0 the upgrade to this version is one step, the
+installer, and needs nothing before or after it:
+
+```bash
+curl -fsSL https://get.shipwick.com | sh
+```
+
+Each of those releases was installed the way it was released, given
+applications with its own CLI, and upgraded
+([scripts/test-upgrade.sh](../scripts/test-upgrade.sh) does it; CI repeats it
+for the last two releases). What happened on every one of them:
+
+- **Shipwick's three containers are replaced; the applications' are not.**
+  The replicas after the upgrade are the containers the old release started,
+  and they are served without a deployment.
+- **Requests go unanswered while the proxy's container is replaced.**
+  Connections are refused for two to three seconds: with about ten requests
+  a second to an application of two replicas, each on a connection of its
+  own, between 9 and 21 requests failed per upgrade and none before or after
+  (23 upgrades, at least one from each release, in a Docker daemon inside a
+  container on a developer's machine). The agent is away a few seconds
+  longer; nothing is supervised or deployed in that time, and nothing stops.
+- **The agent brings its database up to date when it starts.** The history,
+  the tokens, the secrets, the scheduled jobs and the backups of the old
+  release are there afterwards, and a rollback goes back to a deployment the
+  old release made. Volumes are Docker's and are not touched.
+- **`.env` and `compose.override.yml` stay as they are**; `compose.yml` is
+  replaced. Images named in `.env` (`SHIPWICK_AGENT_IMAGE` and the others)
+  stay too: an upgrade does not replace an image of your own.
+- **The old release's CLI keeps working** against the new agent for what it
+  knew: `ps`, `deploy`, `redeploy`, `rollback`, its token. The commands and
+  `deploy.yaml` keys that came later need `shipwick upgrade`.
+
+What differs by where the upgrade starts:
+
+| From | What the upgrade does besides | What you do |
+|---|---|---|
+| 0.7 | The proxy's image gains Shipwick's own way of finding replicas, and the agent loads a configuration that uses it | Nothing |
+| 0.5, 0.6 | The same | Nothing |
+| 0.3, 0.4 | And the proxy changes from `caddy:2-alpine` to Shipwick's build of Caddy | Nothing |
+| 0.2 | And the agent creates `encryption.key` next to `shipwick.db` and encrypts the env values of earlier deployments, once | From then on, back `encryption.key` up with `shipwick.db`: without it the database cannot be read |
+| 0.1 | And the proxy joins a second network, `shipwick-services`; the replicas that run are given their application's name on it, without a restart | The same. `agent`, `caddy`, `dashboard` and `localhost` are no longer names an application can be deployed under |
+
+Not walked this way: the packages, `--bundle`, and an installation with a
+compose file of its own.
+
+**Going back to the release before** is the installer with that version:
+
+```bash
+curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.7.0 sh
+```
+
+Two things can stand in the way, and the installer deals with both.
+
+The proxy starts from the configuration it saved last, and one saved by a
+newer release may name a part the older proxy does not have; the older proxy
+then does not start. The installer removes that file, and the agent loads the
+routes again within seconds ([§11](#11-caddy) has the command for an
+installation without the installer). Going back costs the same seconds
+without the proxy as going up.
+
+An agent refuses a database that a newer release has added to: it does not
+guess at what it does not know. Whether a release adds to the database is in
+its changelog, under *Changed*. When it has, the installer finds the older
+agent refusing, starts the newer release again, and says so:
+
+```text
+✗ The agent of this release cannot read the database: the release that ran here has added to it.
+  That release was started again; the proxy was replaced twice, and requests went unanswered for some seconds.
+  Going back takes the agent's data as it was before the upgrade: docs/handbook.md, "Upgrading".
+```
+
+Measured the same way twice, 43 and 50 requests failed, within five and
+seven seconds. To be able to
+go back across such a release, copy the agent's data before you upgrade —
+the agent is stopped for the copy, the applications are not:
+
+```bash
+cd /opt/shipwick
+docker compose stop agent
+docker run --rm -v shipwick_agent-data:/data -v /root:/to busybox \
+  tar -czf /to/shipwick-before-upgrade.tar.gz -C /data shipwick.db encryption.key
+docker compose start agent
+```
+
+and put it back before the installer of the older release runs:
+
+```bash
+cd /opt/shipwick
+docker compose stop agent
+docker run --rm -v shipwick_agent-data:/data -v /root:/from:ro busybox sh -c '
+  rm -f /data/shipwick.db-wal /data/shipwick.db-shm &&
+  tar -xzf /from/shipwick-before-upgrade.tar.gz -C /data'
+curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.7.0 sh
+```
+
+The older agent then knows what the copy knows. An application deployed
+since is brought back to the deployment the copy has as its last: the
+containers of the later one are removed and those of the earlier one
+started. What was stored since — secrets, tokens, history — is not in the
+copy, and the volumes are as the newer release left them.
+
 ### Installation from a package
 
 The agent is also published as a Debian and an RPM package, for a server where
@@ -240,7 +382,8 @@ it should be a service of the host — started by systemd, upgraded by the
 package manager, its output in the journal — instead of a container. Each
 release has `shipwick-agent_amd64.deb`, `shipwick-agent_arm64.deb`,
 `shipwick-agent_amd64.rpm` and `shipwick-agent_arm64.rpm`, listed in its
-`checksums.txt`:
+`checksums.txt` (which is signed: [§12](#12-security) has the command that
+verifies it):
 
 ```bash
 curl -fsSLO https://github.com/shipwick/shipwick/releases/latest/download/shipwick-agent_amd64.deb
@@ -271,17 +414,19 @@ systemctl enable --now shipwick-agent
 docker compose --env-file /etc/shipwick/agent.env -f /usr/share/shipwick/compose.yml up -d
 ```
 
-In that order: the agent creates the two Docker networks the compose file
+In that order: the agent creates the three Docker networks the compose file
 joins. The agent finds the proxy by the compose project `shipwick` and the
 service `caddy`, and talks to it through a socket in `/run/shipwick`.
 
 **Where the API listens.** As installed, on `127.0.0.1:9000`: the CLI on the
 server reaches it (`shipwick login --url http://127.0.0.1:9000`), and a
 laptop through an SSH tunnel. The proxy and the dashboard are containers, and
-a container does not reach the host's loopback. To serve the API at a
-hostname, or to use the dashboard, the agent listens on the address of
-Docker's bridge instead — `ip -4 addr show docker0` shows it, `172.17.0.1`
-unless Docker was configured otherwise:
+a container does not reach the host's loopback. With `SHIPWICK_AGENT_DOMAIN`
+set, the agent also listens on the address the server has on the
+`shipwick-control` network, which is where the proxy is sent; there it
+answers the addresses of that network only. For the dashboard, the agent
+listens on the address of Docker's bridge instead of loopback — `ip -4 addr
+show docker0` shows it, `172.17.0.1` unless Docker was configured otherwise:
 
 ```bash
 # /etc/shipwick/agent.env
@@ -290,10 +435,12 @@ SHIPWICK_AGENT_DOMAIN=agent.example.com
 SHIPWICK_DASHBOARD_DOMAIN=dashboard.example.com
 ```
 
-then `systemctl restart shipwick-agent`. That address is reachable from the
-containers of this server and from nowhere else; a firewall on the server
-that filters traffic from Docker's networks (`ufw`, `firewalld`) must let
-port 9000 through from them. The API is plain HTTP: never give it a public
+then `systemctl restart shipwick-agent`. Those addresses are reachable from
+the containers of this server and from nowhere else, and the agent refuses
+the containers of applications there ([Security](#12-security), "Who can
+reach the API"); a firewall on the server that filters traffic from Docker's
+networks (`ufw`, `firewalld`) must let port 9000 through from the
+`shipwick-control` network. The API is plain HTTP: never give it a public
 address.
 
 **The agent runs as root.** It drives Docker through Docker's socket, and
@@ -307,7 +454,10 @@ therefore lie outside those, under `/var` or `/srv`.
 
 **Upgrading** is installing the newer package: the agent is restarted when
 it was running, `agent.env` stays as it is, and the compose command above,
-run again, brings the proxy and the dashboard to the same version. The
+run again, brings the proxy and the dashboard to the same version. Coming
+from 0.7 the command is not optional: it moves both onto the
+`shipwick-control` network, and until it has run the agent refuses them as
+it refuses any container that calls from an application network. The
 update notice names the installer; on such a server the package is what to
 install. **Removing** the package stops the agent and leaves the
 applications running, unsupervised; `agent.env` goes with `apt purge`, and
@@ -322,10 +472,10 @@ import](#moving-to-a-new-server).
 | Variable | Default | |
 |---|---|---|
 | `SHIPWICK_AGENT_TOKEN` | generated | API bearer token, min. 16 characters |
-| `SHIPWICK_LISTEN_ADDR` | `127.0.0.1:9000` | Loopback by default, on purpose. The container image sets `0.0.0.0:9000`, reachable on the Docker network only: the compose file publishes no port |
+| `SHIPWICK_LISTEN_ADDR` | `127.0.0.1:9000` | Loopback by default, on purpose. The container image sets `0.0.0.0:9000`, which the agent narrows to its address on the `shipwick-control` network and loopback: the proxy and the dashboard reach it there, applications do not (§12), and the compose file publishes no port. An address set here is used as it is |
 | `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database, token hash, encryption key, and the uploaded folders of static applications (`uploads/`) until they are deployed. Off Linux, the default is `shipwick` in the user's configuration directory |
 | `SHIPWICK_ENCRYPTION_KEY` | generated | Key that encrypts `env` values, stored secrets and registry passwords in the database, 64 hex characters. Unset: `encryption.key` in the data directory, created on first start and replaced by `shipwick server rotate-key` (§12) |
-| `SHIPWICK_DOCKER_NETWORK` | `shipwick` | Network application containers join |
+| `SHIPWICK_DOCKER_NETWORK` | `shipwick` | Network application containers join. The other two are named after it: `<network>-services`, where applications are found by name, and `<network>-control`, where the API is reached |
 | `SHIPWICK_CADDY_ADMIN` | — | Caddy's admin endpoint: `unix//run/caddy/admin.sock` (recommended) or `http://127.0.0.1:2019`. Unset: domains are recorded but not served |
 | `SHIPWICK_AGENT_DOMAIN` | — | Serve the agent's API over HTTPS at this hostname, through Caddy |
 | `SHIPWICK_DASHBOARD_DOMAIN` | — | Serve the dashboard over HTTPS at this hostname, through Caddy |
@@ -508,6 +658,7 @@ shipwick server bundle --arch amd64
 
 ```text
 ✓ Release v0.7.0: compose.production.yml, install.sh and shipwick_linux_amd64 match its checksums
+Release v0.7.0 has no signature: releases before 0.8.0 were not signed.
 ✓ The three images are the ones release v0.7.0 published for linux/amd64
 ✓ Wrote shipwick-v0.7.0-linux-amd64.tar.gz (113 MB)
 
@@ -552,6 +703,16 @@ not one that somebody rebuilt on purpose. Against that, both ends print the
 SHA-256 of `checksums.txt` — compare the line `shipwick server bundle`
 printed with the one the installer prints.
 
+Where the bundle is made is also where its signature is checked: with cosign
+installed there, `shipwick server bundle` verifies the release's signature of
+`checksums.txt` (0.8.0 and later) before it downloads anything else, and
+says which it was — verified, not checked for want of cosign, or a release
+from before releases were signed. The signature travels in the bundle as
+`checksums.txt.sigstore.json`. The installer on the server does not verify
+it by itself: cosign asks Sigstore for the keys it trusts, and that server
+reaches nothing. With `SHIPWICK_REQUIRE_SIGNATURE=1` it does, for a server
+whose cosign was given those keys beforehand.
+
 Copy the file by whatever means the network allows, unpack it and run the
 installer inside it. It is the same installer and asks the same questions; it
 downloads nothing and pulls nothing:
@@ -594,6 +755,148 @@ What such a server needs besides:
   network reports that it could not check for a newer release, and goes on.
   The agent's own daily question about one goes unanswered and unnoticed;
   `SHIPWICK_UPDATE_CHECK=off` spares it the attempt.
+
+### Preparing a server
+
+Shipwick deploys applications; it does not administer the server under them.
+Six things are the operator's, and worth doing before the server carries data
+that matters. `shipwick doctor` asks the agent, so it sees the memory, the
+swap, the two ports and the backups; it does not look at SSH, at updates or at
+the clock.
+
+| | `shipwick doctor` |
+|---|---|
+| 1. SSH takes keys, not passwords | does not look |
+| 2. Security updates install themselves | does not look |
+| 3. The server has swap | `! The server has no swap: …` |
+| 4. A firewall lets in SSH, 80 and 443 | `✗ Port 443 is not reachable on …` when it is too strict; not when it is too open |
+| 5. The clock is synchronised | does not look |
+| 6. Backups leave the server | `! The encryption key exists only on this server. …` |
+
+The commands are for Debian and Ubuntu and for the RHEL family (RHEL, Rocky
+Linux, AlmaLinux), as root. They were run in containers of Debian 12, Ubuntu
+24.04 and Rocky Linux 9. A container has no systemd and may not turn swap
+on, so the lines marked *not run* are the standard ones and were not.
+
+**1. SSH without passwords.** Log in with a key first, and keep that session
+open until a second one has worked.
+
+```bash
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' \
+  > /etc/ssh/sshd_config.d/00-keys-only.conf
+sshd -t && sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin) '
+systemctl restart ssh     # Debian, Ubuntu; not run
+systemctl restart sshd    # RHEL family; not run
+```
+
+`sshd -T` prints what is in effect, and must say `passwordauthentication no`,
+`kbdinteractiveauthentication no` and `permitrootlogin without-password`
+(the older name of `prohibit-password`). The file's name begins with `00`
+because the first file to set an option wins: a `50-cloud-init.conf` beside
+it that says `PasswordAuthentication yes`, as some providers' images have,
+then changes nothing.
+
+**2. Automatic security updates.** On Debian and Ubuntu the package is
+enough: it brings `/etc/apt/apt.conf.d/20auto-upgrades`, which turns the
+daily run on, and `50unattended-upgrades`, which says what it may upgrade.
+
+```bash
+apt-get install -y unattended-upgrades
+apt-config dump | grep -E 'APT::Periodic::(Update-Package-Lists|Unattended-Upgrade) '   # both "1"
+unattended-upgrade --dry-run --debug    # what it would upgrade now
+```
+
+On the RHEL family the package installs nothing until it is told to:
+
+```bash
+dnf install -y dnf-automatic
+sed -i 's/^upgrade_type = .*/upgrade_type = security/; s/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf
+systemctl enable --now dnf-automatic.timer    # not run
+```
+
+Both upgrade the distribution's packages. Docker, when it was installed from
+Docker's own repository, is not among the origins `50unattended-upgrades`
+lists, and stays at its version until you upgrade it. Neither reboots the
+server (`Unattended-Upgrade::Automatic-Reboot` is off, `reboot = never` in
+`automatic.conf`): a new kernel waits for a reboot at a time you choose.
+
+**3. A swap file.** Without swap a full memory is a killed process at once;
+[Resource limits](#10-resource-limits) has the other half, a memory limit for
+every application. The size is yours to choose; this file is 2 GB.
+
+```bash
+dd if=/dev/zero of=/swapfile bs=1M count=2048
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile                                   # not run
+echo '/swapfile none swap sw 0 0' >> /etc/fstab    # not run; keeps it after a reboot
+```
+
+`shipwick doctor` says when there is none, and which applications have no
+limit:
+
+```text
+! 3 applications run without a memory limit: postgres, redis, web. One that leaks takes the server's memory from all the others; set resources.memory in deploy.yaml
+! The server has no swap: once its 4 GB of memory is used, the kernel kills a process at once. Add a swap file on the server
+```
+
+**4. A firewall, and what Docker does to it.** SSH, 80 and 443 come in —
+443 over UDP as well, for HTTP/3 — and nothing else.
+
+```bash
+apt-get install -y ufw              # Debian, Ubuntu
+ufw default deny incoming
+ufw allow OpenSSH
+ufw allow 80/tcp
+ufw allow 443                       # TCP and UDP
+ufw enable
+```
+
+```bash
+firewall-cmd --permanent --add-service=ssh --add-service=http --add-service=https --add-service=http3    # RHEL family; not run
+firewall-cmd --reload                                                                                    # not run
+```
+
+`firewall-cmd` needs the running firewalld that a container does not have;
+`firewall-offline-cmd` took the same four services there.
+
+A firewall on the server does not close a port Docker has published: see
+*Docker's published ports bypass the host firewall* under
+[publish](#7-deployment). Where that holds, 80 and 443 answer whether or not
+the rules above name them, and a `publish` in `deploy.yaml` is the place to
+be careful, not the firewall. A firewall in front of the server — the one
+most providers offer beside the machine — is not bypassed, and is the one to
+rely on. With the agent [installed from a
+package](#installation-from-a-package), the firewall on the server must let
+Docker's networks reach the agent's port.
+
+`shipwick doctor` tries 80 and 443 from where it runs, and says so when one
+is closed; a port that is open and should not be is not something it sees.
+
+```text
+✗ Port 443 is not reachable on 203.0.113.10: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443
+```
+
+**5. The clock.** A certificate is valid from one instant to another, and
+requests to a bucket are signed with the time: a clock that is far off fails
+both, in ways that do not mention the clock.
+
+```bash
+timedatectl show -p NTPSynchronized                         # NTPSynchronized=yes; not run
+apt-get install -y systemd-timesyncd                        # Debian, Ubuntu, when it says no
+dnf install -y chrony && systemctl enable --now chronyd     # RHEL family; the second half not run
+```
+
+**6. Backups that leave the server.** A backup on the server's own disk is
+gone with the server. [Backups the server takes](#backups-the-server-takes)
+has the bucket and the passphrase that put a copy elsewhere — of the volumes
+and of the agent's own state, the encryption key included — and `shipwick
+doctor` says which of the two is missing:
+
+```text
+! The encryption key exists only on this server. Set SHIPWICK_BACKUP_PASSPHRASE (and an S3 bucket) in /opt/shipwick/.env to back it up; losing it loses every secret
+✓ Agent state backed up 3h ago to the server's own disk (set SHIPWICK_BACKUP_S3_* in /opt/shipwick/.env to keep a copy elsewhere)
+```
 
 ## 5. Quick start
 
@@ -744,6 +1047,26 @@ validate` checks the file and prints the order. Several `deploy.yaml` files —
 `shipwick deploy -f api/deploy.yaml -f web/deploy.yaml` — still deploy one
 after the other, in the order given, stopping at the first failure.
 
+`shipwick deploy api` deploys the named application of the file and nothing
+else, and `shipwick deploy api web` those two: what a pipeline wants after it
+built one image, and what keeps a change to `web` from redeploying the
+database beside it. `after` still orders the named ones among themselves. An
+`after` that names an application left out is not waited for: it is assumed
+to be running, and the output says so in one line. `--image` applies when
+exactly one application is named. The whole file is read and checked either
+way; a name it does not have is an error that lists the ones it has, and with
+a `deploy.yaml`, which describes one application, a name is an error too.
+`shipwick validate api` checks the file and shows what that deployment would
+do.
+
+```text
+$ shipwick deploy api --image ghcr.io/company/api:2.3.1
+Deploying api...
+
+✓ Validated shipwick.yaml
+Not deployed now and assumed to be running: postgres
+```
+
 The commands that take the application's name from `deploy.yaml` — `status`,
 `logs`, `stop`, `start`, `rollback`, `redeploy`, `run`, `jobs`, `open`,
 `backup`, `restore` — take it from `shipwick.yaml` when that is the file in
@@ -804,25 +1127,37 @@ or was never on this machine, is had again:
 ```text
 $ shipwick config my-api -o deploy.yaml
 ✓ Wrote deploy.yaml: my-api as deployment #7 (1.4.2) runs it
-! 1 value is not handed out and stands as "********" in the file: env.LOG_LEVEL
+! 1 value is not handed out and stands as "********" in the file: env.API_KEY
   Write it again, or store it with shipwick secret set NAME and refer to it as ${NAME}.
   Until then shipwick deploy refuses the file.
 ```
 
 The server does not hand out secret values, and every `env` value and
-basic-auth password is one to it. What it does with each depends on how the
-value arrived:
+basic-auth password is one to it unless it was told otherwise. What it does
+with each depends on how the value arrived:
 
 - A value that the deployed file left to the server —
   `DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app` with `DB_PASSWORD`
   stored by `shipwick secret set` — comes back as exactly that text. The agent
   remembers it with the deployment, and fills it in again when the file is
   deployed.
-- A value that was in the file, or that the CLI filled in from the
-  environment or `--env-file`, comes back as `"********"` with a comment on
-  its line. The agent cannot tell `LOG_LEVEL: debug` from a password, so it
-  returns neither. Write the value again, or store it as a secret and write
-  `${NAME}`.
+- An `env` value that stood in the deployed file as it was sent —
+  `LOG_LEVEL: debug` — comes back as it is. The agent cannot tell it from a
+  password; `shipwick deploy` can, because it knows which values it filled in
+  and which it found written, and says so with the deployment. A redeploy and
+  a rollback carry that on. **What is written in `deploy.yaml` in plain sight
+  is therefore readable by everyone who may deploy the application**: a
+  password belongs in `${NAME}`, not in the file.
+- A value that the CLI filled in from the environment or `--env-file`, even
+  in part, comes back as `"********"` with a comment on its line, and so does
+  a basic-auth password that was written out. Write the value again, or store
+  it as a secret and write `${NAME}`.
+
+Nobody but the sender of a file can say that a value in it is plain, so a
+value nobody spoke for is masked: every value of an application that was last
+deployed by a `shipwick` or an agent older than 0.8, and a value typed into
+the dashboard's editor. The dashboard keeps the plain values it was shown and
+that were left as they were.
 
 A file without masks deploys as it is and gives the configuration that runs,
 with its secrets as they are on the server now. A file that still has one is
@@ -916,10 +1251,13 @@ looks through all of it and the running replicas for a piece of text.
 
 *Change the configuration*, on an application's Configuration tab, opens its
 deploy.yaml as `shipwick config` prints it: references to stored secrets
-are references, and every other secret value stands as `"********"` and is
+are references, the values that stood in the deployed file in plain sight are
+there, and every other secret value stands as `"********"` and is
 listed above the document, each with a link that stores it as a secret. The
 document is checked and deployed from there; one that still holds a mask is
-refused.
+refused. A plain value that is left as it was stays plain; one that is
+changed or typed there is masked from then on, until the file it belongs in
+is deployed with `shipwick deploy`.
 
 The server's *Export and standby* tab downloads an export as a file, under a
 passphrase typed twice, and imports one. Both pass through the dashboard's
@@ -969,7 +1307,13 @@ to the button that opened it. The theme and a chart's range are chosen with
 the arrow keys. A screen reader is told the page's title when the page
 changes, every step of a deployment that is followed, how a run, a backup or
 a promotion ended, and when the data on screen stops being live; each chart
-has its numbers as a table under *Show as table*. On a touch screen every
+has its numbers as a table under *Show as table*. What a tooltip says — the
+date and time behind "3m ago", why a button cannot be used — shows on
+keyboard focus and on a tap as well as under the pointer, goes away with
+Escape, and is the element's description for a screen reader; a button that
+is off for a reason stays a Tab stop so that the reason can be read. A
+tooltip that only repeats what is on screen, such as a cut-off line in full,
+is for the pointer and a tap. On a touch screen every
 control is at least 44 by 44 px, and a table becomes a list of cards wherever
 the page's column is narrow: on a phone, and beside the sidebar on a tablet.
 Animations stop when the system asks for reduced motion. This was checked
@@ -994,7 +1338,7 @@ proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 | `name` | — | Lowercase letters, digits, dashes; starts and ends with a letter or digit; max 63. Other applications reach this one at `http://<name>:<port>`. `agent`, `caddy`, `dashboard` and `localhost` are taken |
 | `image` | — | Any Docker image reference. Its tag becomes the deployment's version. A private registry needs a credential on the server: `shipwick registry login`, see [Private images](#6-deployyaml) below |
 | `build` | — | Build the image on your machine instead of naming one: `build: .`, or `{context, dockerfile}` (default context `.`, the directory of deploy.yaml; default `Dockerfile`, relative to the context); paths are relative to deploy.yaml and stay inside its directory. `shipwick deploy` runs `docker build` and sends the image to the server; no `image` and no registry — see [Deployment](#7-deployment) |
-| `static` | — | A folder, relative to deploy.yaml, served by Caddy as it is: a built frontend. `static: dist/`, or `{dir, fallback}`. No container: `image`, `port`, `replicas`, `env`, `health`, `resources`, `volumes`, `publish`, `entrypoint`, `command`, `user`, `logging`, `pre_deploy`, `jobs`, `backups` and `deploy.stop_timeout` do not apply. Needs `domain` — see [Deployment](#7-deployment) |
+| `static` | — | A folder, relative to deploy.yaml, served by Caddy as it is: a built frontend. `static: dist/`, or `{dir, fallback}`. No container: `image`, `port`, `replicas`, `env`, `health`, `resources`, `volumes`, `publish`, `entrypoint`, `command`, `user`, `logging`, `pre_deploy`, `jobs`, `backups`, `security` and `deploy.stop_timeout` do not apply. Needs `domain` — see [Deployment](#7-deployment) |
 | `static.fallback` | — | A file in the folder answered, with status 200, for every path that names no file: `index.html` for a single-page application. Without it such a path is a `404` |
 | `entrypoint` / `command` | the image's | Replace the image's `ENTRYPOINT` / `CMD`. A list of arguments; a string is one argument and is never split — see below |
 | `user` | the image's | User the process runs as: `app`, `1000`, `1000:1000` |
@@ -1032,6 +1376,10 @@ proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 | `deploy.strategy` | `rolling` | `rolling` `recreate` — see [Deployment](#7-deployment) |
 | `deploy.stop_timeout` | `10s` | How long a replica that is being stopped gets between `SIGTERM` and `SIGKILL`, 1s–10m: raise it for WebSockets or long uploads — see [Deployment](#7-deployment). Not for a static application |
 | `init` | `false` | `true` runs Docker's init process as the first process of every container of the application — replicas, the pre-deploy hook, jobs, one-off commands — with the image's own as its child: it passes `SIGTERM` on and reaps children. For a process that does not handle the signal as the first process, such as `node server.js`; not for an image that brings its own init (`tini`, s6-overlay) — see [Deployment](#7-deployment). Not for a static application |
+| `security.read_only` | `false` | `true` mounts the root filesystem read-only in every container of the application. Volumes and `security.tmpfs` stay writable — see [Security](#12-security) |
+| `security.tmpfs[]` | — | Up to 10 directories kept in memory, for what has to be written under a read-only root: a path (`/tmp`), or `{path, size}` with `size` from `1mb` to `1gb`, `64mb` unless set. Empty at every start; mounted `nosuid`, `nodev` and `noexec`, writable by every user; what is written there counts against `resources.memory` |
+| `security.capabilities` | Docker's default set | `none`, or a list of the Linux capabilities to keep out of Docker's default set; every other one is dropped. Nothing outside that set is accepted: the key takes away, it cannot add |
+| `security.non_root` | `false` | `true` refuses to start a container that would run as root: `user`, or without it the image's `USER`, has to be a numeric id other than 0 |
 | `after` | — | `shipwick.yaml` only: names of the applications in the same file that must have deployed before this one starts — see [Quick start](#5-quick-start) |
 
 Mistakes are reported all at once, by field:
@@ -1534,7 +1882,9 @@ exception is a `pre_deploy` command that was running when the agent stopped.
 It is not run a second time; the deployment fails and says so, nothing of the
 running version has been touched, and you deploy again once you have looked
 at what the command left behind. Running applications are not affected by
-agent restarts or upgrades.
+agent restarts or upgrades. What each kind of deployment does when the agent
+is killed under it, and what a full disk, a silent Docker daemon or a reboot
+do, is in [When things break](#when-things-break).
 
 ### Before the replicas start: migrations
 
@@ -1654,7 +2004,7 @@ holds up a deployment, and the agent's log names only the webhook's host — a
 Slack URL is a credential.
 
 **Alerts.** A notification says that something happened. An alert says that
-something is the case and, left alone, ends badly. There are four:
+something is the case and, left alone, ends badly. There are five:
 
 | Alert | Raised when | Cleared when |
 |---|---|---|
@@ -1662,6 +2012,7 @@ something is the case and, left alone, ends badly. There are four:
 | `disk` | The disk that holds the agent's data directory — in the standard installation the disk Docker keeps images and volumes on — is 85% full: a warning. At 95%: critical | It is below 80% |
 | `restarts` | The supervisor has restarted the same replica three times within ten minutes. Held back while the application is down or the replica crash-looping | Fewer than three restarts in the last ten minutes |
 | `unhealthy` | An application has had fewer healthy replicas than it should for five minutes: a warning. After an hour: critical | Every replica is healthy and has stayed up for a minute |
+| `docker` | The Docker daemon has not answered for 30 seconds: critical. Nothing is supervised, deployed or routed meanwhile — see [When things break](#when-things-break) | It answers |
 
 Each is raised once and cleared once, however long it lasts; a warning that
 turns critical is told a second time. The two thresholds are
@@ -2286,6 +2637,164 @@ server has, so a late export from the old server does no harm; remove
 bucket prefix of their own before you point `SHIPWICK_BACKUP_S3_*` at a bucket
 again. Going back is the same procedure in the other direction.
 
+### When things break
+
+Shipwick stands on a disk, a Docker daemon, a proxy and a server, and each of
+them fails sooner or later. This is what you see when one does, what Shipwick
+does by itself, and what is left for you. Every entry was produced — with the
+agent's tests, and on a server with a Docker daemon that was frozen, cut off
+from its registry, filled up or switched off — and the messages are the ones
+that came out. One rule holds throughout: **applications that are running
+keep running.** None of these failures stops a container that Shipwick did
+not already mean to stop.
+
+#### The disk is full
+
+The disk that holds `/var/lib/shipwick` is, in the standard installation, the
+one Docker keeps images, volumes and container logs on; whichever fills it,
+both are out of room. The `disk` alert comes first, at 85% and again at 95%
+([Alerts](#7-deployment)):
+
+```text
+The server's disk is 100% full (0 B of 12 MB free). Deployments, databases and logs fail when it runs out. See what takes the space with: docker system df
+```
+
+| What is tried | What you see | What Shipwick does |
+|---|---|---|
+| `shipwick deploy`, `redeploy`, `rollback` | Refused at once, nothing changed: `Error: The server's disk is full (create deployment: database or disk is full (13)). Nothing was changed. Free space on the server — docker system df shows what takes it, docker image prune -a removes images nothing uses — and try again.` | Nothing: the running version is untouched. The same command works once there is room; the agent does not have to be restarted |
+| A deployment that is under way when the disk fills | It fails at its next step — `record replica: database or disk is full (13)` — but `shipwick deploy` goes on waiting: the failure cannot be written down either. It reports the failure within a second of there being room | Removes what the deployment had started, lets the application go, and keeps the deployment's end in memory until the database takes it. If old replicas had already been replaced, the application is short of them until there is room: `web is running 2, but it is DEGRADED right now (2/3 replicas healthy)` |
+| A replica crashes | It is restarted as always. `shipwick status` does not show the restart in its events or its count: neither could be recorded | Restarts it. Only the record is lost |
+| A replica's container is gone | The application stays short of it; the agent's log says `supervisor: mark replica removed: database or disk is full (13)` every second | Tries again with its usual backoff — at the latest five minutes after there is room — and says `Recreated replica 1` |
+| A static folder is uploaded | `507 DISK_FULL`, `write upload: … no space left on device`. The part that was written is removed; the folder deployed before is still there | — |
+| A backup is written to `SHIPWICK_BACKUP_DIR` | The backup is `failed`, with `no space left on device` in its error; a scheduled one is posted to the webhook as `backup.failed` | Removes the partial file. Earlier backups are untouched, and the application is started again if `backups.stop` had stopped it |
+| An image is pulled, or sent with `build:` | The deployment fails with the daemon's words, which end in `no space left on device`; an image that is sent is refused with `507 DISK_FULL` | — |
+| The agent restarts | It starts: reading the database needs no room | Supervises as before |
+
+What is yours: make room. `docker system df` shows what takes it; `docker
+image prune -a` removes the images no container uses, which on a server that
+is deployed to often is most of it. Then run the command again. Nothing has
+to be repaired: a database that could not be written was not half written.
+A deployment that ended while the disk was full shows its real outcome in
+`shipwick status` as soon as there is room.
+
+Measured on a filesystem of 12 MB filled by another file: every write to the
+database failed, changes of a status as much as new records, and all of them
+worked again the moment the file was removed. `make test-full-disk` does the
+same on 8 MB in a container.
+
+#### Docker does not answer
+
+The daemon is not running, or — the case that says nothing by itself — it is
+running and stuck: out of memory, waiting for a disk, stopped by a signal.
+
+```text
+$ shipwick status web
+Error: Docker does not answer on the server. Applications that are running keep running; look at the daemon there with: systemctl status docker. The cause: no answer within 15s
+```
+
+| When | What you see | What Shipwick does |
+|---|---|---|
+| While it lasts | Every command that needs Docker is answered like the one above (`503 RUNTIME_UNAVAILABLE`), after 15 seconds at most. `shipwick server status` too; the agent itself reports healthy, because it is. The agent's log says `Docker does not answer; applications are not supervised until it does`, once. After 30 seconds the `docker` alert goes to the webhook and to `shipwick_alerts{kind="docker"}`: `Docker does not answer. Applications that are running keep running, but nothing is restarted, deployed or routed until it does. On the server: systemctl status docker` | Asks the daemon one question a second, 15 seconds each when it is stuck, and does nothing else: no restarts, no changes of routes, no application held. It never concludes that a container is gone from a daemon that did not answer |
+| A deployment that is under way | It fails with the daemon's words, for instance `replica 2: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?`, and where old replicas had been replaced: `…; the rollback to 1.0 then failed too: …` | Leaves every replica that serves where it is. When Docker answers, the supervisor removes what is left of the failed version and completes the old one: `Removed leftover container shipwick_web_2_1`, `Recreated replica 1` |
+| When it answers again | `Docker answers again after 38s; applications are supervised again`, in the log and as `alert.cleared` | The next pass sees what happened meanwhile — replicas that exited are restarted, missing ones recreated |
+| The agent starts and Docker is not there | The agent's container exits and is started again by Docker's restart policy, until the daemon answers: `docker daemon unreachable: … Is Docker running, and may this user access its socket?` | A deployment that was interrupted is left as it is, and resumed by the start that finds Docker answering |
+
+What is yours: the daemon. `systemctl status docker` and `journalctl -u docker`
+on the server say why it stopped or what it waits for; Shipwick goes on by
+itself when it answers. Restarting Docker stops every container unless
+`live-restore` is set in `/etc/docker/daemon.json`; the supervisor starts the
+replicas again as it does after a reboot (below).
+
+Measured with the daemon's process stopped by `SIGSTOP` on a server with one
+application: commands were answered after 15 seconds, the alert was raised
+30 seconds after the daemon stopped answering, and supervision resumed with
+its first answer. A daemon that restarts within 30 seconds raises no alert.
+
+#### An image pull stalls or is cut
+
+The Docker daemon pulls images, not the agent; what the registry or the
+network does to a pull is reported in the daemon's words.
+
+| What happens | What you see | What Shipwick does |
+|---|---|---|
+| The connection is refused or reset | The deployment fails within seconds: `pull python:3.12: failed to do request: Get "https://registry-1.docker.io/v2/…": dial tcp 54.156.94.132:443: connect: connection refused. The Docker daemon could not reach docker.io. …` | Nothing was started; the running version is untouched |
+| The connection goes silent: packets are dropped | `shipwick deploy` waits. The daemon gave up by itself after 3 minutes 46 seconds and after 4 minutes 47 seconds in two runs (Docker 29.8), with `…: i/o timeout`. A pull the daemon never gives up on ends with the deployment's own limit: `deployment timed out after 15m` | The same |
+| The registry cannot be reached and the image is already on the server | A warning, and the deployment goes on: `Could not pull my-api:1.4.2, using the local copy (…)` | Uses the image it has |
+| The agent restarts during the pull | `Resumed after the agent restarted` | Pulls again |
+
+What is yours: deploy again when the registry is reachable. If the server has
+no route to it at all, the error says what to set up; see [A server with no
+way out](#a-server-with-no-way-out).
+
+#### The agent is killed
+
+By the kernel when memory runs out, by an upgrade of Shipwick, by a reboot.
+Docker starts the agent's container again, and the agent goes on with what it
+finds: see *Deployments survive an agent restart* above. `shipwick deploy`
+waits through it.
+
+| Killed in the middle of | What you see | What Shipwick does |
+|---|---|---|
+| A rolling deployment | `Resumed after the agent restarted`, then the remaining steps | Replicas that were serving keep serving; containers it had created are adopted; the rest is done |
+| A `recreate` deployment | The same. If the old version had been stopped and the new one not yet started, the application is down until the agent is back | Goes on with the new version; the old one is not started a second time next to it |
+| A `pre_deploy` command | `the pre-deploy command was interrupted when the agent restarted, and is not run a second time: check what it left behind, then deploy again`, and `my-api is still running 1.4.1; the failed deployment did not affect it.` | Stops and removes the command's container. Nothing of the running version was touched |
+| A rollback after a failed deployment | `Rolled back: web is running 1.0 again` | Finishes the rollback: missing replicas of the old version are created, all of them checked, the failed version removed |
+| A rollback you asked for (`shipwick rollback`) | `Resumed after the agent restarted` | It is a deployment like any other, and resumes like one |
+| A deployment the agent cannot make sense of | `agent restarted during deployment, and it could not be resumed: …` | Marks it failed, removes its containers, and completes the version that is active |
+
+What is yours: after an interrupted `pre_deploy`, look at what the command
+left behind — a migration that ran half-way — before you deploy again.
+Everything else needs nothing from you.
+
+Produced by killing the agent's container with `SIGKILL` during each of the
+first three, and starting it again a few seconds later.
+
+#### The proxy cannot be reached
+
+Caddy is stopped, or its admin socket does not answer.
+
+```text
+$ shipwick server status
+…
+Proxy           unreachable  cannot reach Caddy's admin endpoint: dial unix /run/caddy/admin.sock: connect: connection refused
+```
+
+| What is tried | What you see | What Shipwick does |
+|---|---|---|
+| A deployment | It fails when routes must change: `could not route site.example.com to the new version: cannot reach Caddy's admin endpoint: dial unix /run/caddy/admin.sock: connect: connection refused`. An application without a domain is not deployed either: one configuration holds every application's routes | Removes the new replicas; the old version keeps serving as far as the proxy does |
+| Running applications | A proxy that runs and cannot be configured goes on serving what it was last told, and finds restarted replicas by itself: it looks them up by name. A proxy that is stopped serves nothing | Supervises as before, and tries the proxy again every second. Its log says `reverse proxy is out of sync; retrying every tick` once, and `reverse proxy is in sync again` |
+
+What is yours: Caddy. `docker compose ps` and `docker compose logs caddy` in
+`/opt/shipwick`; Docker restarts its container when it exits. No alert is
+raised for this: a proxy that is down is noticed from outside sooner than
+from the agent. Deploy again when `shipwick server status` says `Proxy  ok`.
+
+#### The server reboots
+
+Docker starts the agent and the proxy again; the agent starts the
+applications. Docker itself restarts none of them: their restarts are the
+supervisor's, so that one mechanism knows about backoff and crash loops.
+
+```text
+WHEN       EVENT
+just now   Replica 1 restarted (attempt 1)
+just now   Replica 1 exited with code 255; restarting in 1s
+```
+
+| What happened | What you see | What Shipwick does |
+|---|---|---|
+| The server lost power, or Docker was killed | Every replica `exited with code 255` and is restarted. On a server with three applications and five replicas, all of them ran again four seconds after the agent had started | Starts the same containers again — not new ones — one second after it first sees them, application by application |
+| The server was shut down properly | Docker stopped every container with `SIGTERM`, and each ended with the code its process chose. `restart.policy: always` (the default) starts them all | The same |
+| …with `restart.policy: on-failure` and a process that exits with 0 on `SIGTERM` | The application is `DOWN`: `Replica 1 exited with code 0; restart policy "on-failure" leaves it stopped`. `application.down` goes to the webhook | Leaves it stopped: an exit with 0 is what the policy calls finished, and the agent cannot tell who sent the signal |
+| …with `restart.policy: never` | The same, whatever the exit code | The same |
+| A deployment was under way | `Resumed after the agent restarted` | Starts the containers the deployment had and goes on with it |
+
+What is yours: `shipwick start <app>` for an application whose policy left it
+stopped, or `restart.policy: always` for one that should come back by itself.
+`shipwick ps` after a reboot shows which are not `HEALTHY`. The webhook gets
+`application.down` for every application the agent finds stopped when it
+starts, also for those it starts again a second later.
+
 ## 8. Rollback
 
 **Automatic:** a deployment that fails after it has already replaced some
@@ -2414,10 +2923,15 @@ containers, and new containers start with a clean slate.
 Applications keep running while the agent is down or being upgraded — but
 nothing restarts them during that time. After a server reboot, the agent brings
 every application back up according to its restart policy, and goes on with a
-deployment that the reboot interrupted.
+deployment that the reboot interrupted. "According to its policy" has a
+consequence worth knowing before the first reboot: an application with
+`on-failure` whose process exits with 0 when it is asked to stop, and every
+application with `never`, stays stopped — see
+[When things break](#when-things-break).
 
 > **The agent must be able to reach container addresses** to probe them. In a
-> container (the recommended setup) it joins the application network by itself.
+> container (the recommended setup) it joins the application network by itself,
+> and does not listen there.
 > As a host process this works on Linux, but not with Docker Desktop on
 > macOS/Windows, where the agent warns at startup.
 
@@ -2450,6 +2964,11 @@ neither: a limit is a line in `deploy.yaml`, swap is the server's.
 ! 3 applications run without a memory limit: postgres, redis, web. One that leaks takes the server's memory from all the others; set resources.memory in deploy.yaml
 ! The server has no swap: once its 4 GB of memory is used, the kernel kills a process at once. Add a swap file on the server
 ```
+
+Limits are Docker's to enforce, and a daemon without the cgroup controllers
+— rootless Docker that was delegated none — accepts them and applies
+nothing. Shipwick says so on the deployment, in `shipwick status`, `shipwick
+server status` and `shipwick doctor`: see [Rootless Docker](#rootless-docker).
 
 Usage is one command away, and live in the dashboard:
 
@@ -2519,6 +3038,194 @@ memory are therefore those of the last 30-second sample, and
 `shipwick_replica_cpu_ratio` is in cores — 1 is one core kept busy. The full
 list is in [docs/api.md](api.md#prometheus-metrics).
 
+### What one server carries
+
+Measured, with [`scripts/measure-limits.sh`](../scripts/README.md#measure-limitssh),
+which anyone can run again. Read the numbers as those of the machine they
+come from: the "server" is a container with a Docker daemon of its own
+(Docker 29.8.2), given two logical processors of an Intel Core i5-14600KF and
+4 GB of memory without swap — or four and 8 GB — on a Windows 11 machine with
+Docker Desktop (WSL2, kernel 6.18, 20 logical processors, 15.5 GiB). It is not
+a rented machine. A VPS has slower processors, shares them, and has a slower
+disk; nothing here crossed a network. The application is `traefik/whoami`, a
+few megabytes that answer at once: these are the costs of Shipwick and Docker,
+not of your application.
+
+**Applications and replicas.** Applications of two replicas each, each with a
+hostname and a health check, on 2 CPUs and 4 GB. Memory is the whole
+server's, as `docker stats` counts it; idle CPU is what the server used over
+30 seconds with no request and no deployment, in percent of one processor
+(200% is everything it has); the times are medians of five runs, of three for
+the killed replica, and one run for the deployment.
+
+| Applications (containers) | Answering | Memory | Idle CPU | `shipwick ps` | Docker lists its containers | Rolling deployment of one | A killed replica is back in |
+|---|---|---|---|---|---|---|---|
+| 10 (23) | all | 352 MB | 17% | 33 ms | 24 ms | 5.5 s | 2.9 s |
+| 25 (53) | all | 568 MB | 40% | 62 ms | 60 ms | 5.6 s | 3.9 s |
+| 50 (103) | all | 914 MB | 76% | 104 ms | 140 ms | 6.5 s | 3.7 s |
+| 100 (203) | all | 1,613 MB | 148% | 248 ms | 251 ms | 7.5 s | 4.1 s |
+| 150 (303) | all | 2,321 MB | 149% | 410 ms | 379 ms | 9.2 s | 4.5 s |
+| 200 (403) | 135 of 200 | 3,038 MB | 149% | 554 ms | 470 ms | 10.5 s | 9.3 s |
+
+A second run, on a server that had done the other measurements first, had
+the same deployments within 0.3 s and its killed replicas back in 2.6 to
+5.8 s, and went on to 250 applications: 3,743 MB, a deployment in 12.5 s, a
+killed replica back in 7.5 s, and 11 of 1,250 requests answered. What the
+table says:
+
+- **Memory is Docker's, and it is linear**: 14 MB for an application of two
+  replicas that use 2 MB each, on top of 200 to 300 MB for an empty server. The
+  agent took 12 to 31 MB, the proxy 16 to 31 MB, the dashboard 19 to 25 MB.
+- **Supervision costs CPU all the time, in proportion to the applications**:
+  about 1.5% of one processor per application, spent by Docker answering the
+  agent, which asks every second what runs. At 50 applications that is a
+  good third of a two-processor server; near 100 one pass takes the whole second
+  and the cost stops growing, because the passes become rarer instead — which
+  is why a killed replica stays away longer and a deployment takes longer
+  from there on.
+- **The first thing to give out was the kernel, not Shipwick or the memory.**
+  Between 300 and 400 containers Linux's table of neighbours (the ARP cache)
+  was full — the kernel log says `neighbour: arp_cache: neighbor table
+  overflow!` — and addresses on Docker's networks stopped being reachable:
+  hostnames left the proxy and 65 of 200 applications did not answer; in
+  another run deployments failed there, their health checks with `no route
+  to host`. The limit is
+  `net.ipv4.neigh.default.gc_thresh3`, 1024 in a stock kernel; a server meant
+  to carry hundreds of containers needs it raised. Memory would have been next: nine tenths of the 4 GB were
+  in use at 250 applications.
+- `shipwick status <app>` took 2.0 s at every size: it waits for Docker's two
+  readings of the CPU. `GET /applications` and `GET /server` took what
+  `shipwick ps` took; `GET /metrics` 4 to 10 ms.
+- The agent asks, for every hostname and every 30 seconds, whether it still
+  points at the server, one hostname after the other. With a resolver that
+  answers in a millisecond that cost nothing. In an earlier run each answer
+  took 180 ms — the test's `*.localhost` names, which two of the three public
+  resolvers do not know — and with 200 such hostnames a rolling deployment
+  took 57 s and a killed replica was away for a minute. Hostnames that
+  resolve slowly, many of them, slow everything down.
+
+On 4 CPUs and 8 GB this part was not measured: the run shared the machine,
+and with it the kernel's table, with a second test server, and failed at 100
+applications for that reason.
+
+**Requests through the proxy.** [oha](https://github.com/hatoo/oha) 1.16 in a
+container next to the server, on processors the server does not have, sending
+`GET /` over HTTPS (HTTP/1.1, the proxy's own certificate authority) to one
+application for 20 seconds, as fast as the connections allow. "New" opens a
+connection, with its TLS handshake, for every request. Each cell: requests a
+second, median and 99th percentile of the latency.
+
+| Server | Replicas | Connections | Kept | New |
+|---|---|---|---|---|
+| 2 CPUs | 1 | 16 | 7,300 · 1.8 ms · 7 ms | 2,600 · 4.5 ms · 10 ms |
+| | 1 | 64 | 7,100 · 7.9 ms · 27 ms | 3,400 · 18 ms · 37 ms |
+| | 1 | 256 | 2,200 · 59 ms · 259 ms, 0.8% answered 503 | 1,900 · 100 ms · 246 ms, 0.5% answered 503 |
+| | 4 | 16 | 5,900 · 2.3 ms · 9 ms | 3,100 · 4.8 ms · 12 ms |
+| | 4 | 64 | 5,900 · 9.5 ms · 33 ms | 3,100 · 20 ms · 43 ms |
+| | 4 | 256 | 5,600 · 44 ms · 109 ms | 3,100 · 81 ms · 160 ms |
+| 4 CPUs | 1 | 16 | 12,400 · 1.0 ms · 5 ms | 4,600 · 2.4 ms · 8 ms |
+| | 1 | 64 | 12,700 · 4.1 ms · 17 ms | 5,400 · 10 ms · 43 ms |
+| | 1 | 256 | 1,900 · 32 ms · 5.0 s, 1.7% answered 503 | 3,400 · 51 ms · 175 ms, 0.3% answered 503 |
+| | 4 | 16 | 10,500 · 1.1 ms · 7 ms | 4,600 · 2.9 ms · 11 ms |
+| | 4 | 64 | 11,600 · 4.3 ms · 21 ms | 4,800 · 12 ms · 44 ms |
+| | 4 | 256 | 10,900 · 20 ms · 81 ms | 5,100 · 45 ms · 134 ms |
+
+The server is saturated at 16 connections already: more connections add
+latency, not requests. Twice the processors carried 1.7 times the requests.
+Replicas add nothing on one server when the application is this cheap — they
+share the processors with the proxy — and one thing they do change: a single
+replica behind 256 connections was the only arrangement in which requests
+failed. Why that replica stopped being served was not established. Over
+plain HTTP nothing was measured: the proxy answers it with a redirect to
+HTTPS and serves no application there. The 4 CPU numbers were taken while a
+second test server was deploying applications on other processors of the
+same machine.
+
+During a rolling deployment of the four replicas, at a fixed rate for 40
+seconds: 20,001 of 20,001 requests answered 200 at 500 a second on kept
+connections, and 8,001 of 8,001 at 200 a second on new ones, on both sizes;
+the deployments took 9.5 to 10.5 s.
+
+**The database in a year.** Rows and the bytes of their pages, indexes
+included, as SQLite's `dbstat` counts them in the database of the server
+above after an hour with 250 applications and 297 deployments:
+
+| | Bytes a row | Rows | Kept |
+|---|---|---|---|
+| A CPU and memory sample | 101 | one per replica every 30 s | 7 days |
+| A minute of an application's traffic | 221 (from 74 rows) | one per application and minute with requests | 7 days |
+| A deployment of two replicas: its record, its replicas, its 13 events | 2,460 in all | | as long as the application |
+| An audit entry | 244 | one per request that changes something | a year, at most 100,000 |
+| An ended container in the log archive's index | 605 | one per replaced or crashed replica | 14 days; the lines are files, at most 1 GB |
+| An application's other events | 125 | | the newest 500 per application |
+
+Runs of jobs (the last 50 per job) and of backups (`keep`, 7 by default) are
+bounded too; their rows were not measured, too few existed. For 10
+applications with 20 replicas between them, 5 deployments a day, requests in
+every minute:
+
+```text
+samples      20 replicas × 20,160 in a week × 101 bytes   = 41 MB, and no more after the first week
+traffic      10 applications × 10,080 minutes × 221 bytes = 22 MB, and no more after the first week
+deployments  5 a day × 365 × 2,460 bytes                  = 4.5 MB a year, for ever
+audit        5 a day × 365 × 244 bytes                    = 0.4 MB, and no more after the first year
+events       10 applications × 500 × 125 bytes            = 0.6 MB at most
+```
+
+About 70 MB after a year, of which only the deployments keep growing: 45 MB
+in ten years. A deployment's record holds its `deploy.yaml`, 254 bytes in the
+test; a longer one, with `env`, adds its length to every deployment. The
+measured file was 5.3 MB with 42,000 samples in it, next to a write-ahead log
+of 5.2 MB that stays at about that size. The database is not what a server
+runs out of.
+
+**A backup and a restore.** One volume holding one file of random bytes,
+`shipwick backups run`, `verify` and `restore`, to the server's own directory
+(no bucket), each size once without and once with
+`SHIPWICK_BACKUP_PASSPHRASE`, on both server sizes. The CLI asks every half
+second whether the server is done, so no time is finer than that.
+
+| Volume | Backup | Verify | Restore |
+|---|---|---|---|
+| 100 MB | 0.5 s | 1.0 s | 0.5 s |
+| 1 GB | 1.5–2.0 s | 1.5 s | 1.0 s |
+| 5 GB | 11.5–15.0 s (330–430 MB/s) | 6.0–10.5 s | 3.5–6.5 s (770–1,430 MB/s) |
+
+Encryption made no difference that this resolution shows, and neither did
+the data: an archive is not compressed, and 1 GB of one repeated line took
+the same as 1 GB of random bytes in three runs of four (5.5 s in the fourth).
+The files had just been written and the disk is a desktop's: on a server the
+disk decides, and a first reading of 5 GB from a network volume is slower
+than this. A bucket adds the upload, which was not measured.
+
+The agent's own state, with a database of 220 to 230 KB: `shipwick server
+backup` 0.5 s, decrypting the file 0.1 s, and — following
+[Restoring the agent's state](#backups-the-server-takes) on the same server —
+1.0 s from stopping the agent to an agent that answers with the restored
+database. With a database of the size a year makes it was not measured.
+
+**When you have outgrown Shipwick.** By these numbers, not at twenty
+applications: a small server carries fifty with a third of its processors
+spent on watching them, and a few thousand requests a second through the
+proxy before the proxy is what limits it. You have outgrown it
+
+- when the containers number in the hundreds. Supervision is one loop that
+  asks Docker about every application every second; past about 100
+  applications on two processors it no longer keeps that pace, recovery and
+  deployments slow down with every application added, and past 300
+  containers the kernel's defaults give out. A larger server moves the
+  second, not the first;
+- when one server's processors or memory are not enough for the applications
+  themselves, and the next size is not for sale. Replicas on one server
+  protect against a crash and a bad deployment; they do not add capacity;
+- when the server's own failure must not be an outage.
+  [A second server kept ready](#a-second-server-kept-ready) shortens it;
+  nothing in Shipwick removes it, and scheduling across machines is
+  [out of scope](../ROADMAP.md#out-of-scope) for good.
+
+Until then the limits are the server's: its memory first, at 7 MB a container
+before the application uses any.
+
 ## 11. Caddy
 
 ```yaml
@@ -2553,12 +3260,16 @@ longer, requests wait for it to end, up to five seconds each.
 **One application's requests never reach another.** Docker gives the address
 of a container that stopped to the next container that starts, and for a
 moment the proxy still holds that address for the application that had it.
-So the agent lets such an address rest: after a container of one application
-stops — retired by a deployment, stopped, crashed — a container of another
-application starts no sooner than 2.5 seconds later. A deployment of one
-application never waits for itself. Deploying several at once
-(`shipwick.yaml`) takes longer for it: three applications of two replicas
-each, redeployed together, took 18 to 20 seconds where they had taken 6.
+So the agent lets such an address rest before a container of another
+application may start. When it stops a replica itself — retired by a
+deployment, stopped, restarted — it tells the proxy to forget that replica,
+and the address rests for half a second after the proxy has answered. When a
+container stops by itself, a crash, nobody could tell the proxy in time, and
+the address rests for 2.5 seconds, which is longer than the proxy remembers
+it. A deployment of one application never waits for itself, and several
+deployed at once (`shipwick.yaml`) hardly wait for each other: three
+applications of two replicas each, redeployed together, took 7.3 to 7.8
+seconds where one alone took about 6.
 
 - **Only healthy replicas receive traffic.** A replica that fails its health
   check is taken off the name within a second and put back once it passes
@@ -2679,6 +3390,9 @@ The agent also works with a Caddy that lacks Shipwick's part — the official
 image, or the proxy of a release before 0.8 — by asking for replicas the way
 every Caddy can; a name lookup that Docker leaves unanswered then holds the
 requests to every application until the resolver gives up, five seconds.
+Such a proxy cannot be told to forget a replica either, so every address
+rests for the full 2.5 seconds and applications deployed together wait for
+each other: the three above took 17.6 seconds.
 `shipwick doctor` and the dashboard's page of the server say when that is the
 case, and the agent offers the proxy its own way again once a minute, so
 replacing the image is all it takes.
@@ -2689,7 +3403,8 @@ saved, which the older proxy cannot read; the agent loads the routes again a
 few seconds later. Without the installer — the packages, or a compose file of
 your own — remove it yourself before the older proxy starts, or it will not
 start: `docker compose run --rm --no-deps --entrypoint rm caddy -f
-/config/caddy/autosave.json`.
+/config/caddy/autosave.json`. What else going back can take is under
+[Upgrading](#upgrading).
 
 **Wildcards.** `domain` and `aliases` may be a wildcard — one leading `*`
 label, quoted in YAML:
@@ -2980,6 +3695,60 @@ container that mounts `/`. Consequently:
   a TCP port on the application network — every application container could
   then reconfigure the proxy.
 
+**Who can reach the API.** The proxy, the dashboard and the server itself;
+not the applications. The agent has to be on the `shipwick` network, where it
+probes replicas, and until 0.8 it listened there: any application's container
+could reach port 9000 and try tokens against it. Now the API has a network of
+its own, `shipwick-control`, which the agent, Caddy and the dashboard are on
+and no application is. The agent listens on its address there and on
+loopback, and on nothing else; from inside an application's container a
+connection to the agent is refused, and the dashboard is not reachable from
+there either. The installer sets this up, on an upgrade as well, with the
+applications left running.
+
+Where a request from an application's container reaches the agent all the
+same, it is answered `403 APPLICATION_CALLER` before its token is looked at,
+`GET /health` included, and it is not counted as a failed attempt. Which
+requests those are is decided by network, not by the caller's address alone:
+on a bridge it shares with other containers, a container can answer for any
+address of that bridge — the proxy's, the gateway's — and complete a
+request under it, with the capabilities every container has by default. So
+on the control network the agent answers the addresses of that network and no
+others, and what arrives from an address of `shipwick` or `shipwick-services`
+is an application, whoever it claims to be.
+
+An application that is meant to call the API — a deployment tool you run on
+Shipwick — does so at the API's hostname (`https://<SHIPWICK_AGENT_DOMAIN>`),
+through the proxy, as anything outside the server does.
+
+Three arrangements leave the API open to applications, protected by the
+token alone. The agent then works as it did before 0.8, refuses the
+containers it manages by their addresses — which stops a mistake, not
+someone who claims another address — writes a warning to its log when it
+starts, and says so: `shipwick doctor` reports it, and `GET /server` carries
+`open_to_applications`.
+
+- **A compose file of your own without the control network.** Add it as
+  `configs/compose.production.yml` has it: the agent on `shipwick-control`
+  alone (it joins `shipwick` by itself), Caddy on all three networks, the
+  dashboard on `shipwick-control` alone.
+- **`SHIPWICK_LISTEN_ADDR` set for the agent's container.** Leave it unset:
+  the image's default lets the agent choose the control network.
+- **The API's port published (`ports: ["127.0.0.1:9000:9000"]`) on Docker
+  before 28.** Docker forwards a published port to the network a container's
+  default route goes through, and before 28 that is the `shipwick` network
+  for the agent; the agent keeps listening there so that the port works. On
+  Docker 28 and later the port arrives on the control network and nothing is
+  open. Upgrade Docker, or give the API a hostname and remove the port.
+
+An agent installed [from a package](#installation-from-a-package) is a
+process of the host, and the addresses of a host are reachable from every
+container on it. It refuses every address of the two application networks,
+and on the address it has on the control network every address that is not
+of that network; nothing is open.
+Two arrangements give the agent less than that socket, a socket proxy and
+rootless Docker: see [Less than the whole socket](#less-than-the-whole-socket).
+
 **Tokens and roles.** The token the installer prints is the *root* token:
 `admin`, and the one to keep for yourself. Create more, each with the role it
 needs — `read` sees everything, `deploy` also deploys, rolls back, stops and
@@ -3196,8 +3965,114 @@ What Shipwick does:
   application — or the agent itself — is served on.
 - Containers are never privileged, run with `no-new-privileges`, get no host
   mounts and publish no host ports unless `publish` lists some, and then only
-  those. Their logs are size-capped.
+  those. Their logs are size-capped. `security` in deploy.yaml takes away
+  more, per application: see below.
 - The agent image is distroless: no shell, no package manager.
+
+**Containers locked down further.** What the list above says holds for every
+container and cannot be switched off. The `security` block of deploy.yaml
+takes away more, for an application that can do without it. Each of its keys
+narrows; there is none that widens — no capability can be added, nothing of
+the server mounted, no privilege asked for — so a `deploy.yaml` with the
+block is never less confined than one without it.
+
+```yaml
+user: "1000:1000"
+security:
+  read_only: true                  # the root filesystem cannot be written
+  tmpfs:                           # scratch space, in memory
+    - /tmp
+    - path: /var/cache/api
+      size: 200mb                  # 1mb to 1gb; 64mb unless set
+  capabilities: none               # or the ones to keep: [CHOWN, SETGID, SETUID]
+  non_root: true                   # a container that would run as root is refused
+```
+
+The block applies to every container made from the application: its
+replicas, the `pre_deploy` hook, jobs, `shipwick run`, the container of
+`backups.before_in: container` and the one a backup is verified in. A job is
+not a way around it. `shipwick validate` says what the block takes away, and
+`GET /applications/{name}` returns it with the rest of the spec.
+
+*`read_only`.* An attacker who can write files inside a container can replace
+the application's code and leave something behind for the next request; with
+a read-only root there is nowhere to write it. Volumes stay writable, and
+most applications need a little more: a `tmpfs` entry is a directory in
+memory, empty when a container starts and gone when it stops, never shared
+between replicas. It is mounted `nosuid`, `nodev` and `noexec` — a file there
+cannot be executed — and writable by every user, like `/tmp`. What is written
+to it is memory: it counts against `resources.memory` as the process's own
+does, and an application that fills a `tmpfs` beyond its memory limit is
+stopped for it (48 MB written into a `tmpfs` of 64 MB under `memory: 32mb`
+ended with the writer killed for memory). Data that must be executed, shared
+or kept belongs in a volume. An application that fails under `read_only`
+names the path in its log (`Read-only file system`); that path is the
+`tmpfs` entry it needs.
+
+*`capabilities`.* A process that runs as root inside a container is root with
+fourteen of the kernel's capabilities, Docker's default set: `AUDIT_WRITE`,
+`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `MKNOD`,
+`NET_BIND_SERVICE`, `NET_RAW`, `SETFCAP`, `SETGID`, `SETPCAP`, `SETUID`,
+`SYS_CHROOT`. `capabilities: none` drops all of them; a list keeps the ones
+it names and drops the rest. A name outside the set is refused. An
+application that runs as another user than root and listens on a port above
+1024 needs none. What some common images need was found by starting the
+Alpine variant of each under `read_only` with one set after another, on
+Docker 29.8:
+
+| Image, as it is started | `capabilities` | `tmpfs` |
+|---|---|---|
+| `nginx`, as root (the image's default) | `[CHOWN, SETGID, SETUID]` | `/var/cache/nginx`, `/var/run` |
+| `node`, with `user: "1000:1000"`, listening on 3000 | `none` | `/tmp`, if the application writes there |
+| `postgres:17`, as root (the image's default) | `[CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]` | `/var/run/postgresql`, `/tmp` |
+| `postgres:17`, with `user: "70:70"` (the Alpine image's `postgres`) | `none` | `/var/run/postgresql`, `/tmp` |
+| `redis:7`, as root (the image's default), a volume at `/data` | `[SETGID, SETUID]` | — |
+| `redis:7`, with `user: "999:1000"` (the Alpine image's `redis`), a volume at `/data` | `none` | — |
+
+An image that starts as root to give its files to another user and then
+become that user — what these three do — needs `CHOWN`, `SETGID` and
+`SETUID` for exactly that, and nothing once it runs; started as the other
+user to begin with, it needs none. PostgreSQL was restarted on its filled
+volume as well: with fewer than the five capabilities it starts on an empty
+volume and not again. `NET_BIND_SERVICE` is missing from the list for nginx
+on purpose: Docker lets every user in a container listen on every port (the
+containers here had `net.ipv4.ip_unprivileged_port_start` at 0), so port 80
+needs no capability. A dropped capability shows as `Operation not permitted`
+in the application's log, next to the call that needed it.
+
+*`non_root`.* The agent reads the user from `user` in deploy.yaml and, when
+that is not set, from the image's own configuration, and refuses to create a
+container that would run as root: a user that is missing, `root` or the id
+0. A user given by name is refused as well. Which id a name stands for is
+written in the image's `/etc/passwd`, which the agent does not read, and an
+image is free to give the id 0 a second name; a numeric id is the one thing
+that can be held to. The remedy is in the message — `user: "1000:1000"`, with
+the id the image's user has. `shipwick validate` already refuses `user: root`
+or a name next to `non_root`; what the image says is known once it is on the
+server, so a deployment of an image that runs as root fails there, after the
+pull and before anything is started, with the previous version still
+serving:
+
+```text
+security.non_root refuses image nginx:1.27: it names no user, and a
+container without one runs as root; set user in deploy.yaml to a numeric id
+the image can run as, e.g. user: "1000:1000", or build the image with a USER
+instruction
+```
+
+Every container made later from the same deployment — a restart, a job, a
+command — is held to the same check when it is created, because a tag can
+come to name another image.
+
+What the block does not touch: the seccomp and AppArmor profiles are
+Docker's defaults for every container, with or without it, and there is no
+key to change them; user namespaces are the daemon's to configure. An agent
+older than 0.8 does not know `security` and refuses a `deploy.yaml` that
+has it, as it refuses every key it does not know — the application is not
+deployed without what the block asks for — and `shipwick deploy` says that
+the server is older than the file and how to upgrade it. An export is the
+exception: an agent older than 0.8 that imports an export written by a newer
+one reads the applications without the block.
 
 
 **Secrets at rest.** The `env` values of every deployment, the secrets
@@ -3264,6 +4139,83 @@ the API; the log names the bucket and its host. Taking and verifying a backup
 needs the `deploy` role; downloading, restoring or removing one, and anything
 about the agent's state, needs `admin`.
 
+**Verifying a release.** The agent is root on your server, so it should be
+possible to say where it came from. From 0.8.0 on, every release is signed
+by the workflow that built it, and by nothing else: there is no signing key,
+in the repository or anywhere. GitHub tells Sigstore which workflow is
+running and for which tag, Sigstore issues a certificate for that identity
+that is valid for ten minutes, and the signature goes into a public log. A
+signature verifies only for the identity you name, which for release
+`v0.8.0` is
+
+```text
+https://github.com/shipwick/shipwick/.github/workflows/release.yml@refs/tags/v0.8.0
+issued by https://token.actions.githubusercontent.com
+```
+
+so what it proves is that the file or image was produced by that workflow
+file, at that tag, in that repository: a commit you can read. It does not
+prove that the commit is good.
+
+The release's files — the CLI for every platform, the packages, the compose
+file, the installer, the digests of the images — are listed in
+`checksums.txt`, and `checksums.txt` is what is signed
+(`checksums.txt.sigstore.json`). With
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.4
+or later:
+
+```bash
+curl -fsSLO https://github.com/shipwick/shipwick/releases/download/v0.8.0/checksums.txt
+curl -fsSLO https://github.com/shipwick/shipwick/releases/download/v0.8.0/checksums.txt.sigstore.json
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity https://github.com/shipwick/shipwick/.github/workflows/release.yml@refs/tags/v0.8.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c --ignore-missing checksums.txt     # the files you downloaded, against the list
+```
+
+The installer and `shipwick upgrade` run the first of these for you when
+cosign is installed ([§4](#4-installation)). The images are signed by
+digest; a tag is resolved to its digest when you verify, so this proves what
+the registry serves under the tag now. With cosign 3 (2.6 reads these
+signatures with `--new-bundle-format`):
+
+```bash
+cosign verify ghcr.io/shipwick/agent:0.8.0 \
+  --certificate-identity https://github.com/shipwick/shipwick/.github/workflows/release.yml@refs/tags/v0.8.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+and the same for `ghcr.io/shipwick/dashboard` and `ghcr.io/shipwick/caddy`.
+The digest it prints is the `index` line of that image in the release's
+`image-digests.txt`, and what `docker image inspect --format
+'{{.RepoDigests}}'` shows on a server that pulled the tag.
+
+Each file and each image also has a provenance attestation, kept by GitHub:
+the repository, the commit, the workflow and the run. With the GitHub CLI,
+signed in:
+
+```bash
+gh attestation verify shipwick_linux_amd64 --repo shipwick/shipwick \
+  --cert-identity https://github.com/shipwick/shipwick/.github/workflows/release.yml@refs/tags/v0.8.0
+gh attestation verify oci://ghcr.io/shipwick/agent:0.8.0 --repo shipwick/shipwick \
+  --cert-identity https://github.com/shipwick/shipwick/.github/workflows/release.yml@refs/tags/v0.8.0
+```
+
+**What a release is made of.** Each binary of a release has a bill of
+materials next to it, `shipwick_linux_amd64.spdx.json` and so on, and
+`shipwick-agent_amd64.spdx.json` for the agent inside the packages: the Go
+modules it was linked from, with their versions, and the Go it was compiled
+with, read from the binary itself. They are listed in `checksums.txt` like
+every other file. Each image carries one for each platform, written when it
+was built from the files in it, as part of the signed manifest list:
+
+```bash
+docker buildx imagetools inspect ghcr.io/shipwick/agent:0.8.0 \
+  --format '{{ json (index .SBOM "linux/amd64").SPDX }}'
+```
+
+All of them are SPDX 2.3 JSON, which scanners such as Grype and Trivy read.
+
 **What leaves the server unasked.** One request a day, from the agent to
 `https://github.com/shipwick/shipwick/releases/latest`, to learn whether a
 newer release exists. It is a `HEAD` request without a body, a query or a
@@ -3281,6 +4233,231 @@ come from. The CLI asks GitHub for the latest release only when you run
 Protect the data directory regardless; it is created `0700`.
 
 Found a vulnerability? Please report it privately: [SECURITY.md](../SECURITY.md).
+
+### Less than the whole socket
+
+The standard installation gives the agent `/var/run/docker.sock` of a daemon
+that runs as root, which is why everything above starts with "the Docker
+socket is root". Two arrangements give it less. They are independent and can
+be combined; neither is what the installer sets up, and each costs
+something. Both are run by a script in the repository, in a Docker daemon of
+its own: `sh scripts/test-socket-proxy.sh`, `sh scripts/test-rootless.sh`.
+
+#### Behind a socket proxy
+
+[configs/compose.socket-proxy.yml](../configs/compose.socket-proxy.yml)
+puts [wollomatic/socket-proxy](https://github.com/wollomatic/socket-proxy)
+between the agent and Docker. The proxy holds the socket; the agent gets a
+second, filtered socket in a volume the two share, and no other way to
+Docker. The proxy has no network, no capabilities and a read-only
+filesystem, and answers only the requests on its list — a method and a path
+each — with `403` for every other.
+
+```bash
+cd /opt/shipwick
+curl -fsSL -o compose.override.yml \
+  https://raw.githubusercontent.com/shipwick/shipwick/v<version>/configs/compose.socket-proxy.yml    # or merge it into yours
+docker compose up -d
+```
+
+By hand it is `docker compose -f compose.production.yml -f
+compose.socket-proxy.yml up -d`. The file replaces the agent's list of
+mounts (`!override`, Docker Compose 2.24.4 or newer), which is what takes the
+socket away from it: mounts of your own, such as a Docker `config.json`, go
+into the same list. Take the file of the version the agent is. The list is
+the calls that version makes; a newer agent that needs one more is
+refused it, which shows as `Forbidden` in a failed operation and as a
+`blocked request` line in `docker logs shipwick-socket-proxy-1`. With
+`SHIPWICK_SOCKET_PROXY_LOG_LEVEL=DEBUG` in `.env` the proxy logs every
+request it lets through as well; `SHIPWICK_SOCKET_PROXY_IMAGE` names another
+image of it than the version the file pins.
+
+The list, which is all the agent ever asks of Docker:
+
+| Call | What the agent does with it |
+|---|---|
+| `HEAD`, `GET /_ping` | Is the daemon there, and which API version does it speak |
+| `GET /info` | The server's status; the daemon's proxy, when a pull fails |
+| `GET /system/df` | The sizes of volumes |
+| `GET /containers/json`, `/containers/<id>/json` | The containers of an application and their state; the reverse proxy's container; its own |
+| `GET /containers/<id>/logs`, `/stats` | Logs, followed or read; Caddy's access log; CPU and memory |
+| `GET`, `PUT /containers/<id>/archive` | A volume read for a backup or an export, and written by a restore; the files of a static application |
+| `POST /containers/create`, `/containers/<id>/start`, `/stop`, `/wait`; `DELETE /containers/<id>` | Replicas, jobs, the containers of backups |
+| `POST /containers/<id>/exec`, `/exec/<id>/start`; `GET /exec/<id>/json` | Health checks by command, `backups.before`, the checks on a static folder |
+| `POST /images/create`, `/images/load` | Pulling an image; an image built by the CLI, or brought by an import |
+| `GET /images/json`, `/images/<name>/json`, `/images/get` | Which images are here, and their layers; an image written into an export |
+| `DELETE /images/<name>` | Images no deployment can go back to |
+| `GET /networks/<name>`, `POST /networks/create` | The two networks, made at the first start |
+| `POST /networks/<name>/connect`, `/disconnect` | A replica's names on the services network |
+| `GET /volumes`, `POST /volumes/create`, `DELETE /volumes/<name>` | The volumes of applications |
+| `POST /auth` | A registry login is tried before it is stored |
+
+It was found by reading the agent and confirmed by recording: the
+integration tests and every operation of `scripts/test-cycle.sh` — deploy,
+rollout, rollback, stop and start, a hook, a job, a one-off command, a
+backup with its verification, a restore, a static folder, a built image, an
+export and an import, deletion — run through the proxy with nothing
+refused.
+
+**What it takes away.** Everything in the Engine API that is not on the
+list: Swarm, plugins, builds, `commit`, `kill`, `restart`, `rename`,
+`update`, `export`, `top`, events, the prune endpoints, pushing and tagging
+images, removing networks. And, by a check the proxy makes on the body of a
+request, every bind mount: a container created with a directory of the
+server mounted (`-v /:/host`, `--mount type=bind`), with another
+container's volumes (`--volumes-from`), or a volume made of a directory
+(`o=bind`) is refused. The agent mounts named volumes only, so the one
+directory the proxy is told to allow does not exist. Each of these was
+tried through the filtered socket and refused.
+
+**What it does not take away.** The proxy reads the path of a request and
+its bind mounts, and nothing else of its body. `POST /containers/create` is
+on the list, so whoever holds the filtered socket can create a privileged
+container, one in the server's process namespace with capabilities added, or
+one with a device of the server: each was tried and accepted, and each is
+root on the server. They can also do everything the agent does, to anything:
+run a command in any container, the reverse proxy included; read the
+environment of any container, and so every secret; mount any named volume,
+the agent's own data among them; remove containers, images and volumes.
+
+So the proxy is not a wall between a compromised agent and the server. What
+it changes is narrower: a fault that makes the agent send one request it
+never sends is stopped and logged, the part of the Engine API it has no use
+for is out of reach of anything that goes wrong in it, and the paths to root
+that remain all go through creating a container, which is one place to look. A filter on
+the body of that request — no `Privileged`, no added capabilities, no
+devices, no namespaces of the server — is what would make it a wall. The
+proxy used here checks bind mounts and stops there; the other maintained
+one, [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy),
+filters by section of the API and would allow every call on containers
+once any is allowed, by its documentation. Docker's own authorization
+plugins see the whole request, and apply to every client of the daemon,
+your own `docker` commands included; none was tried here. For a server
+where a compromised agent must not become root, rootless Docker below is
+the arrangement that holds.
+
+#### Rootless Docker
+
+A [rootless daemon](https://docs.docker.com/engine/security/rootless/) runs
+as an ordinary user of the server, and so does everything it starts: the
+agent, the proxy, the applications. Root inside a container, a privileged
+container, the Docker socket itself — each is that user and no more.
+Whoever takes over the agent has that user's files, which is all of
+Shipwick, its applications, their data and their secrets, and not the
+server.
+
+The installer does not set this up: it runs as root and installs into
+`/opt/shipwick`. Put `compose.production.yml` of the release,
+[configs/compose.rootless.yml](../configs/compose.rootless.yml) and a `.env`
+with `SHIPWICK_AGENT_TOKEN` (and the hostnames) into a directory of the user
+who runs Docker, and start it as that user:
+
+```bash
+docker compose -f compose.production.yml -f compose.rootless.yml up -d
+```
+
+The overlay mounts `$XDG_RUNTIME_DIR/docker.sock`, where a rootless daemon
+listens, in place of `/var/run/docker.sock`; `SHIPWICK_DOCKER_SOCKET` in
+`.env` names another path. With the socket proxy as well, set
+`SHIPWICK_DOCKER_SOCKET=/run/user/<uid>/docker.sock` in `.env` and use
+`compose.socket-proxy.yml` instead of `compose.rootless.yml`: the proxy then
+holds that socket.
+
+What the server needs first, as root:
+
+```bash
+# Ports 80 and 443 for a process that is not root.
+echo 'net.ipv4.ip_unprivileged_port_start=80' > /etc/sysctl.d/50-shipwick.conf
+sysctl --system
+
+# Limits: let the user's services have the cgroup controllers.
+mkdir -p /etc/systemd/system/user@.service.d
+printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/delegate.conf
+systemctl daemon-reload
+
+# The daemon, and with it every container, starts at boot and not at login.
+loginctl enable-linger <user>
+```
+
+**Ports.** Without the first setting the proxy does not start, and Docker
+says why:
+
+```text
+cannot expose privileged port 80, you can add 'net.ipv4.ip_unprivileged_port_start=80' to /etc/sysctl.conf (currently 1024), or set CAP_NET_BIND_SERVICE on rootlesskit binary, or choose a larger port number (>= 1024)
+```
+
+After a start that was refused, `docker compose up -d` again is not enough:
+the proxy's container was left on some of its networks only and starts that
+way, reaching the agent or the applications and not both. Make it again with
+`docker compose … up -d --force-recreate caddy`. The same message fails a
+deployment whose `publish` names a port below the setting; ports from it
+upwards are published as on any server.
+
+**Limits.** `resources.cpu` and `resources.memory` are enforced when the
+daemon has the cgroup controllers, which takes cgroup v2, systemd and the
+delegation above: with them a replica limited to 32 MB had 32 MB in its
+`memory.max`, was killed when it took more, and was reported `out of
+memory`, as on a rootful server. Without them — no systemd, or no
+delegation — Docker accepts the limits, reports them back when asked about
+the container, and applies nothing; what it reports as one container's CPU
+and memory is then the usage of everything the daemon runs. Docker does not
+say so when the container is created. Shipwick does, wherever a limit is
+shown:
+
+```text
+$ shipwick deploy
+! Docker on this server does not enforce resources.memory and resources.cpu: the replicas run without a limit. shipwick doctor says what the server lacks
+
+$ shipwick status
+Limits     0.5 CPU, 64 MB  (Docker on this server does not enforce the memory and CPU limits; see shipwick doctor)
+
+$ shipwick server status
+Docker          29.8.2, rootless; memory and CPU limits are not enforced
+
+$ shipwick doctor
+! Docker on the server is rootless and does not enforce memory and CPU limits: no replica is held to resources.memory and resources.cpu of its deploy.yaml, and the usage shown for a replica is not its own. Delegate the cpu and memory cgroup controllers to the user who runs Docker, on a server with systemd (handbook: Rootless Docker)
+```
+
+The agent's log says it at every start, and the `memory` alert is not raised
+on such a server: there is no limit for a replica to come close to. A
+rootful daemon whose kernel offers no memory controller reports itself the
+same way and is answered the same way, without the word "rootless"; no such
+server was at hand to run it on.
+
+**The address of a client.** Rootless Docker's default port forwarding
+hands every connection to the proxy from one address, the gateway of the
+proxy's network: `172.18.0.1` for a request that came from `172.17.0.11` in
+the test, where a rootful daemon passed `172.17.0.11` on. Everything that
+keeps a client's address therefore keeps that one: the `FROM` column of the
+audit trail, and the client of the requests the proxy logs for an
+application. Docker's documentation names another port
+driver, `slirp4netns`, as the one that keeps the address, at a cost in
+throughput. In the containers this was tested in, connections from outside
+did not arrive with it, so it is not confirmed here.
+
+**What works as on any server.** Deployments, rollouts and rollbacks; the
+two networks, the names replicas carry on the second one, leaving and
+joining it; health checks from the agent; published ports; volumes, backups
+with their verification, restores, exports and imports; static folders;
+images built by the CLI; jobs and one-off commands; the server's memory,
+swap and disk in `shipwick server status`, which are the server's and not
+the user's. Volumes are under the user's `~/.local/share/docker/volumes`.
+After the daemon was restarted, the agent, the proxy and the applications
+came back by themselves.
+
+**Not covered.** The agent as a service of the host, as the `.deb` and
+`.rpm` install it, was not run against a rootless daemon, and is not
+expected to work: container networks are inside the daemon's own network
+namespace, where a process of the host cannot reach a replica for its
+health check. Nor was a reboot of a real server, SELinux or AppArmor in
+enforcing mode.
+
+**Tested on.** Docker 29.8.2 rootless (RootlessKit 3.1.0, Compose 5.5 and
+5.6) on a 6.18 kernel with cgroup v2, in two privileged containers: the
+`docker:dind-rootless` image, which has no systemd and therefore no
+controllers, and Debian 12 with systemd 252 and the delegation above. Not
+on a server or a virtual machine of its own. `scripts/test-rootless.sh`
+runs the first of the two, alone and with `--socket-proxy`.
 
 ### Signing in with the company's accounts
 
@@ -3562,6 +4739,7 @@ make test               # unit tests: no Docker, no network, a few seconds
 make test-race          # …under the race detector (needs cgo)
 make test-race-docker   # …the same in a Linux container, for machines without cgo
 make test-integration   # real container lifecycle against the local Docker daemon
+make test-full-disk     # what a disk without room does to the agent, on an 8 MB filesystem in a container
 make test-dashboard     # dashboard: typecheck, unit tests, production build
 make lint
 ```

@@ -238,3 +238,58 @@ func TestBeforeInIsReplicaUnlessItSaysContainer(t *testing.T) {
 		}
 	}
 }
+
+func TestAPlainValueIsWrittenAsItIsAndReadsBackTheSame(t *testing.T) {
+	a, err := Parse([]byte("name: my-api\nimage: my-api:1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As the agent stores them: among them a literal ${NAME}, and one that
+	// was escaped twice.
+	a.Env = map[string]string{"LOG_LEVEL": "debug", "PORT": "8080", "ON": "true", "EMPTY": "", "LINES": "one\ntwo",
+		"TEMPLATE": "Hello ${NAME}", "ESCAPED": "$${NAME}", "API_KEY": "sk-1"}
+	refs := References{Plain: []string{"LOG_LEVEL", "PORT", "ON", "EMPTY", "LINES", "TEMPLATE", "ESCAPED"}}
+
+	for _, escape := range []bool{false, true} {
+		text, masked, err := Document(a, refs, escape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(masked, []string{"env.API_KEY"}) || strings.Contains(text, "sk-1") {
+			t.Errorf("masked = %v:\n%s", masked, text)
+		}
+		got, err := Parse([]byte(text))
+		if err != nil {
+			t.Fatalf("the document does not parse: %v\n%s", err, text)
+		}
+		if len(ReferencesOf(got).Env) != 0 {
+			t.Errorf("a plain value reads as a reference:\n%s", text)
+		}
+		// What the agent makes of the document when it is deployed again.
+		for name, value := range got.Env {
+			got.Env[name] = Placeholder.ReplaceAllStringFunc(value, func(m string) string { return strings.TrimPrefix(m, "$") })
+		}
+		want := map[string]string{"LOG_LEVEL": "debug", "PORT": "8080", "ON": "true", "EMPTY": "", "LINES": "one\ntwo",
+			"TEMPLATE": "Hello ${NAME}", "ESCAPED": "$${NAME}", "API_KEY": Mask}
+		if !reflect.DeepEqual(got.Env, want) {
+			t.Errorf("escape=%v: env = %q, want %q\n%s", escape, got.Env, want, text)
+		}
+	}
+}
+
+func TestOnlyAValueOfTheApplicationThatIsNoReferenceIsPlain(t *testing.T) {
+	a := App{Env: map[string]string{"DATABASE_URL": "postgres://app:hunter2@db/app", "LOG_LEVEL": "debug", "REGION": "eu"}}
+	refs := References{
+		Env:   map[string]string{"DATABASE_URL": "postgres://app:${DB_PASSWORD}@db/app"},
+		Plain: []string{"REGION", "GONE", "DATABASE_URL", "LOG_LEVEL", "REGION"},
+	}
+	if got := refs.For(a).Plain; !reflect.DeepEqual(got, []string{"LOG_LEVEL", "REGION"}) {
+		t.Errorf("plain = %v", got)
+	}
+	if got := refs.PlainFields(a); !reflect.DeepEqual(got, []string{"env.LOG_LEVEL", "env.REGION"}) {
+		t.Errorf("fields = %v", got)
+	}
+	if (References{Plain: []string{"LOG_LEVEL"}}).Empty() {
+		t.Error("a statement about plain values is something to keep")
+	}
+}

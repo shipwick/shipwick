@@ -2,6 +2,7 @@
 import type { Server } from '~/types/api'
 import { stateBackupDisplay } from '~/utils/backups'
 import { formatBytes, pluralize } from '~/utils/format'
+import { describeDocker } from '~/utils/limits'
 import { describeLogArchive } from '~/utils/logArchive'
 import { describeNetwork } from '~/utils/network'
 import type { Tone } from '~/utils/status'
@@ -27,6 +28,8 @@ const network = computed(() => describeNetwork(server.value.network))
 /** What the agent heard about newer releases, when there is nothing to do about it: said quietly next to its version. */
 const upToDate = computed(() => updateLine(server.value.update, now.value))
 const newer = computed(() => updateNotice(server.value))
+/** The daemon's version, whether it is rootless, and which limits it takes and does not apply. An agent before 0.8 says the version only. */
+const docker = computed(() => describeDocker(server.value))
 </script>
 
 <template>
@@ -101,6 +104,18 @@ const newer = computed(() => updateNotice(server.value))
 
     <UiPanel title="Services">
       <dl class="facts sm:grid-cols-2">
+        <!-- Said only by an agent that says so: absent is not "closed" on an agent before 0.8, and not a row. -->
+        <div v-if="server.open_to_applications" class="sm:col-span-2">
+          <dt class="label">
+            Agent API
+          </dt>
+          <dd class="mt-0.5">
+            <span class="flex items-start gap-2 text-warn" role="status">
+              <UiIcon name="alert" :size="14" class="mt-[3px]" />
+              <span class="min-w-0 break-words">Application containers can reach the agent's API; only the token keeps them out. On the server, run the installer again. Handbook, Security: Who can reach the API.</span>
+            </span>
+          </dd>
+        </div>
         <div>
           <dt class="label">
             Reverse proxy
@@ -219,12 +234,16 @@ const newer = computed(() => updateNotice(server.value))
             {{ server.architecture || '—' }}
           </dd>
         </div>
-        <div>
+        <div :class="docker.warning ? 'sm:col-span-2 lg:col-span-4' : ''">
           <dt class="label">
             Docker
           </dt>
-          <dd class="mono mt-0.5">
-            {{ server.docker_version || '—' }}
+          <dd class="mt-0.5">
+            <span class="mono">{{ docker.version }}</span>
+            <span v-if="docker.warning" class="mt-1 flex items-start gap-2 text-warn" role="status">
+              <UiIcon name="alert" :size="14" class="mt-[3px]" />
+              <span class="min-w-0 break-words"><span class="font-medium">{{ docker.warning }}.</span> {{ docker.advice }}</span>
+            </span>
           </dd>
         </div>
       </dl>

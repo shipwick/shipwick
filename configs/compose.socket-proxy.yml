@@ -1,0 +1,122 @@
+# The agent behind a socket proxy: it no longer holds the Docker socket, only a
+# filtered one that answers the calls it makes and refuses every other.
+#
+# An overlay on compose.production.yml. On a server set up by the installer,
+# save it as /opt/shipwick/compose.override.yml (or merge it into yours) and
+# run `docker compose up -d` there; by hand:
+#
+#   docker compose -f compose.production.yml -f compose.socket-proxy.yml up -d
+#
+# Needs Docker Compose 2.24.4 or newer, for `!override`.
+#
+# What this takes away and what it leaves is in docs/handbook.md, "Less than
+# the whole socket". In short: whoever takes over the agent can still start a
+# privileged container, which is root on the server. It is a smaller surface,
+# not a wall.
+
+services:
+  agent:
+    environment:
+      DOCKER_HOST: unix:///run/docker-proxy/docker.sock
+    # The list replaces the one in compose.production.yml instead of adding to
+    # it: that is what takes /var/run/docker.sock out of the agent. Mounts of
+    # your own — a Docker config.json, a CA file — go here as well.
+    volumes: !override
+      - agent-data:/var/lib/shipwick
+      - caddy-admin:/run/caddy
+      - docker-proxy:/run/docker-proxy
+    depends_on: [socket-proxy]
+
+  socket-proxy:
+    # https://github.com/wollomatic/socket-proxy — an allow-list of method and
+    # path, one regular expression per method; what is not listed is refused
+    # with 403 and logged.
+    image: ${SHIPWICK_SOCKET_PROXY_IMAGE:-wollomatic/socket-proxy:1.13.1}
+    command:
+      # A unix socket in a volume only the agent shares, like Caddy's admin
+      # API: on a TCP port it would be one more thing to keep application
+      # containers away from.
+      - -proxysocketendpoint=/run/docker-proxy/docker.sock
+      - -proxysocketendpointfilemode=0600
+      - -loglevel=${SHIPWICK_SOCKET_PROXY_LOG_LEVEL:-INFO}
+      # The agent mounts named volumes and nothing else. This refuses every
+      # bind mount — in `Binds`, in `Mounts`, and in a volume created with
+      # `o=bind`: the one directory it allows does not exist.
+      - -allowbindmountfrom=/var/empty/shipwick
+      # The calls the agent makes, and no other. Every path may carry the API
+      # version in front. A backslash at the end of a line joins it to the
+      # next: each list is one regular expression.
+      #
+      #   _ping                    is the daemon there, and which API version
+      - "-allowHEAD=/_ping"
+      #   info                     the server's status; the daemon's proxy, when a pull fails
+      #   system/df                the sizes of volumes
+      #   containers/json          the containers of an application; the reverse proxy's
+      #   containers/<id>/json     state, address, exit code; the agent's own container
+      #   containers/<id>/logs     logs, followed or read; Caddy's access log
+      #   containers/<id>/stats    CPU and memory
+      #   containers/<id>/archive  a volume read for a backup or an export
+      #   exec/<id>/json           the exit code of a command
+      #   images/json              tags to clean up; layers a build need not send
+      #   images/get               an image written into an export
+      #   images/<name>/json       is the image here
+      #   networks/<name>          do the two networks exist
+      #   volumes                  the volumes of applications
+      - "-allowGET=/_ping|/(v1[.][0-9]+/)?(info\
+        |system/df\
+        |containers/json\
+        |containers/[a-zA-Z0-9_.-]+/(json|logs|stats|archive)\
+        |exec/[a-f0-9]+/json\
+        |images/json\
+        |images/get\
+        |images/.+/json\
+        |networks/[a-zA-Z0-9_.-]+\
+        |volumes)"
+      #   auth                       a registry login is tried before it is stored
+      #   containers/create          replicas, jobs, the containers of backups
+      #   containers/<id>/start, stop
+      #   containers/<id>/wait       a job's end
+      #   containers/<id>/exec       health checks by command, `before` of a backup, static folders
+      #   exec/<id>/start            the same: this starts what the line above prepared
+      #   images/create              pulling an image; nothing is ever imported or built
+      #   images/load                an image the CLI built and sent; an import
+      #   networks/create            the two networks, at the first start
+      #   networks/<name>/connect, disconnect   a replica's names on the services network
+      #   volumes/create             an application's volumes
+      - "-allowPOST=/(v1[.][0-9]+/)?(auth\
+        |containers/create\
+        |containers/[a-zA-Z0-9_.-]+/(start|stop|wait|exec)\
+        |exec/[a-f0-9]+/start\
+        |images/create\
+        |images/load\
+        |networks/create\
+        |networks/[a-zA-Z0-9_.-]+/(connect|disconnect)\
+        |volumes/create)"
+      #   containers/<id>/archive  a restore; the files of a static application
+      - "-allowPUT=/(v1[.][0-9]+/)?containers/[a-zA-Z0-9_.-]+/archive"
+      #   containers/<id>          replicas replaced, jobs done
+      #   images/<name>            images no deployment can go back to
+      #   volumes/<name>           a restore, a deleted application's volumes
+      - "-allowDELETE=/(v1[.][0-9]+/)?(containers/[a-zA-Z0-9_.-]+\
+        |images/.+\
+        |volumes/[a-zA-Z0-9_.-]+)"
+    # Root inside the container, without a single capability: the socket
+    # belongs to root, or to the user of a rootless daemon, who is root in
+    # here. Running as nobody would need the number of the server's docker
+    # group, which differs from one distribution to the next.
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    # No network at all: the only ways in and out are the two sockets.
+    network_mode: none
+    volumes:
+      # SHIPWICK_DOCKER_SOCKET in .env for a daemon whose socket is elsewhere:
+      # $XDG_RUNTIME_DIR/docker.sock for rootless Docker.
+      - ${SHIPWICK_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - docker-proxy:/run/docker-proxy
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    restart: unless-stopped
+
+volumes:
+  docker-proxy:

@@ -138,7 +138,7 @@ function closeRemove() {
                     <template v-if="s.updated_at !== s.created_at">
                       <TimeAgo :time="s.updated_at" /><span class="mono ml-2 text-xs text-fg-subtle cards:hidden">{{ formatAbsoluteUtc(s.updated_at) }}</span>
                     </template>
-                    <span v-else title="Never replaced since it was created">never</span>
+                    <span v-else>never replaced</span>
                   </td>
                   <td v-if="mayAdmin" class="right">
                     <UiButton variant="danger" size="sm" :aria-label="`Remove ${s.name}`" @click="removing = s">

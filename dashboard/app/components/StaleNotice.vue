@@ -14,8 +14,9 @@ const age = computed(() => (props.updatedAt === null ? '' : formatRelativeTime(n
 // Said once when the data goes stale and once when it is live again. The
 // notice counts the seconds: as a live region it would be read at every one.
 const { announce } = useAnnounce()
-watch(() => (props.error ? (props.error.unreachable ? 'unreachable' : 'failed') : null), (state, before) => {
+watch(() => (props.error ? (props.error.unreachable ? 'unreachable' : props.error.dockerSilent ? 'docker' : 'failed') : null), (state, before) => {
   if (state === 'unreachable') announce('Agent unreachable. Showing the last data, retrying.')
+  else if (state === 'docker') announce('Docker does not answer on the server. Showing the last data, retrying.')
   else if (state === 'failed') announce('Refresh failed. Showing the last data, retrying.')
   else if (before) announce('Connected again: the data is live.')
 }, { immediate: true })

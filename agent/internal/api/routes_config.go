@@ -2,8 +2,10 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/spec"
@@ -113,4 +115,27 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request, name strin
 		return
 	}
 	writeJSON(w, http.StatusOK, config)
+}
+
+// plainEnv reads ?plain= of a deployment: the env values of the document
+// that its sender says were written in it in plain sight, as fields —
+// env.LOG_LEVEL — separated by commas or repeated. The agent takes the
+// sender's word for what is plain and for nothing else: a field that is not
+// an env variable of the document is refused, so that a statement about
+// another document is noticed rather than kept.
+func plainEnv(r *http.Request, app spec.App) ([]string, error) {
+	var names []string
+	for _, list := range r.URL.Query()["plain"] {
+		for _, field := range strings.Split(list, ",") {
+			if field == "" {
+				continue
+			}
+			name, isEnv := strings.CutPrefix(field, "env.")
+			if _, set := app.Env[name]; !isEnv || !set {
+				return nil, fmt.Errorf("plain names %q, which is not an env value of the document; it takes fields such as env.LOG_LEVEL", field)
+			}
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }

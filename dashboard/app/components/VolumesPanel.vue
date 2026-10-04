@@ -55,16 +55,17 @@ const restoreTitle = computed(() => {
           </td>
           <td v-if="props.admin" class="right">
             <span class="inline-flex flex-wrap items-center justify-end gap-2">
-              <a
+              <UiTooltip
+                as="a"
                 :href="archiveUrl(v)"
                 download
                 class="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-sm border border-line-strong bg-bg px-2.5 text-xs font-medium hover:bg-hover"
-                :title="`Downloads the current contents of ${v.name} as a tar archive`"
+                :text="`Downloads the current contents of ${v.name} as a tar archive`"
               >
                 <UiIcon name="download" :size="12" />
                 Download backup
-              </a>
-              <UiButton size="sm" :disabled="props.busy || !props.stopped" :title="restoreTitle" @click="emit('restore', v)">
+              </UiTooltip>
+              <UiButton size="sm" :disabled="props.busy || !props.stopped" :hint="restoreTitle" @click="emit('restore', v)">
                 <UiIcon name="upload" :size="12" />
                 Restore from backup
               </UiButton>

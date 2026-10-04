@@ -48,7 +48,11 @@ Vulnerabilities — we want to hear about these:
 - an application container that can reconfigure the proxy, reach the agent's
   data, or claim a domain served for another application;
 - the CLI sending a saved token somewhere other than the agent it was saved for;
-- the installer fetching or running something it did not verify.
+- the installer fetching or running something it did not verify;
+- a file or an image that verifies as signed by this repository's release
+  workflow and was not produced by it, or a way to make the installer or
+  `shipwick upgrade` accept a signature that is not that workflow's
+  ([how releases are signed](docs/handbook.md#12-security)).
 
 Expected behavior — not vulnerabilities:
 
@@ -61,6 +65,8 @@ Expected behavior — not vulnerabilities:
   for the token there like anywhere else (documented; on the roadmap);
 - root on the server reading the encryption key next to the database, or env
   values through `docker inspect` (documented in the README);
-- exposing port 9000 to the internet against the documentation's advice.
+- exposing port 9000 to the internet against the documentation's advice;
+- an installation without cosign going by the release's checksums alone: the
+  installer says so, and `SHIPWICK_REQUIRE_SIGNATURE=1` refuses instead.
 
 If you are unsure which list something belongs to, report it privately anyway.

@@ -98,6 +98,8 @@ const errorTitle = computed(() => {
   if (e.rateLimited) return 'Too many attempts'
   if (e.code === 'TOKEN_EXPIRED') return 'Token expired'
   if (e.status === 401) return 'Token rejected'
+  // Refused for where the dashboard server calls from, before the token was looked at: the token may well be right.
+  if (e.applicationCaller) return 'Refused by the agent'
   if (e.unreachable) return 'Agent unreachable'
   if (e.code === 'NETWORK') return 'Dashboard server unreachable'
   return 'Could not sign in'

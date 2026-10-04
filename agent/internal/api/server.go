@@ -44,6 +44,10 @@ type Server struct {
 
 	// signIn is people signing in with the company's accounts: see signin.go.
 	signIn signIn
+
+	// reach is who can reach the API, and who is refused for where they call
+	// from: see reach.go.
+	reach *reach
 }
 
 // New creates the API server. tokenHash is the SHA-256 of the root token;
@@ -109,7 +113,7 @@ func (s *Server) Handler() http.Handler {
 		writeError(w, http.StatusNotFound, api.CodeEndpointNotFound, "no such endpoint: "+r.Method+" "+r.URL.Path, nil)
 	})
 
-	return s.recoverPanics(s.logRequests(securityHeaders(mux)))
+	return s.recoverPanics(s.logRequests(securityHeaders(s.refuseApplications(mux))))
 }
 
 // routeTable registers authenticated endpoints by the role they require.
@@ -329,6 +333,12 @@ func (s *Server) writeEngineError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusConflict, api.CodeTrafficUnavailable, err.Error(), nil)
 	case errors.As(err, &maskedValues):
 		writeError(w, http.StatusBadRequest, api.CodeInvalidConfig, "invalid deploy.yaml", map[string]any{"fields": maskedValues.Fields()})
+	case deploy.IsRuntimeUnavailable(err):
+		s.log.Error("request failed: Docker does not answer", "method", r.Method, "path", r.URL.Path, "error", err)
+		writeError(w, http.StatusServiceUnavailable, api.CodeRuntimeUnavailable, deploy.RuntimeUnavailableMessage(err), nil)
+	case deploy.IsDiskFull(err):
+		s.log.Error("request failed: the disk is full", "method", r.Method, "path", r.URL.Path, "error", err)
+		writeError(w, http.StatusInsufficientStorage, api.CodeDiskFull, deploy.DiskFullMessage(err), nil)
 	default:
 		// Callers are authenticated operators, so the cause is more useful
 		// to them than an opaque message. Errors never contain env values.

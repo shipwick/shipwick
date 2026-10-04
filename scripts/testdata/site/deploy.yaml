@@ -1,0 +1,4 @@
+# A folder the proxy serves itself: the agent puts it into Caddy's container.
+name: site
+static: public
+domain: site.localhost

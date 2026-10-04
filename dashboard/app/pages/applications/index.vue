@@ -95,12 +95,12 @@ function replicaTone(app: Application): string {
                     <StatusBadge v-bind="applicationStatusDisplay(app.status)" :raw="app.status" />
                     <ApplicationMarks :application="app" />
                     <template v-if="app.deploying">
-                      <NuxtLink
+                      <UiTooltip
                         v-if="app.in_flight_deployment_id"
                         :to="`/deployments/${app.in_flight_deployment_id}`"
                         class="label !text-warn underline decoration-warn-line underline-offset-2"
-                        title="Open the deployment in progress"
-                      >{{ app.status === 'DEPLOYING' ? 'Watch' : 'Deploying' }}</NuxtLink>
+                        text="Open the deployment in progress"
+                      >{{ app.status === 'DEPLOYING' ? 'Watch' : 'Deploying' }}</UiTooltip>
                       <span v-else-if="app.status !== 'DEPLOYING'" class="label !text-warn">Deploying</span>
                     </template>
                   </span>
@@ -110,7 +110,7 @@ function replicaTone(app: Application): string {
                 </td>
                 <td data-label="Replicas" class="mono" :class="replicaTone(app)">
                   <!-- A static application has no replicas to count: the proxy serves its files itself. -->
-                  <span v-if="app.static" class="font-sans text-fg-muted" title="A folder served by the proxy; it has no containers">static</span>
+                  <UiTooltip v-if="app.static" class="font-sans text-fg-muted" text="A folder served by the proxy; it has no containers">static</UiTooltip>
                   <span v-else-if="app.replicas.desired > 0">
                     {{ app.replicas.healthy }}/{{ app.replicas.desired }} <span class="font-sans text-fg-subtle">healthy</span>
                   </span>
@@ -126,7 +126,7 @@ function replicaTone(app: Application): string {
                     class="mono inline-flex items-center gap-1 text-fg-muted hover:text-fg hover:underline"
                   >{{ addressOf(app.domain, app.path) }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></a>
                   <!-- A wildcard is a pattern, not an address to open. -->
-                  <span v-else-if="app.domain" class="mono text-fg-muted" title="Every name one label below is served alike">{{ addressOf(app.domain, app.path) }}</span>
+                  <UiTooltip v-else-if="app.domain" class="mono text-fg-muted" text="Every name one label below is served alike">{{ addressOf(app.domain, app.path) }}</UiTooltip>
                   <span v-else class="text-fg-subtle">—</span>
                 </td>
                 <td data-label="Updated" class="right text-fg-muted">

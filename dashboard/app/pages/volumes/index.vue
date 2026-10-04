@@ -91,17 +91,17 @@ function closeRemove() {
                 </td>
                 <td data-label="Application" class="mono">
                   <NuxtLink v-if="!v.orphan" :to="`/applications/${v.application}`" class="hover:underline">{{ v.application }}</NuxtLink>
-                  <span v-else class="text-fg-muted" title="This application has been deleted; its volume was kept on purpose">{{ v.application }}</span>
+                  <UiTooltip v-else class="text-fg-muted" text="This application has been deleted; its volume was kept on purpose">{{ v.application }}</UiTooltip>
                   <span class="ml-1.5 text-xs text-fg-subtle">{{ v.volume }}</span>
                 </td>
-                <td data-label="Size" class="mono right" :class="v.size_bytes < 0 ? 'text-fg-subtle' : ''" :title="v.size_bytes < 0 ? 'The Docker daemon reports no size for this volume' : undefined">
-                  {{ formatVolumeSize(v.size_bytes) }}
+                <td data-label="Size" class="mono right" :class="v.size_bytes < 0 ? 'text-fg-subtle' : ''">
+                  <UiTooltip :text="v.size_bytes < 0 ? 'The Docker daemon reports no size for this volume' : null">{{ formatVolumeSize(v.size_bytes) }}</UiTooltip>
                 </td>
                 <td data-label="Status">
                   <StatusBadge v-bind="volumeStatusDisplay(v)" />
                 </td>
                 <td class="right">
-                  <UiButton v-if="removable(v)" variant="danger" size="sm" :disabled="!mayAdmin" :title="removeHint" :aria-label="`Remove ${v.name}`" @click="removing = v">
+                  <UiButton v-if="removable(v)" variant="danger" size="sm" :disabled="!mayAdmin" :hint="removeHint" :aria-label="`Remove ${v.name}`" @click="removing = v">
                     Remove
                   </UiButton>
                 </td>

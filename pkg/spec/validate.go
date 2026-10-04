@@ -131,6 +131,9 @@ func documentOf(a App) raw {
 		on := true
 		r.Init = &on
 	}
+	if s := a.Security; s != nil {
+		r.Security.Encode(securityDocument(s))
+	}
 
 	r.Restart.Policy = a.Restart.Policy
 	r.Deploy.Strategy = a.Deploy.Strategy

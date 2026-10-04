@@ -3,6 +3,7 @@ package spec
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,10 +28,18 @@ type References struct {
 	Env map[string]string `json:"env,omitempty"`
 	// BasicAuth is by position in proxy.basic_auth, for the password.
 	BasicAuth map[int]string `json:"basic_auth,omitempty"`
+	// Plain names the variables whose value the sender of the document said
+	// was written in it in plain sight: a log level, not something filled in
+	// from an environment. They are the values Document writes as they are.
+	// It is a statement about the document, kept with the references because
+	// it travels the same way; the values stay in the spec.
+	Plain []string `json:"plain,omitempty"`
 }
 
-// Empty reports whether nothing was referred to.
-func (r References) Empty() bool { return len(r.Env) == 0 && len(r.BasicAuth) == 0 }
+// Empty reports whether nothing was referred to and nothing said to be plain.
+func (r References) Empty() bool {
+	return len(r.Env) == 0 && len(r.BasicAuth) == 0 && len(r.Plain) == 0
+}
 
 // ReferencesOf collects the references of a document that has not had them
 // filled in yet: every env value and basic-auth password with a placeholder
@@ -84,7 +93,26 @@ func (r References) For(a App) References {
 			out.BasicAuth[i] = text
 		}
 	}
+	// A value with a reference in it is given back as the reference, whatever
+	// was said about it.
+	for _, name := range r.Plain {
+		if _, ok := a.Env[name]; ok && out.Env[name] == "" && !slices.Contains(out.Plain, name) {
+			out.Plain = append(out.Plain, name)
+		}
+	}
+	sort.Strings(out.Plain)
 	return out
+}
+
+// PlainFields names the values of a that Document writes as they are, as
+// MaskedFields names the masks: "env.LOG_LEVEL".
+func (r References) PlainFields(a App) []string {
+	names := r.For(a).Plain
+	fields := make([]string, 0, len(names))
+	for _, name := range names {
+		fields = append(fields, "env."+name)
+	}
+	return fields
 }
 
 // MaskedFields lists the fields of a whose value is the mask, in the order a
@@ -114,7 +142,8 @@ func MaskedFields(a App) []string {
 // is written as that reference, which the server fills in again when the
 // document is deployed; any other is written as the mask, and masked names
 // those fields: a deployment of the document is refused until each has been
-// given a value or a reference.
+// given a value or a reference. An env value that refs.Plain names is not a
+// secret, on the word of whoever deployed it, and is written as it is.
 //
 // With escape, a literal ${NAME} outside the secret values is written
 // $${NAME}, which is how a file read by the CLI says it: the CLI fills in
@@ -156,6 +185,9 @@ func Document(a App, refs References, escape bool) (text string, masked []string
 	if a.Init {
 		w.block(pair("init", boolean(true)))
 	}
+	if s := a.Security; s != nil {
+		w.block(pair("security", w.securityNodes(s)))
+	}
 	if a.Port != 0 {
 		w.block(pair("port", number(a.Port)))
 	}
@@ -185,6 +217,10 @@ func Document(a App, refs References, escape bool) (text string, masked []string
 	if len(a.Env) > 0 {
 		env := &yaml.Node{Kind: yaml.MappingNode}
 		for _, name := range sortedKeys(a.Env) {
+			if slices.Contains(refs.Plain, name) {
+				env.Content = append(env.Content, pair(name, plainValue(a.Env[name]))...)
+				continue
+			}
 			value, isMasked := secret(refs.Env[name])
 			if isMasked {
 				masked = append(masked, "env."+name)
@@ -355,6 +391,14 @@ func secret(reference string) (node *yaml.Node, masked bool) {
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: reference}, false
 	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: Mask, Style: yaml.DoubleQuotedStyle, LineComment: maskedComment}, true
+}
+
+// plainValue is the node of an env value that is written as it is. A ${NAME}
+// in it is written $${NAME} whoever reads the document: the agent fills in
+// placeholders in env values too, and this one was a literal.
+func plainValue(v string) *yaml.Node {
+	v = Placeholder.ReplaceAllStringFunc(v, func(match string) string { return "$" + match })
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
 }
 
 // documentWriter collects the blocks of a document: groups of top-level keys

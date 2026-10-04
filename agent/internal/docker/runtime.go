@@ -65,6 +65,9 @@ type ContainerSpec struct {
 	// shares its network namespace instead of having one of its own: see
 	// runtime_beside.go.
 	Beside *BesideSpec
+	// Security is the security block of deploy.yaml; nil for an application
+	// without one. See runtime_security.go.
+	Security *Security
 }
 
 // PortBinding publishes a container port on the host.
@@ -142,6 +145,11 @@ type Info struct {
 	// Proxy says whether the daemon has a proxy configured for its own
 	// requests, image pulls above all.
 	Proxy bool
+	// Rootless says the daemon runs as an ordinary user of the server.
+	// Unenforced names the limits it accepts with a container and does not
+	// apply: see runtime_limits.go.
+	Rootless   bool
+	Unenforced []string
 }
 
 type Runtime struct {
@@ -155,6 +163,8 @@ type Runtime struct {
 	// rest keeps a container from taking the address another application's
 	// container has just given up: see rest.go.
 	rest *addressRest
+	// answerWithin replaces AnswerTimeout where it is set: see unavailable.go.
+	answerWithin time.Duration
 }
 
 // New connects to the Docker daemon selected by the standard environment
@@ -187,9 +197,11 @@ func (r *Runtime) Ping(ctx context.Context) error {
 }
 
 func (r *Runtime) Info(ctx context.Context) (Info, error) {
+	ctx, cancel := r.patient(ctx)
+	defer cancel()
 	res, err := r.cli.Info(ctx, client.InfoOptions{})
 	if err != nil {
-		return Info{}, fmt.Errorf("docker info: %w", err)
+		return Info{}, fmt.Errorf("docker info: %w", r.unanswered(ctx, err))
 	}
 	return Info{
 		Hostname:      res.Info.Name,
@@ -200,6 +212,8 @@ func (r *Runtime) Info(ctx context.Context) (Info, error) {
 		CPUs:          res.Info.NCPU,
 		MemoryBytes:   res.Info.MemTotal,
 		Proxy:         res.Info.HTTPProxy != "" || res.Info.HTTPSProxy != "",
+		Rootless:      rootless(res.Info),
+		Unenforced:    unenforcedLimits(res.Info),
 	}, nil
 }
 
@@ -259,7 +273,8 @@ func (r *Runtime) AttachSelf(ctx context.Context) (bool, error) {
 	if self.NetworkSettings != nil && self.NetworkSettings.Networks[r.network] != nil {
 		return true, nil
 	}
-	_, err = r.cli.NetworkConnect(ctx, r.network, client.NetworkConnectOptions{Container: self.ID})
+	_, err = r.cli.NetworkConnect(ctx, r.network, client.NetworkConnectOptions{Container: self.ID,
+		EndpointConfig: &network.EndpointSettings{GwPriority: selfGwPriority}})
 	if err != nil {
 		return false, fmt.Errorf("connect agent container to network %s: %w", r.network, err)
 	}
@@ -338,6 +353,12 @@ func (r *Runtime) RemoveImage(ctx context.Context, image string) error {
 // publishes some, and then only those: the reverse proxy reaches them over the
 // network.
 func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, name string, err error) {
+	// Before anything exists: a refused container leaves no volume behind.
+	if spec.Security != nil && spec.Security.NonRoot {
+		if err := r.CheckNonRoot(ctx, spec.Image, spec.User); err != nil {
+			return "", "", err
+		}
+	}
 	env := make([]string, 0, len(spec.Env))
 	for k, v := range spec.Env {
 		env = append(env, k+"="+v)
@@ -395,6 +416,7 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 		name = configureJob(spec, cfg)
 	}
 	configureBeside(spec, cfg, host)
+	configureSecurity(spec, host)
 	res, err := r.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Name: name, Config: cfg, HostConfig: host})
 	if err != nil {
 		return "", "", fmt.Errorf("create container %s: %w", name, err)
@@ -424,9 +446,10 @@ func (r *Runtime) CreateContainer(ctx context.Context, spec ContainerSpec) (id, 
 // Joining again is taking an address, and waits for the ones other
 // applications gave up to have rested: see rest.go.
 func (r *Runtime) SetServiceNames(ctx context.Context, id string, names []string) error {
-	app := r.appOf(ctx, id)
+	h := r.holderOf(ctx, id)
+	app := h.app
 	for attempt := 1; ; attempt++ {
-		if err := r.leaveServices(ctx, id, app); err != nil {
+		if err := r.leaveServices(ctx, id, h); err != nil {
 			return err
 		}
 		if err := r.rest.wait(ctx, app, r.exitedByApp); err != nil {
@@ -439,6 +462,7 @@ func (r *Runtime) SetServiceNames(ctx context.Context, id string, names []string
 		if attempt == restAttempts || !r.tookDuring(ctx, app, joining) {
 			return nil
 		}
+		h.names = names
 	}
 }
 
@@ -446,7 +470,7 @@ func (r *Runtime) SetServiceNames(ctx context.Context, id string, names []string
 // another application's container stopped while it was taking it.
 const restAttempts = 3
 
-func (r *Runtime) leaveServices(ctx context.Context, id, app string) error {
+func (r *Runtime) leaveServices(ctx context.Context, id string, h holder) error {
 	_, err := r.cli.NetworkDisconnect(ctx, r.services, client.NetworkDisconnectOptions{Container: id, Force: true})
 	// Not connected is where an installation that predates the services
 	// network starts from, and where a failed earlier attempt leaves things.
@@ -454,29 +478,37 @@ func (r *Runtime) leaveServices(ctx context.Context, id, app string) error {
 		return fmt.Errorf("leave network %s: %w", r.services, wrapNotFound(err))
 	}
 	if err == nil {
-		r.rest.release(app)
+		r.rest.release(ctx, h)
 	}
 	return nil
 }
 
-// appOf names the application a container belongs to, for the rest of
-// addresses. A container that cannot be inspected has no name there, which
-// errs on the side of waiting.
-func (r *Runtime) appOf(ctx context.Context, id string) string {
+// ForgetWith names who is told that a container this runtime stopped is gone:
+// the reverse proxy, which answers nil once it has forgotten the names the
+// container carried. Its address then rests no longer than ForgottenRest;
+// without the answer, and without anyone to ask, it rests in full.
+func (r *Runtime) ForgetWith(forget func(ctx context.Context, names []string) error) {
+	r.rest.forgetWith(forget)
+}
+
+// holderOf says what the rest of addresses needs to know of a container
+// before it gives its address up. A container that cannot be inspected has
+// no name there, which errs on the side of waiting.
+func (r *Runtime) holderOf(ctx context.Context, id string) holder {
 	if r.rest.rest <= 0 {
-		return ""
+		return holder{}
 	}
 	c, err := r.InspectContainer(ctx, id)
 	if err != nil {
-		return ""
+		return holder{}
 	}
-	return c.App
+	return holder{id: c.ID, app: c.App, names: c.ServiceNames, running: c.Running, finished: c.FinishedAt}
 }
 
 // exitedByApp reports, by application, when the latest of its containers
 // that are not running stopped. Such a container gave its address up when it
-// stopped, whoever stopped it; one the agent has removed since is in the
-// rest's own record.
+// stopped; one the agent has removed since is in the rest's own record, and
+// so is one it stopped itself and the proxy has forgotten.
 func (r *Runtime) exitedByApp(ctx context.Context) (map[string]time.Time, error) {
 	containers, err := r.ListContainers(ctx, "")
 	if err != nil {
@@ -494,7 +526,7 @@ func (r *Runtime) exitedByApp(ctx context.Context) (map[string]time.Time, error)
 			}
 			return nil, err
 		}
-		if full.FinishedAt != nil && full.FinishedAt.After(exited[full.App]) {
+		if full.FinishedAt != nil && full.FinishedAt.After(exited[full.App]) && !r.rest.forgot(full.ID, *full.FinishedAt) {
 			exited[full.App] = *full.FinishedAt
 		}
 	}
@@ -536,7 +568,7 @@ func isNotConnected(err error) bool {
 // network and joins it again, which nothing notices in a container that has
 // only just started.
 func (r *Runtime) StartContainer(ctx context.Context, id string) error {
-	app := r.appOf(ctx, id)
+	app := r.holderOf(ctx, id).app
 	if err := r.rest.wait(ctx, app, r.exitedByApp); err != nil {
 		return err
 	}
@@ -555,10 +587,10 @@ func (r *Runtime) StartContainer(ctx context.Context, id string) error {
 // StopContainer stops a container gracefully (SIGTERM, then SIGKILL after
 // timeout). Stopping a stopped or missing container is not an error.
 func (r *Runtime) StopContainer(ctx context.Context, id string, timeout time.Duration) error {
-	app := r.appOf(ctx, id)
+	h := r.holderOf(ctx, id)
 	seconds := int(timeout.Seconds())
 	_, err := r.cli.ContainerStop(ctx, id, client.ContainerStopOptions{Timeout: &seconds})
-	r.rest.release(app)
+	r.rest.release(ctx, h)
 	if err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("stop container: %w", err)
 	}
@@ -568,9 +600,10 @@ func (r *Runtime) StopContainer(ctx context.Context, id string, timeout time.Dur
 // RemoveContainer force-removes a container. Removing a missing container is
 // not an error, which keeps cleanup paths idempotent.
 func (r *Runtime) RemoveContainer(ctx context.Context, id string) error {
-	app := r.appOf(ctx, id)
+	h := r.holderOf(ctx, id)
 	_, err := r.cli.ContainerRemove(ctx, id, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
-	r.rest.release(app)
+	r.rest.release(ctx, h)
+	r.rest.removed(h.id)
 	if err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("remove container: %w", err)
 	}
@@ -578,9 +611,11 @@ func (r *Runtime) RemoveContainer(ctx context.Context, id string) error {
 }
 
 func (r *Runtime) InspectContainer(ctx context.Context, id string) (Container, error) {
+	ctx, cancel := r.patient(ctx)
+	defer cancel()
 	res, err := r.cli.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
-		return Container{}, fmt.Errorf("inspect container: %w", wrapNotFound(err))
+		return Container{}, fmt.Errorf("inspect container: %w", r.unanswered(ctx, wrapNotFound(err)))
 	}
 	in := res.Container
 
@@ -627,9 +662,11 @@ func (r *Runtime) ListContainers(ctx context.Context, app string) ([]Container, 
 	if app != "" {
 		filters.Add("label", LabelApp+"="+app)
 	}
+	ctx, cancel := r.patient(ctx)
+	defer cancel()
 	res, err := r.cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
 	if err != nil {
-		return nil, fmt.Errorf("list containers: %w", err)
+		return nil, fmt.Errorf("list containers: %w", r.unanswered(ctx, err))
 	}
 
 	out := make([]Container, 0, len(res.Items))

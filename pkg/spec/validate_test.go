@@ -54,6 +54,12 @@ func everyField() []App {
 		Init:    true,
 		Restart: Restart{Policy: RestartOnFailure},
 		Deploy:  Deploy{Strategy: StrategyRecreate, StopTimeout: Duration(45 * time.Second)},
+		Security: &Security{
+			ReadOnly:     true,
+			Tmpfs:        []Tmpfs{{Path: "/tmp", SizeBytes: DefaultTmpfsBytes}, {Path: "/var/cache/shop", SizeBytes: 200 << 20}},
+			Capabilities: &[]string{"CHOWN", "SETGID", "SETUID"},
+			NonRoot:      true,
+		},
 	}
 	tcp := App{
 		Name: "db", Image: "postgres:17", Replicas: 2,
@@ -183,6 +189,10 @@ func TestValidateHoldsAValueToTheRulesOfADocument(t *testing.T) {
 		"a build context outside":            {func(a *App) { a.Build.Context = "../.." }, "build.context"},
 		"an environment variable's name":     {func(a *App) { a.Env["A B"] = "x" }, "env.A B"},
 		"a memory limit below Docker's":      {func(a *App) { a.Resources.MemoryBytes = 1024 }, "resources.memory"},
+		"a capability nobody has":            {func(a *App) { *a.Security.Capabilities = append(*a.Security.Capabilities, "SYS_ADMIN") }, "security.capabilities[3]"},
+		"a tmpfs the size of the server":     {func(a *App) { a.Security.Tmpfs[0].SizeBytes = 1 << 40 }, "security.tmpfs[0].size"},
+		"a tmpfs path that climbs":           {func(a *App) { a.Security.Tmpfs[1].Path = "/var/../etc" }, "security.tmpfs[1].path"},
+		"root where root is refused":         {func(a *App) { a.User = "0" }, "user"},
 		"a path with a query":                {func(a *App) { a.Path = "/store?x=1" }, "path"},
 		"a domain with a scheme":             {func(a *App) { a.Domain = "https://shop.example.com" }, "domain"},
 	} {

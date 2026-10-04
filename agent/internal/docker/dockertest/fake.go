@@ -104,6 +104,22 @@ type Fake struct {
 	SaveErr error
 	// What containers print and when they stopped: see fake_logs.go.
 	logs *logState
+	// The user each image names: see fake_security.go.
+	imageUsers map[string]string
+	// namelessRemovals counts RemoveImage calls for no image at all: the
+	// daemon has no route for one, and a socket proxy refuses it aloud.
+	namelessRemovals int
+	// Rootless and Unenforced are what Info says about the daemon: see
+	// docker.Info.
+	Rootless   bool
+	Unenforced []string
+}
+
+// NamelessRemovals is how often an image without a name was to be removed.
+func (f *Fake) NamelessRemovals() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.namelessRemovals
 }
 
 func New() *Fake {
@@ -213,6 +229,9 @@ func (f *Fake) CreateContainer(_ context.Context, spec docker.ContainerSpec) (st
 		if err := f.CreateHook(spec); err != nil {
 			return "", "", err
 		}
+	}
+	if err := f.refuseRoot(spec); err != nil {
+		return "", "", err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -379,6 +398,8 @@ func (f *Fake) Info(context.Context) (docker.Info, error) {
 		DockerVersion: "0.0.0-fake",
 		CPUs:          4,
 		MemoryBytes:   8 << 30,
+		Rootless:      f.Rootless,
+		Unenforced:    f.Unenforced,
 	}, nil
 }
 
@@ -534,6 +555,10 @@ func (f *Fake) StoppedAt(name string) time.Time {
 func (f *Fake) RemoveImage(_ context.Context, image string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if image == "" {
+		f.namelessRemovals++
+		return docker.ErrImageNotFound
+	}
 	for _, c := range f.containers {
 		if c.Image == image {
 			return docker.ErrImageInUse

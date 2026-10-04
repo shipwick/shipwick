@@ -340,6 +340,10 @@ func (e *Engine) checkDisk(ctx context.Context, now time.Time) {
 }
 
 func (e *Engine) checkMemory(ctx context.Context, now time.Time) {
+	if e.memoryUnenforced(ctx) {
+		e.dropAlerts(func(key alertKey) bool { return key.kind == api.AlertMemory })
+		return
+	}
 	apps, err := e.store.ListApplications(ctx)
 	if err != nil {
 		e.log.Warn("alerts: list applications", "error", err)

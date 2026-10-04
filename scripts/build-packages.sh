@@ -3,6 +3,7 @@
 #
 #   shipwick-agent_<arch>.deb    for Debian and Ubuntu
 #   shipwick-agent_<arch>.rpm    for Fedora, RHEL and their relatives
+#   shipwick-agent_<arch>.spdx.json   what the agent in both was built from
 #
 #   sh scripts/build-packages.sh v0.7.0
 #
@@ -39,6 +40,8 @@ for arch in amd64 arm64; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
         -ldflags "-s -w -X github.com/shipwick/shipwick/pkg/version.Version=$VERSION" \
         -o "$src/shipwick-agent_$arch" ./agent/cmd/shipwick-agent
+    # The .deb and the .rpm of an architecture hold this one binary.
+    sh scripts/build-sbom.sh "$VERSION" "$src/shipwick-agent_$arch" "dist/shipwick-agent_$arch.spdx.json"
 done
 cp packaging/linux/shipwick-agent.service packaging/linux/agent.env \
     packaging/linux/postinst.sh packaging/linux/prerm.sh packaging/linux/postrm.sh \

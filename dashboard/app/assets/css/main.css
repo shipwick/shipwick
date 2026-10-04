@@ -589,6 +589,45 @@
     animation: spin 0.7s linear infinite;
   }
 
+  /* What a tooltip says. It stands next to its trigger in the document and is
+     drawn in the top layer (or fixed, where there is none), so it undoes what
+     it would inherit from a table header, a mono cell or a button, and what
+     the browser gives a popover. Placed by UiTooltip, in viewport coordinates. */
+  .tooltip {
+    position: fixed;
+    inset: auto;
+    z-index: 50;
+    width: max-content;
+    max-width: min(22rem, calc(100vw - 1rem));
+    margin: 0;
+    padding: 0.25rem 0.5rem;
+    overflow: visible;
+    border: 0;
+    border-radius: 4px;
+    background: var(--primary);
+    color: var(--primary-fg);
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    line-height: 1.125rem;
+    font-weight: 400;
+    font-variant-numeric: normal;
+    letter-spacing: normal;
+    word-spacing: normal;
+    text-align: left;
+    text-transform: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    cursor: default;
+    pointer-events: auto;
+    user-select: text;
+    opacity: 1;
+    animation: tooltip-in 100ms ease-out;
+  }
+
+  @keyframes tooltip-in {
+    from { opacity: 0; }
+  }
+
   /* What a finger has to hit. With a mouse everything keeps its size. On a
      touch screen a control (.target: buttons, fields, tabs, the navigation)
      grows to 44 by 44 CSS px, and a link or a button that is text keeps its

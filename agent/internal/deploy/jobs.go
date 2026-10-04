@@ -104,22 +104,11 @@ func (e *Engine) runJob(ctx context.Context, d store.Deployment, run store.JobRu
 // background, the container could slip in between and outlive its
 // application. A run whose container never started is finished here, failed.
 func (e *Engine) launchJob(ctx context.Context, d store.Deployment, run store.JobRun) (id string, err error) {
-	cspec := docker.ContainerSpec{
-		App:          d.Application,
-		DeploymentID: d.ID,
-		Sequence:     d.Sequence,
-		Image:        d.Spec.Image,
-		Env:          d.Spec.Env,
-		NanoCPUs:     d.Spec.Resources.NanoCPUs(),
-		MemoryBytes:  d.Spec.Resources.MemoryBytes,
-		// The image's entrypoint stays unless deploy.yaml overrides it; the
-		// job's command replaces the image's.
-		Entrypoint: d.Spec.Entrypoint,
-		Command:    run.Command,
-		User:       d.Spec.User,
-		Job:        &docker.JobSpec{Name: run.Job, RunID: run.ID},
-		Init:       d.Spec.Init,
-	}
+	cspec := containerFor(d)
+	// The image's entrypoint stays unless deploy.yaml overrides it; the
+	// job's command replaces the image's.
+	cspec.Entrypoint, cspec.Command = d.Spec.Entrypoint, run.Command
+	cspec.Job = &docker.JobSpec{Name: run.Job, RunID: run.ID}
 	id, name, err := e.createContainer(ctx, cspec)
 	if err != nil {
 		e.finishRun(run, api.RunFailed, nil, "could not create the container: "+err.Error())

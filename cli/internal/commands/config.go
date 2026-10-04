@@ -26,10 +26,14 @@ get the file back when it was lost, or was never on this machine.
 The server does not hand out secret values. A value that was written as a
 reference to a secret stored on the server is that reference again, such as
 postgres://app:${DB_PASSWORD}@db:5432/app, and is filled in again when the file
-is deployed. A value that was given with the file, or filled in from the
-environment or --env-file, is shown as "********": write it again, or store
-it with "shipwick secret set NAME" and refer to it as ${NAME}. Until then
-"shipwick deploy" refuses the file and names what is missing.
+is deployed. A value that stood in the deployed file as it is, such as
+LOG_LEVEL: info, is that value again: "shipwick deploy" tells the server which
+ones did. A value that "shipwick deploy" filled in from the environment or
+--env-file is shown as "********": write it again, or store it with
+"shipwick secret set NAME" and refer to it as ${NAME}. Until then
+"shipwick deploy" refuses the file and names what is missing. A value typed
+in the dashboard's editor is shown so too, and so is every value of an
+application last deployed by a shipwick or a server before 0.8.
 
 It takes a token that may deploy the application.`,
 		Args: cobra.ExactArgs(1),

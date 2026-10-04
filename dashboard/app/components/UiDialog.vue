@@ -63,9 +63,10 @@ function requestClose() {
 }
 
 // Esc: the browser would close the dialog by itself; route it through the parent's state instead.
+// An Esc that has just closed a tooltip inside was the tooltip's, and the dialog stays.
 function onCancel(event: Event) {
   event.preventDefault()
-  requestClose()
+  if (!tooltipTookEscape()) requestClose()
 }
 
 // The dialog element itself is only reachable by pointer where the backdrop is.

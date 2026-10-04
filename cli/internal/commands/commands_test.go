@@ -45,6 +45,7 @@ type fakeAgent struct {
 	health          api.Health   // zero: the agent runs 1.2.3
 
 	deployBodies []string
+	deployPlain  []string          // ?plain= of each POST deploy, beside its body
 	actionBodies map[string]string // "redeploy" | "rollback" → the JSON body received
 	requests     []string
 	env          map[string]string // extra environment for the CLI under test
@@ -97,6 +98,7 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.deployBodies = append(f.deployBodies, string(body))
+		f.deployPlain = append(f.deployPlain, r.URL.Query().Get("plain"))
 		f.mu.Unlock()
 		if f.deployStatus != 0 {
 			respondError(w, f.deployStatus, f.deployError)
@@ -211,6 +213,11 @@ func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 	c.pollInterval = time.Millisecond
 	c.now = func() time.Time { return fixedNow }
 	c.upgrade = f.upgrade
+	if c.upgrade.cosign == nil {
+		// Whether the machine the tests run on has cosign must not decide
+		// what they see.
+		c.upgrade.cosign = func() string { return "" }
+	}
 	c.local = f.local
 	c.build = f.build
 	c.after = f.after

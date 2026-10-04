@@ -1,7 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X github.com/shipwick/shipwick/pkg/version.Version=$(VERSION)
 
-.PHONY: dev build test test-race test-race-docker test-integration test-dashboard lint clean help
+.PHONY: dev build test test-race test-race-docker test-integration test-full-disk test-dashboard lint clean help
 
 # A bare `make` builds. It must never be `dev`, which starts the stack and does
 # not return: tools that build a repository by running `make` — CodeQL's Go
@@ -36,6 +36,12 @@ test-race-docker:
 ## test-integration: tests against a real Docker daemon
 test-integration:
 	go test -tags integration -count=1 -run Integration ./agent/internal/docker/
+
+## test-full-disk: what the agent does when a disk has no room, on an 8 MB filesystem in a container
+test-full-disk:
+	docker run --rm --tmpfs /small:size=8m -e SHIPWICK_TEST_SMALL_DIR=/small \
+		-v "$(CURDIR):/src:ro" -v shipwick-gomod:/go/pkg/mod -v shipwick-gocache:/root/.cache/go-build \
+		-w /src -e GOFLAGS=-buildvcs=false golang:1.27 go test -count=1 -run 'FullDisk|OnTheDisk' ./agent/internal/store/ ./agent/internal/deploy/
 
 ## test-dashboard: typecheck, unit tests and production build of the dashboard
 test-dashboard:

@@ -5,7 +5,6 @@ import type { AgentError } from '~/utils/agentError'
 import { isAbortError, toAgentError } from '~/utils/agentError'
 import type { AuditFilters } from '~/utils/access'
 import { AUDIT_FAMILIES, NO_AUDIT_FILTERS, auditActionLabel, auditActionProblem, auditDetailLink, auditFiltersIgnored, auditFrom, auditMore, auditOutcomeDisplay, auditQuery, auditSubject, newAuditFilters } from '~/utils/access'
-import { formatAbsoluteUtc } from '~/utils/format'
 
 /**
  * Who did what: every request that changed something on this server, or
@@ -227,13 +226,13 @@ const exportUrl = (format: 'csv' | 'json') => agentUrl('/audit/export', { ...sho
           </UiButton>
           <span v-if="exportable" class="ml-auto flex flex-wrap items-center gap-2">
             <span class="text-xs text-fg-muted">Take {{ Object.keys(shown).length > 0 ? 'what matches' : 'the whole trail' }} away:</span>
-            <a :href="exportUrl('csv')" download class="target inline-flex h-7 items-center gap-1.5 rounded-sm border border-line-strong bg-bg px-2.5 text-xs font-medium hover:bg-hover" title="Every entry that matches the filters above, not only the ones on screen: a table for a spreadsheet">
+            <UiTooltip as="a" :href="exportUrl('csv')" download class="target inline-flex h-7 items-center gap-1.5 rounded-sm border border-line-strong bg-bg px-2.5 text-xs font-medium hover:bg-hover" text="Every entry that matches the filters above, not only the ones on screen: a table for a spreadsheet">
               <UiIcon name="download" :size="12" />
               Export CSV
-            </a>
-            <a :href="exportUrl('json')" download class="target inline-flex h-7 items-center rounded-sm border border-line-strong bg-bg px-2.5 text-xs font-medium hover:bg-hover" title="The same entries, one JSON object per line, as the API answers them">
+            </UiTooltip>
+            <UiTooltip as="a" :href="exportUrl('json')" download class="target inline-flex h-7 items-center rounded-sm border border-line-strong bg-bg px-2.5 text-xs font-medium hover:bg-hover" text="The same entries, one JSON object per line, as the API answers them">
               Export NDJSON
-            </a>
+            </UiTooltip>
           </span>
         </div>
       </form>
@@ -277,14 +276,14 @@ const exportUrl = (format: 'csv' | 'json') => agentUrl('/audit/export', { ...sho
             </thead>
             <tbody>
               <tr v-for="e in entries" :key="e.id">
-                <td data-primary class="whitespace-nowrap text-fg-muted" :title="formatAbsoluteUtc(e.at)">
+                <td data-primary class="whitespace-nowrap text-fg-muted">
                   <TimeAgo :time="e.at" />
                 </td>
-                <td data-label="Who" class="mono [overflow-wrap:anywhere] sm:min-w-[9rem]" :title="e.actor.kind === 'user' ? 'A person, signed in through the provider' : 'An API token'">
-                  {{ e.actor.name }}
+                <td data-label="Who" class="mono [overflow-wrap:anywhere] sm:min-w-[9rem]">
+                  {{ e.actor.name }}<span class="ml-2 font-sans text-xs text-fg-subtle">{{ e.actor.kind === 'user' ? 'person' : 'token' }}</span>
                 </td>
-                <td data-label="Action" class="whitespace-nowrap" :title="e.action">
-                  {{ auditActionLabel(e.action) }}
+                <td data-label="Action" class="whitespace-nowrap">
+                  <UiTooltip repeats :text="e.action">{{ auditActionLabel(e.action) }}</UiTooltip>
                 </td>
                 <td data-label="On" class="mono [overflow-wrap:anywhere] sm:min-w-[8rem]">
                   <NuxtLink v-if="e.application" :to="`/applications/${e.application}`" class="hover:underline">{{ e.application }}</NuxtLink><template v-if="e.application && e.target">
@@ -295,8 +294,8 @@ const exportUrl = (format: 'csv' | 'json') => agentUrl('/audit/export', { ...sho
                   <StatusBadge v-bind="auditOutcomeDisplay(e)" :raw="`HTTP ${e.status}`" />
                   <span v-if="e.code" class="mono block text-2xs text-fg-subtle">{{ e.code }}</span>
                 </td>
-                <td data-label="From" class="mono whitespace-nowrap text-fg-muted" :title="e.forwarded_for ? `Reported by the proxy in front; the connection came from ${e.address}` : 'The address the agent saw'">
-                  {{ auditFrom(e) }}
+                <td data-label="From" class="mono whitespace-nowrap text-fg-muted">
+                  <UiTooltip :text="e.forwarded_for ? `Reported by the proxy in front; the connection came from ${e.address}` : null">{{ auditFrom(e) }}</UiTooltip>
                 </td>
                 <td :data-label="e.detail ? 'Detail' : undefined" class="break-words text-fg-muted" :class="e.detail ? '' : 'cards:!hidden'">
                   <NuxtLink v-if="auditDetailLink(e.detail)" :to="auditDetailLink(e.detail)!" class="link">{{ e.detail }}</NuxtLink>

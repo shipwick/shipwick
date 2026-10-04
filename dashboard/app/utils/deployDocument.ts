@@ -66,6 +66,67 @@ export function remainingMasks(text: string, masked: readonly string[]): string[
   return masked.filter(field => stillMasked(text, field))
 }
 
+/**
+ * What a variable's entry in the top-level `env` block says: its line, and
+ * the more deeply indented ones under it. "" when the block is not written
+ * the way the agent writes it, or has no such variable.
+ */
+function envEntry(text: string, variable: string): string {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex(line => /^env[ \t]*:[ \t]*(#.*)?$/.test(line))
+  if (start < 0) return ''
+  let indent = -1
+  let entry: string[] | null = null
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '') {
+      entry?.push(line)
+      continue
+    }
+    const depth = line.length - line.trimStart().length
+    if (depth === 0) break
+    if (indent < 0) indent = depth
+    if (depth > indent) {
+      entry?.push(line)
+      continue
+    }
+    if (entry) break
+    if (/^([A-Za-z_][A-Za-z0-9_]*)[ \t]*:/.exec(line.trimStart())?.[1] === variable) entry = [line]
+  }
+  return entry ? entry.join('\n').trimEnd() : ''
+}
+
+/**
+ * The plain values of a handed-out document that the text still holds exactly
+ * as they were handed out: what a deployment of the text may call plain
+ * again. The agent takes the sender's word for what is no secret, and the
+ * page gives it only for what the agent itself showed. A value that was
+ * edited or typed here is somebody's input, which the page cannot vouch for;
+ * the agent masks it from then on.
+ */
+export function keptPlain(text: string, document: string, plain: readonly string[]): string[] {
+  return plain.filter((field) => {
+    const variable = maskedVariable(field)
+    if (variable === '') return false
+    const was = envEntry(document, variable)
+    return was !== '' && was === envEntry(text, variable)
+  })
+}
+
+/** The keys of deploy.yaml that came with 0.8: an agent before it answers `unknown field "<key>"` for them, which reads like a typo and is not one. */
+const KEYS_SINCE_08: readonly string[] = ['security']
+
+/**
+ * The keys the agent refused as unknown because it is older than they are.
+ * Whether it is older is read from what it says of itself: an agent from 0.8
+ * on describes its Docker daemon. Empty when the server has not answered yet,
+ * and for a key the dashboard does not know either, which may be a typo.
+ */
+export function keysNewerThanAgent(fields: readonly { message: string }[], server: { docker?: unknown } | null | undefined): string[] {
+  if (!server || server.docker !== undefined) return []
+  const refused = fields.map(field => /^unknown field "([^"]+)"$/.exec(field.message)?.[1] ?? '')
+  return KEYS_SINCE_08.filter(key => refused.includes(key))
+}
+
 /** Whether the document still describes a folder of files: the uploaded folder is then deployed again, by its digest. */
 export function describesStatic(text: string): boolean {
   return /^static[ \t]*:/m.test(text) || /^\s*\{[\s\S]*"static"[ \t]*:/.test(text)

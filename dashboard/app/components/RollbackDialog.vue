@@ -3,6 +3,7 @@ import type { ApplicationDetail, Deployment, RollbackRequest } from '~/types/api
 import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
 import { deploymentOrigin, formatOrigin, rollbackCandidates } from '~/utils/deployments'
+import { formatAbsoluteUtc } from '~/utils/format'
 
 const props = defineProps<{
   open: boolean
@@ -79,12 +80,16 @@ async function submit() {
             :key="d.id"
             class="target flex cursor-pointer items-center gap-3 border-b border-line px-3 py-2 last:border-b-0 hover:bg-hover has-[:checked]:bg-active has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent"
           >
-            <input v-model="selected" type="radio" name="rollback-target" :value="d.id" class="accent-[var(--fg)]" :autofocus="index === 0">
+            <UiTooltip :text="`Started ${formatAbsoluteUtc(d.started_at)}`">
+              <template #trigger="tip">
+                <input v-model="selected" type="radio" name="rollback-target" :value="d.id" class="accent-[var(--fg)]" :autofocus="index === 0" v-bind="tip">
+              </template>
+            </UiTooltip>
             <span class="mono w-10 shrink-0 text-fg-muted">#{{ d.sequence }}</span>
-            <span class="mono min-w-0 truncate font-medium" :title="d.image">{{ d.version }}</span>
+            <UiTooltip repeats :text="d.image" class="mono min-w-0 truncate font-medium">{{ d.version }}</UiTooltip>
             <span class="min-w-0 flex-1 truncate text-xs text-fg-muted">{{ originOf(d) }}</span>
             <span v-if="index === 0" class="label !text-fg-muted max-sm:hidden">Previous version</span>
-            <TimeAgo :time="d.started_at" class="w-16 shrink-0 text-right text-xs text-fg-muted" />
+            <TimeAgo :time="d.started_at" plain class="w-16 shrink-0 text-right text-xs text-fg-muted" />
           </label>
         </fieldset>
         <p v-if="target" class="mono break-all text-xs text-fg-muted">

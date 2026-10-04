@@ -2,7 +2,8 @@
 import { describeBackupPlan } from '~/utils/backups'
 import { formatBytes, formatCores } from '~/utils/format'
 import { tidyDuration } from '~/utils/jobs'
-import { describeHealth, describeLogging, formatArgv, formatPathRedirect, hasProxySettings } from '~/utils/spec'
+import { limitsNotice } from '~/utils/limits'
+import { describeHealth, describeLogging, describeSecurity, formatArgv, formatPathRedirect, hasProxySettings } from '~/utils/spec'
 import { applicationPath } from '~/utils/tabs'
 import { atLeast07 } from '~/utils/updates'
 
@@ -32,6 +33,10 @@ const process = computed(() => {
   if (s.user) lines.push({ label: 'User', value: s.user })
   return lines
 })
+/** What the containers go without: the security block, a line for each thing it asks. Empty without the block. */
+const security = computed(() => describeSecurity(spec.value?.security))
+/** Said next to the limits when Docker on this server applies none of them, or not all; an agent before 0.8 does not say. */
+const limitsUnenforced = computed(() => (spec.value ? limitsNotice(server.data.value?.docker?.unenforced_limits, { memory: spec.value.resources.memory_bytes ?? 0, cpu: spec.value.resources.cpu ?? 0 }) : ''))
 const logging = computed(() => describeLogging(spec.value))
 const loggingOptions = computed(() => Object.entries(spec.value?.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
 const backupPlan = computed(() => (spec.value?.backups ? describeBackupPlan(spec.value.backups) : ''))
@@ -105,6 +110,10 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
           </dt>
           <dd class="mono mt-0.5">
             CPU {{ formatCores(spec.resources.cpu) }} · memory {{ spec.resources.memory_bytes ? formatBytes(spec.resources.memory_bytes) : 'unlimited' }}
+            <span v-if="limitsUnenforced" class="mt-1 flex items-start gap-2 font-sans text-xs text-warn">
+              <UiIcon name="alert" :size="14" class="mt-px" />
+              <span class="min-w-0">{{ limitsUnenforced }}</span>
+            </span>
           </dd>
         </div>
         <div>
@@ -129,7 +138,7 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
           </dt>
           <dd class="mono mt-0.5">
             {{ spec.deploy.strategy }}
-            <span v-if="stopTimeout" class="text-fg-muted" title="deploy.stop_timeout: how long a replica gets to finish after it is asked to stop, before it is killed">· stop timeout {{ stopTimeout }}</span>
+            <UiTooltip v-if="stopTimeout" class="text-fg-muted" text="deploy.stop_timeout: how long a replica gets to finish after it is asked to stop, before it is killed">· stop timeout {{ stopTimeout }}</UiTooltip>
           </dd>
         </div>
         <div v-if="backupPlan">
@@ -152,6 +161,18 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
             <span class="text-fg-muted">— replicas, jobs and commands run under an init process: a stop signal reaches the application at once, and processes it leaves behind are cleaned up.</span>
           </dd>
         </div>
+        <div v-if="security.length > 0">
+          <dt class="label">
+            <UiTooltip text="security in deploy.yaml: what the replicas, jobs and commands of this application go without. Every key takes away; none adds.">Security</UiTooltip>
+          </dt>
+          <dd class="mt-0.5">
+            <ul class="space-y-0.5">
+              <li v-for="line in security" :key="line" class="[overflow-wrap:anywhere]">
+                {{ line }}
+              </li>
+            </ul>
+          </dd>
+        </div>
         <div v-if="process.length > 0">
           <dt class="label">
             Process
@@ -165,9 +186,9 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
         </div>
         <div v-if="spec.pre_deploy">
           <dt class="label">
-            Before each deployment
+            <UiTooltip text="pre_deploy: runs in a one-off container before any replica is replaced; the deployment fails if it does">Before each deployment</UiTooltip>
           </dt>
-          <dd class="mono mt-0.5 break-all" title="pre_deploy: runs in a one-off container before any replica is replaced; the deployment fails if it does">
+          <dd class="mono mt-0.5 break-all">
             {{ formatArgv(spec.pre_deploy.command) }} <span class="text-fg-muted">timeout {{ tidyDuration(spec.pre_deploy.timeout) }}</span>
           </dd>
         </div>
@@ -196,9 +217,9 @@ const proxyHeaders = computed(() => Object.entries(proxyBlock.value?.headers ?? 
         </div>
         <div>
           <dt class="label">
-            Environment
+            <UiTooltip :text="envNames.length ? 'Values are never returned by the agent' : null">Environment</UiTooltip>
           </dt>
-          <dd class="mono mt-0.5 break-words" :title="envNames.length ? 'Values are never returned by the agent' : undefined">
+          <dd class="mono mt-0.5 break-words">
             {{ envNames.length ? envNames.join(', ') : 'No variables' }}
           </dd>
         </div>

@@ -124,6 +124,19 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 	}
 	binary := "shipwick_linux_" + opts.arch
 	files := []string{bundleChecksums}
+	// Here is where a bundle's signature can be checked: the server it is
+	// for reaches nothing cosign would ask. The signature travels with the
+	// checksums it is about, for whoever wants to check again.
+	signed, signature, err := release.checkSignature(ctx, base, tag, sums)
+	if err != nil {
+		return err
+	}
+	if signature != nil {
+		if err := os.WriteFile(filepath.Join(work, releaseSignature), signature, 0o644); err != nil {
+			return err
+		}
+		files = append(files, releaseSignature)
+	}
 	for _, asset := range []string{bundleCompose, bundleInstaller, binary} {
 		c.ui.Progress("Downloading %s…", asset)
 		err := release.verified(ctx, base, asset, sums, filepath.Join(work, asset))
@@ -138,6 +151,11 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 		files = append(files, asset)
 	}
 	c.ui.Success("Release %s: %s, %s and %s match its checksums", tag, bundleCompose, bundleInstaller, binary)
+	if signed == signatureVerified {
+		c.ui.Success("%s", strings.TrimSuffix(signed.describe(tag), "."))
+	} else {
+		c.ui.Println(c.ui.Styled(ui.Dim, signed.describe(tag)))
+	}
 
 	compose, err := os.ReadFile(filepath.Join(work, bundleCompose))
 	if err != nil {

@@ -318,11 +318,11 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
   <!-- What this server holds for the day it has to take over. -->
   <UiPanel v-if="standbyShown && standby.data.value" title="Standby" :meta="standby.data.value.applications.length">
     <template #actions>
-      <UiButton v-if="standby.data.value.pull" size="sm" :disabled="!props.admin || importing || promotionActive" :pending="pulling" :title="actionTitle ?? 'Fetches the newest export from the bucket and imports it stopped'" @click="pullNow">
+      <UiButton v-if="standby.data.value.pull" size="sm" :disabled="!props.admin || importing || promotionActive" :pending="pulling" :hint="actionTitle ?? 'Fetches the newest export from the bucket and imports it stopped'" @click="pullNow">
         <UiIcon name="download" :size="12" />
         Import newest now
       </UiButton>
-      <UiButton size="sm" variant="primary" :disabled="!props.admin || importing || promotionActive || standby.data.value.applications.length === 0" :title="actionTitle ?? (standby.data.value.applications.length === 0 ? 'Nothing waits to be started' : undefined)" @click="openPromote">
+      <UiButton size="sm" variant="primary" :disabled="!props.admin || importing || promotionActive || standby.data.value.applications.length === 0" :hint="actionTitle ?? (standby.data.value.applications.length === 0 ? 'Nothing waits to be started' : undefined)" @click="openPromote">
         <UiIcon name="play" :size="12" />
         Promote…
       </UiButton>
@@ -380,11 +380,11 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
   <!-- Admin only: the list and the request are refused to every other role. -->
   <UiPanel v-if="props.admin && exportsSupported" title="Export">
     <template #actions>
-      <UiButton size="sm" title="One encrypted file with everything this server runs, saved by your browser" @click="downloadOpen = true">
+      <UiButton size="sm" hint="One encrypted file with everything this server runs, saved by your browser" @click="downloadOpen = true">
         <UiIcon name="download" :size="12" />
         Download an export…
       </UiButton>
-      <UiButton size="sm" :disabled="anyExporting" :pending="exporting" :title="anyExporting ? 'An export is being written' : 'Writes an export of every application to where backups are kept'" @click="exportNow">
+      <UiButton size="sm" :disabled="anyExporting" :pending="exporting" :hint="anyExporting ? 'An export is being written' : 'Writes an export of every application to where backups are kept'" @click="exportNow">
         <UiIcon name="upload" :size="12" />
         Export to backups
       </UiButton>
@@ -440,7 +440,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
               </td>
               <td data-label="Status">
                 <StatusBadge v-bind="backupStatusDisplay(r)" :raw="r.status" />
-                <span v-if="r.status === 'failed' && r.error" class="block max-w-sm truncate text-xs text-danger" :title="r.error">{{ r.error }}</span>
+                <span v-if="r.status === 'failed' && r.error" class="block max-w-sm break-words text-xs text-danger">{{ r.error }}</span>
               </td>
               <td data-label="Took" class="mono right text-fg-muted">
                 {{ took(r) }}
@@ -458,7 +458,7 @@ const actionTitle = computed(() => (!props.admin ? roleHint('admin') : promotion
   <!-- The other end of a move: what an export file holds, deployed here. -->
   <UiPanel v-if="props.admin && exportsSupported" title="Import">
     <template #actions>
-      <UiButton size="sm" :disabled="importing || promotionActive" :title="importing ? 'An import is running' : promotionActive ? 'A promotion is running' : 'Deploys what an export file holds on this server'" @click="importOpen = true">
+      <UiButton size="sm" :disabled="importing || promotionActive" :hint="importing ? 'An import is running' : promotionActive ? 'A promotion is running' : 'Deploys what an export file holds on this server'" @click="importOpen = true">
         <UiIcon name="upload" :size="12" />
         Import a file…
       </UiButton>

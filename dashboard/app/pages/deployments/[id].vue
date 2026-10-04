@@ -6,7 +6,7 @@ import { describeBackupPlan } from '~/utils/backups'
 import { tidyDuration } from '~/utils/jobs'
 import { archiveSupported, logsPath } from '~/utils/logArchive'
 import { deniedRegistry } from '~/utils/registries'
-import { describeBuild, describeHealth, describeLogging, describeStatic, formatArgv, formatHostname, formatPathRedirect, formatPublish, hostnamesOf } from '~/utils/spec'
+import { describeBuild, describeHealth, describeLogging, describeSecurity, describeStatic, formatArgv, formatHostname, formatPathRedirect, formatPublish, hostnamesOf } from '~/utils/spec'
 import { deploymentStatusDisplay } from '~/utils/status'
 
 const route = useRoute()
@@ -65,6 +65,7 @@ const replicaOutput = computed(() => {
 })
 /** The registry a refused pull names: the way to the form that stores a credential for it. */
 const registry = computed(() => deniedRegistry(d.value?.error ?? ''))
+const security = computed(() => describeSecurity(d.value?.spec.security))
 const logging = computed(() => describeLogging(d.value?.spec))
 const loggingOptions = computed(() => Object.entries(d.value?.spec.logging?.options ?? {}).sort(([a], [b]) => a.localeCompare(b)))
 /** A static deployment serves a folder: "42 files, 3.1 MB, served by the proxy" where a container deployment has an image. */
@@ -200,7 +201,7 @@ const crumbs = computed(() => [
               </dt>
               <dd class="mono mt-0.5">
                 {{ d.version || '—' }}
-                <span v-if="isStatic" class="block font-sans text-fg-muted" :title="d.static?.digest">{{ servedFiles }}</span>
+                <UiTooltip v-if="isStatic" class="block font-sans text-fg-muted" :text="d.static?.digest">{{ servedFiles }}</UiTooltip>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -246,8 +247,8 @@ const crumbs = computed(() => [
               <dt class="label">
                 By
               </dt>
-              <dd class="mono mt-0.5" :title="d.by ? `The token that started it` : 'Recorded before tokens had names'">
-                {{ d.by ?? '—' }}
+              <dd class="mono mt-0.5">
+                <UiTooltip :text="d.by ? null : 'Recorded before tokens had names'">{{ d.by ?? '—' }}</UiTooltip>
               </dd>
             </div>
             <div class="bg-bg px-4 py-2.5">
@@ -382,6 +383,18 @@ const crumbs = computed(() => [
                 </div>
               </dd>
             </div>
+            <div v-if="security.length > 0" class="bg-bg px-4 py-2.5 sm:col-span-2">
+              <dt class="label">
+                Security <span class="normal-case tracking-normal text-fg-subtle">what its containers go without</span>
+              </dt>
+              <dd class="mt-0.5">
+                <ul class="space-y-0.5">
+                  <li v-for="line in security" :key="line" class="[overflow-wrap:anywhere]">
+                    {{ line }}
+                  </li>
+                </ul>
+              </dd>
+            </div>
             <div v-if="d.spec.pre_deploy" class="bg-bg px-4 py-2.5 sm:col-span-2">
               <dt class="label">
                 Pre-deploy
@@ -426,7 +439,7 @@ const crumbs = computed(() => [
               <dd class="mt-1.5">
                 <ul v-if="envNames.length > 0" class="grid gap-x-8 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
                   <li v-for="key in envNames" :key="key" class="mono flex items-baseline justify-between gap-3 border-b border-dotted border-line pb-1">
-                    <span class="min-w-0 truncate" :title="key">{{ key }}</span>
+                    <span class="min-w-0 break-all">{{ key }}</span>
                     <span class="select-none text-fg-subtle"><span aria-hidden="true">••••••••</span><span class="sr-only">masked</span></span>
                   </li>
                 </ul>

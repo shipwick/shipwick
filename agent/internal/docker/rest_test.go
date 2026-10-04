@@ -15,6 +15,9 @@ type restLab struct {
 	exited map[string]time.Time
 	// onSleep runs during a sleep: what happens while a container waits.
 	onSleep func()
+	// asleep runs as a sleep begins; if it ends a rest sooner, the sleep is
+	// over before the clock has moved.
+	asleep func()
 }
 
 func newRestLab() *restLab {
@@ -23,7 +26,17 @@ func newRestLab() *restLab {
 	// Started long ago: the tests are about what happened since.
 	l.since = l.clock.Add(-time.Hour)
 	l.now = func() time.Time { return l.clock }
-	l.sleep = func(_ context.Context, d time.Duration) error {
+	l.sleep = func(_ context.Context, d time.Duration, wake <-chan struct{}) error {
+		if l.asleep != nil {
+			f := l.asleep
+			l.asleep = nil
+			f()
+		}
+		select {
+		case <-wake:
+			return nil
+		default:
+		}
 		l.slept = append(l.slept, d)
 		l.clock = l.clock.Add(d)
 		if l.onSleep != nil {
@@ -34,6 +47,12 @@ func newRestLab() *restLab {
 		return nil
 	}
 	return l
+}
+
+// release is a container of app that gives up its address without the agent
+// having stopped it while it ran: the proxy is not asked.
+func (l *restLab) release(app string) {
+	l.addressRest.release(context.Background(), holder{app: app})
 }
 
 func (l *restLab) waitFor(t *testing.T, app string) time.Duration {
@@ -113,7 +132,7 @@ func TestWhatAnEarlierProcessReleasedIsUnknown(t *testing.T) {
 func TestTheWaitEndsWithItsContext(t *testing.T) {
 	l := newRestLab()
 	l.release("alpha")
-	l.sleep = func(context.Context, time.Duration) error { return context.Canceled }
+	l.sleep = func(context.Context, time.Duration, <-chan struct{}) error { return context.Canceled }
 	err := l.wait(context.Background(), "beta", func(context.Context) (map[string]time.Time, error) { return nil, nil })
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v", err)

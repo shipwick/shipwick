@@ -176,7 +176,7 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
               <th>Applications</th>
               <th>Expires</th>
               <th>Created</th>
-              <th>Last used</th>
+              <th>Last used <span class="font-normal normal-case tracking-normal">· to the minute</span></th>
               <th class="right">
                 <span class="sr-only">Actions</span>
               </th>
@@ -187,18 +187,18 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
               <td data-primary class="mono font-medium">
                 {{ t.name }}<span v-if="t.name === own" class="ml-2 font-sans text-xs font-normal text-fg-subtle">this session</span>
               </td>
-              <td data-label="Role" class="mono" :title="ROLE_DESCRIPTIONS[t.role] ?? undefined">
+              <td data-label="Role" class="mono">
                 {{ t.role }}
               </td>
-              <td data-label="Applications" :class="t.applications?.length ? 'mono' : 'text-fg-muted'" :title="t.applications?.length ? t.applications.join(', ') : 'Not limited: every application'">
-                {{ t.applications?.length ? listNames(t.applications, 3) : 'all' }}
+              <td data-label="Applications" :class="t.applications?.length ? 'mono' : 'text-fg-muted'">
+                <UiTooltip :text="t.applications && t.applications.length > 3 ? t.applications.join(', ') : null">{{ t.applications?.length ? listNames(t.applications, 3) : 'all' }}</UiTooltip>
               </td>
-              <td data-label="Expires" :class="EXPIRY_TEXT[tokenExpiryDisplay(t.expires_at, now)?.tone ?? 'muted']" :title="t.expires_at ? formatAbsoluteUtc(t.expires_at) : 'This token does not expire'">
+              <td data-label="Expires" :class="EXPIRY_TEXT[tokenExpiryDisplay(t.expires_at, now)?.tone ?? 'muted']">
                 <template v-if="tokenExpiryDisplay(t.expires_at, now)">
-                  <span class="inline-flex items-center gap-1.5">
+                  <UiTooltip :text="formatAbsoluteUtc(t.expires_at)" class="inline-flex items-center gap-1.5">
                     <UiIcon v-if="tokenExpiryDisplay(t.expires_at, now)!.soon" name="alert" :size="12" />
                     {{ tokenExpiryDisplay(t.expires_at, now)!.label }}
-                  </span>
+                  </UiTooltip>
                 </template>
                 <template v-else>
                   never
@@ -207,7 +207,7 @@ const EXPIRY_TEXT = { ok: 'text-fg-muted', muted: 'text-fg-muted', warn: 'text-w
               <td data-label="Created" class="text-fg-muted">
                 <TimeAgo :time="t.created_at" />
               </td>
-              <td data-label="Last used" class="text-fg-muted" title="Kept to the minute">
+              <td data-label="Last used" class="text-fg-muted">
                 <TimeAgo v-if="t.last_used_at" :time="t.last_used_at" />
                 <span v-else>never</span>
               </td>

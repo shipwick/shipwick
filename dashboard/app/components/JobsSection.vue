@@ -2,7 +2,7 @@
 import type { AppSpec, Job, Run, RunDetail } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { toAgentError } from '~/utils/agentError'
-import { durationBetween, formatDuration } from '~/utils/format'
+import { durationBetween, formatAbsoluteUtc, formatDuration } from '~/utils/format'
 import { describeRunOutcome, formatNextRun, runStatusDisplay, runTitle, tidyDuration } from '~/utils/jobs'
 import { roleHint } from '~/utils/roles'
 import { formatArgv } from '~/utils/spec'
@@ -110,7 +110,7 @@ function openRow(r: Run, event: MouseEvent) {
 <template>
   <UiPanel title="Jobs" :meta="props.spec.jobs?.length ?? 0">
     <template #actions>
-      <UiButton size="sm" :disabled="!props.mayDeploy || props.busy" :title="!props.mayDeploy ? blocked : props.busy ? 'A deployment is in progress' : undefined" @click="commandOpen = true">
+      <UiButton size="sm" :disabled="!props.mayDeploy || props.busy" :hint="!props.mayDeploy ? blocked : props.busy ? 'A deployment is in progress' : undefined" @click="commandOpen = true">
         <UiIcon name="play" :size="12" />
         Run command
       </UiButton>
@@ -148,10 +148,10 @@ function openRow(r: Run, event: MouseEvent) {
             <tr v-for="job in jobs.data.value" :key="job.name">
               <td data-primary>
                 <span class="mono font-medium">{{ job.name }}</span>
-                <span class="mono block truncate text-xs text-fg-muted" :title="formatArgv(job.command)">{{ formatArgv(job.command) }}</span>
+                <UiTooltip repeats :text="formatArgv(job.command)" class="mono block truncate text-xs text-fg-muted">{{ formatArgv(job.command) }}</UiTooltip>
               </td>
-              <td data-label="Schedule" class="mono whitespace-nowrap" :title="`Five cron fields, read in UTC · timeout ${tidyDuration(job.timeout)}`">
-                {{ job.schedule }} <span class="font-sans text-xs text-fg-subtle">UTC</span>
+              <td data-label="Schedule" class="mono whitespace-nowrap">
+                {{ job.schedule }} <span class="font-sans text-xs text-fg-subtle">UTC · timeout {{ tidyDuration(job.timeout) }}</span>
               </td>
               <td data-label="Last run">
                 <template v-if="job.last_run">
@@ -162,15 +162,15 @@ function openRow(r: Run, event: MouseEvent) {
                 </template>
                 <span v-else class="text-fg-subtle">never</span>
               </td>
-              <td data-label="Next run" class="text-fg-muted" :title="job.next_run_at ?? undefined">
-                {{ formatNextRun(job.next_run_at, now) }}
+              <td data-label="Next run" class="text-fg-muted">
+                <UiTooltip :text="job.next_run_at ? formatAbsoluteUtc(job.next_run_at) : null">{{ formatNextRun(job.next_run_at, now) }}</UiTooltip>
               </td>
               <td class="right">
                 <UiButton
                   size="sm"
                   :disabled="!props.mayDeploy || props.busy || job.last_run?.status === 'running'"
                   :pending="startingJob === job.name"
-                  :title="runTitleFor(job)"
+                  :hint="runTitleFor(job)"
                   :aria-label="`Run now: ${job.name}`"
                   @click="runNow(job)"
                 >
@@ -228,8 +228,8 @@ function openRow(r: Run, event: MouseEvent) {
                   <button type="button" class="mono link" :aria-label="`Run ${r.id}, ${runTitle(r)}`" @click="openRunId = r.id">#{{ r.id }}</button>
                   <span class="mono ml-2 rows:hidden">{{ runTitle(r) }}</span>
                 </td>
-                <td class="mono cards:!hidden" :title="formatArgv(r.command)">
-                  <span class="block max-w-md truncate">{{ runTitle(r) }}</span>
+                <td class="mono cards:!hidden">
+                  <UiTooltip repeats :text="formatArgv(r.command)" class="block max-w-md truncate">{{ runTitle(r) }}</UiTooltip>
                 </td>
                 <td data-label="Started by" class="text-fg-muted">
                   {{ KIND_LABEL[r.kind] ?? r.kind }}

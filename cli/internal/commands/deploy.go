@@ -27,7 +27,7 @@ func (c *cli) deployCommand() *cobra.Command {
 	var parallel int
 
 	cmd := &cobra.Command{
-		Use:   "deploy",
+		Use:   "deploy [name...]",
 		Short: "Deploy the application described by deploy.yaml",
 		Long: `Deploy the application described by deploy.yaml and wait for the result.
 
@@ -51,11 +51,23 @@ ones an entry waits for) deploy at the same time, in dependency order; it is
 used when there is no deploy.yaml. Several deploy.yaml files deploy in the
 order given, one after the other:
 
-  shipwick deploy -f api/deploy.yaml -f worker/deploy.yaml -f web/deploy.yaml`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if handled, err := c.deployMany(cmd.Context(), cmd, files, envFiles, image, noWait, parallel); handled {
+  shipwick deploy -f api/deploy.yaml -f worker/deploy.yaml -f web/deploy.yaml
+
+Names deploy those applications of a shipwick.yaml and nothing else, which is
+what a pipeline wants after it built one image:
+
+  shipwick deploy api --image ghcr.io/company/api:$GIT_SHA
+
+"after" still orders the named ones among themselves. An application that is
+left out is not waited for: it is assumed to be running, and the output says
+so. --image applies when exactly one is named.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, names []string) error {
+			if handled, err := c.deployMany(cmd.Context(), cmd, files, envFiles, names, image, noWait, parallel); handled {
 				return err
+			}
+			if len(names) > 0 {
+				return refuseNames(cmd, files)
 			}
 			if image != "" && len(files) > 1 {
 				return errors.New("--image applies to one application; deploy several with one deploy.yaml each and no --image")
@@ -121,14 +133,14 @@ func (c *cli) deploy(ctx context.Context, files, envFiles []string, image string
 		c.ui.Success("Validated %s%s", cfg.file, substitutedNote(cfg.vars))
 		if cfg.app.Build != nil {
 			if cfg.data, err = c.buildImage(ctx, cl, cfg.file, cfg.data, cfg.app); err != nil {
-				return err
+				return explainUnknownKeys(ctx, cl, err)
 			}
 		}
 
 		started := c.now()
-		d, err := c.startDeployment(ctx, cl, cfg.file, cfg.app, cfg.data)
+		d, err := c.startDeployment(ctx, cl, cfg.file, cfg.app, cfg.data, cfg.vars.plainOf(0, cfg.app))
 		if err != nil {
-			return err
+			return explainUnknownKeys(ctx, cl, err)
 		}
 		if err := c.followDeployment(ctx, cl, d, started, noWait); err != nil {
 			if len(configs) > 1 && errors.Is(err, ErrReported) {
@@ -351,18 +363,23 @@ func overrideImage(data []byte, image string) []byte {
 func (c *cli) validateCommand() *cobra.Command {
 	var files, envFiles []string
 	cmd := &cobra.Command{
-		Use:   "validate",
+		Use:   "validate [name...]",
 		Short: "Check deploy.yaml without deploying",
 		Long: `Check deploy.yaml without deploying: it is read, its ${NAME} placeholders are
 filled in from the environment and --env-file, and it is validated exactly as
 the agent would validate it. Env values whose name is set nowhere here are
 listed: the server fills them in from its secrets when you deploy. A
 shipwick.yaml is checked the same way, entry by entry, and the order the
-applications deploy in is shown.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if handled, err := c.validateMany(cmd, files, envFiles); handled {
+applications deploy in is shown. With names of its applications, the whole
+file is checked and those are shown, as "shipwick deploy" with the same names
+would deploy them.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, names []string) error {
+			if handled, err := c.validateMany(cmd, files, envFiles, names); handled {
 				return err
+			}
+			if len(names) > 0 {
+				return refuseNames(cmd, files)
 			}
 			for i, file := range files {
 				_, app, vars, err := c.loadConfig(file, envFiles, "")
@@ -448,6 +465,9 @@ func describeSpec(app spec.App) [][2]string {
 	}
 	if app.User != "" {
 		fields = append(fields, [2]string{"User", app.User})
+	}
+	if app.Security != nil {
+		fields = append(fields, [2]string{"Security", describeSecurity(*app.Security)})
 	}
 	if app.Logging != nil {
 		fields = append(fields, [2]string{"Logging", describeLogging(*app.Logging)})

@@ -35,6 +35,27 @@ import (
 type placeholders struct {
 	substituted []string // filled in here, from the environment or --env-file
 	deferred    []string // secret values left for the agent to fill in from its secrets
+	// plain is, for each application of the file in its order, the env
+	// variables whose value stands in the file as it is sent: nothing in it
+	// was filled in here. It is what the agent is told may be shown again
+	// (plainOf); a value with anything filled in is never in it.
+	plain [][]string
+}
+
+// plainOf is the statement sent with the deployment of the i-th application
+// of the file: the fields of app whose value was written in the file in plain
+// sight. A file the walk and the parser read differently says nothing.
+func (p placeholders) plainOf(i int, app spec.App) []string {
+	if i >= len(p.plain) {
+		return nil
+	}
+	var fields []string
+	for _, name := range p.plain[i] {
+		if _, ok := app.Env[name]; ok {
+			fields = append(fields, "env."+name)
+		}
+	}
+	return fields
 }
 
 // note is the parenthesis after "Validated deploy.yaml".
@@ -88,6 +109,7 @@ type expander struct {
 	seen    map[string]bool
 	missing []string
 	changed bool
+	filled  int // how many placeholders were replaced by a value so far
 	placeholders
 }
 
@@ -100,9 +122,12 @@ func (x *expander) walkRoot(n *yaml.Node) {
 		x.walk(n, false)
 		return
 	}
+	many := false
+	var plain []string
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		key, value := n.Content[i].Value, n.Content[i+1]
 		if key == "apps" && value.Kind == yaml.SequenceNode {
+			many = true
 			for _, entry := range value.Content {
 				x.walkRoot(entry)
 			}
@@ -112,8 +137,30 @@ func (x *expander) walkRoot(n *yaml.Node) {
 			x.walkProxy(value)
 			continue
 		}
+		if key == "env" && value.Kind == yaml.MappingNode {
+			plain = x.walkEnv(value)
+			continue
+		}
 		x.walk(value, key == "env")
 	}
+	if !many {
+		x.plain = append(x.plain, plain)
+	}
+}
+
+// walkEnv walks the env block and returns the variables whose value is sent
+// as the file wrote it. Only a scalar counts: an alias repeats a value that
+// may have been filled in where it was defined.
+func (x *expander) walkEnv(n *yaml.Node) (plain []string) {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		value := n.Content[i+1]
+		before := x.filled
+		x.walk(value, true)
+		if value.Kind == yaml.ScalarNode && x.filled == before {
+			plain = append(plain, n.Content[i].Value)
+		}
+	}
+	return plain
 }
 
 // walkProxy walks the proxy block, whose one secret is the password of a
@@ -175,6 +222,7 @@ func (x *expander) walk(n *yaml.Node, env bool) {
 			}
 			x.remember(&x.substituted, m[2])
 			x.changed = true
+			x.filled++
 			return value
 		})
 		// A number or a boolean written through a placeholder must stay

@@ -280,6 +280,13 @@ type Server struct {
 	LogArchive *LogArchiveStatus `json:"log_archive,omitempty"`
 	// Update is absent from agents older than 0.7.
 	Update *UpdateStatus `json:"update,omitempty"`
+	// OpenToApplications is true when the containers of applications can
+	// reach the API over the network: the agent shares a network with them
+	// and listens on it. Absent otherwise, and from agents older than 0.8,
+	// which never say.
+	OpenToApplications bool `json:"open_to_applications,omitempty"`
+	// Docker is absent from agents older than 0.8.
+	Docker *DockerStatus `json:"docker,omitempty"`
 }
 
 // ProxyStatus describes the reverse proxy in front of the applications.
@@ -326,6 +333,11 @@ type Metrics struct {
 	MemoryBytes      int64            `json:"memory_bytes"`       // working set, as `docker stats` shows it
 	MemoryLimitBytes int64            `json:"memory_limit_bytes"` // 0 = unlimited
 	Replicas         []ReplicaMetrics `json:"replicas"`
+	// UnenforcedLimits names the limits the server's Docker does not apply,
+	// as DockerStatus does: the limits above are then what deploy.yaml asks
+	// for and nothing holds the replicas to. Absent when Docker applies
+	// them, and from agents older than 0.8.
+	UnenforcedLimits []string `json:"unenforced_limits,omitempty"`
 }
 
 type ReplicaMetrics struct {
@@ -1243,6 +1255,12 @@ type ApplicationConfig struct {
 	// StaticDigest is set for a static application: the folder the active
 	// deployment serves, which a deployment of the document names in ?static=.
 	StaticDigest string `json:"static_digest,omitempty"`
+	// Plain names the env values the document holds as they are, because
+	// whoever deployed them said they were written in the file in plain
+	// sight (?plain= of a deployment): "env.LOG_LEVEL". A deployment of the
+	// document that names them again keeps them so. Absent from agents
+	// before 0.8, which mask every such value.
+	Plain []string `json:"plain"`
 }
 
 // The log archive: output that outlives its container.
@@ -1361,4 +1379,45 @@ type UpdateStatus struct {
 	CheckedAt     *time.Time `json:"checked_at"`
 	// Available is true when LatestVersion is newer than the agent itself.
 	Available bool `json:"available"`
+}
+
+// What breaks under Shipwick: the daemon and the disk.
+
+// AlertDocker is the alert of a Docker daemon that does not answer. It is
+// about the server, like AlertDisk, and always critical: while it stands
+// nothing is supervised, deployed or routed. Agents before 0.8 never raise it.
+const AlertDocker = "docker"
+
+// CodeDiskFull means the server's disk has no room for what the request
+// writes: a record in the agent's database, an uploaded folder, an image.
+// Nothing was changed; the same request succeeds once there is room.
+const CodeDiskFull = "DISK_FULL"
+
+// Who the API answers.
+
+// CodeApplicationCaller refuses a request that came from the container of an
+// application, whatever token it carried: the API answers the proxy, the
+// dashboard and the server itself. HTTP 403.
+const CodeApplicationCaller = "APPLICATION_CALLER"
+
+// The Docker daemon: how it runs, where that changes what a deployment gets.
+
+// Limits of deploy.yaml's resources block, as DockerStatus names them.
+const (
+	LimitMemory = "memory"
+	LimitCPU    = "cpu"
+)
+
+// DockerStatus is what the daemon says about itself that changes what
+// Shipwick can promise. It is absent from agents older than 0.8.
+type DockerStatus struct {
+	// Rootless is true when the daemon runs as an ordinary user of the
+	// server and not as root.
+	Rootless bool `json:"rootless"`
+	// UnenforcedLimits names the limits of `resources` the daemon accepts
+	// and does not apply, LimitMemory and LimitCPU: it has no cgroup
+	// controller for them. Empty when both are enforced. A rootless daemon
+	// that enforces neither has no cgroups at all, and what it reports as a
+	// container's memory and CPU is then not that container's either.
+	UnenforcedLimits []string `json:"unenforced_limits"`
 }

@@ -59,7 +59,7 @@ func (c *cli) serverCommand() *cobra.Command {
 				{"CLI", version.Version},
 				{"Host", info.Hostname},
 				{"OS", fmt.Sprintf("%s (%s, kernel %s)", info.OS, info.Architecture, info.Kernel)},
-				{"Docker", info.DockerVersion},
+				{"Docker", describeDocker(info)},
 				{"CPUs", fmt.Sprint(info.CPUs)},
 				{"Memory", describeMemory(info)},
 				{"Applications", fmt.Sprint(info.Applications)},

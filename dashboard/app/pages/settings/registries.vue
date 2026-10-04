@@ -149,7 +149,7 @@ function closeRemove() {
                   </td>
                   <td data-label="Updated" class="text-fg-muted">
                     <TimeAgo v-if="r.updated_at !== r.created_at" :time="r.updated_at" />
-                    <span v-else title="Never replaced since it was stored">never</span>
+                    <span v-else>never replaced</span>
                   </td>
                   <td v-if="mayAdmin" class="right">
                     <UiButton variant="danger" size="sm" :aria-label="`Log out of ${r.registry}`" @click="removing = r">

@@ -1,0 +1,12 @@
+# Two replicas behind the proxy, with limits: a rollout and a rollback.
+name: web
+image: traefik/whoami:v1.11
+port: 80
+domain: hello.localhost
+replicas: 2
+health:
+  path: /health
+  interval: 2s
+resources:
+  cpu: 0.5
+  memory: 64mb

@@ -122,9 +122,37 @@ func (e *Engine) refreshHostnames(ctx context.Context, hosts []string) {
 			// Shutting down: a lookup cut short says nothing about the hostname.
 			return
 		}
+		if unanswered(err) && e.dns.keepServing(h) {
+			continue
+		}
 		ready, why := e.verdict(h, addrs, err)
 		e.dns.record(h, ready, why)
 	}
+}
+
+// unanswered says that a lookup ended without an answer: a resolver that
+// timed out or could not be reached. "No such host" is an answer.
+func unanswered(err error) bool {
+	var dnsErr *net.DNSError
+	return err != nil && !(errors.As(err, &dnsErr) && dnsErr.IsNotFound)
+}
+
+// keepServing leaves a hostname that is being served as it is after a lookup
+// nobody answered, and reports whether there was one to leave. A resolver
+// that is silent says nothing about where the hostname points, and taking
+// the hostname out of the proxy for it would turn a resolver's bad minute
+// into the application's. It is asked again as soon as a hostname that is
+// waiting would be; only an answer takes it out.
+func (c *hostnameCache) keepServing(host string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.entries[host]
+	if !ok || !v.ready {
+		return false
+	}
+	v.checkedAt = c.now().Add(hostnameRetryAfter - hostnameReadyFor)
+	c.entries[host] = v
+	return true
 }
 
 // verdict turns a lookup's result into ready, or a reason that says what to

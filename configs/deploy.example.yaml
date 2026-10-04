@@ -171,6 +171,33 @@ deploy:
 # it out for an image that brings its own init (tini, s6-overlay).
 # init: true
 
+# Take away what the application does not need, in every container made from
+# it: replicas, the pre_deploy hook, jobs, one-off commands. Each key narrows
+# and none widens; leave out the ones the application cannot live with.
+#
+# read_only: the root filesystem cannot be written. Volumes can, and so can
+# every tmpfs path: a directory in memory, empty at each start, mounted
+# nosuid, nodev and noexec, counted against resources.memory. A path alone
+# gets 64mb; size is 1mb to 1gb. nginx needs /var/cache/nginx and /var/run.
+#
+# capabilities: `none`, or the ones to keep out of Docker's default set
+# (AUDIT_WRITE CHOWN DAC_OVERRIDE FOWNER FSETID KILL MKNOD NET_BIND_SERVICE
+# NET_RAW SETFCAP SETGID SETPCAP SETUID SYS_CHROOT); the rest is dropped. An
+# application that runs as another user than root on a port above 1024 needs
+# none; nginx started as root needs [CHOWN, SETGID, SETUID].
+#
+# non_root: a container that would run as root is refused, and the deployment
+# fails before anything starts. The user — `user` above, or else the image's
+# USER — must be a numeric id other than 0: a name cannot be checked.
+# security:
+#   read_only: true
+#   tmpfs:
+#     - /tmp
+#     - path: /var/cache/api
+#       size: 200mb
+#   capabilities: none
+#   non_root: true
+
 # Ship logs to a collector instead of the server's disk: json-file (default),
 # local, syslog, journald, gelf, fluentd, awslogs or splunk, with the driver's
 # own options. Addresses are scheme://host:port; no sockets or files on the

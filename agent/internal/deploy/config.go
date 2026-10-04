@@ -25,10 +25,34 @@ import (
 // says spec.Mask in its place, and a mask is refused wherever a document
 // arrives (resolveSecrets), so that it can never become a value.
 //
-// The text around a reference is given back as the document said it, which
-// the API masks everywhere else. That is why the document is for those who
-// may deploy the application: they can read its environment with a command
-// run in it anyway.
+// Whoever sends the document can tell: the CLI knows which values it filled
+// in and which stood in the file. It says so with the deployment (DeployWith),
+// the statement is kept with the references, and a value it named is given
+// back as it is. The agent never decides that a value is plain; one that
+// nobody spoke for is masked.
+//
+// The text around a reference and a plain value are given back as the
+// document said them, which the API masks everywhere else. That is why the
+// document is for those who may deploy the application: they can read its
+// environment with a command run in it anyway.
+
+// DeployWith is Deploy for a document whose sender said which of its env
+// values were written in it in plain sight: plain names those variables. A
+// name the document does not set is dropped, and so is one whose value holds
+// a reference; the API refuses the first before it gets here.
+func (e *Engine) DeployWith(ctx context.Context, app spec.App, plain []string) (store.Deployment, error) {
+	return e.start(ctx, app.Name, func(ctx context.Context) (origin, error) {
+		// The one place a spec arrives from outside: whatever the CLI left
+		// for the server to fill in is filled in here, and stored filled in.
+		resolved, err := e.resolveSecrets(ctx, app)
+		if err != nil {
+			return origin{}, err
+		}
+		references := spec.ReferencesOf(app)
+		references.Plain = plain
+		return origin{spec: resolved, kind: api.KindDeploy, references: references.For(app)}, nil
+	})
+}
 
 // MaskedValuesError is returned for a document that holds the mask where a
 // value belongs: one that was copied out of what the agent hands out.
@@ -90,6 +114,7 @@ func (e *Engine) Config(ctx context.Context, name string, escape bool) (api.Appl
 		Document:     document,
 		Masked:       masked,
 		StaticDigest: d.StaticDigest,
+		Plain:        references.PlainFields(d.Spec),
 	}, nil
 }
 
@@ -117,6 +142,9 @@ func importedReferences(app spec.App, carried *spec.References) (spec.References
 	references := carried.For(app)
 	if len(references.Env) != len(carried.Env) || len(references.BasicAuth) != len(carried.BasicAuth) {
 		return spec.References{}, errors.New("its references name values the configuration does not have, or refer to nothing")
+	}
+	if len(references.Plain) != len(carried.Plain) {
+		return spec.References{}, errors.New("its references call a value plain that the configuration does not have, that is a reference, or that is named twice")
 	}
 	texts := make([]string, 0, len(references.Env)+len(references.BasicAuth))
 	for _, text := range references.Env {

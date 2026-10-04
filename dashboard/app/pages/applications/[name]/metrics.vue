@@ -1,10 +1,23 @@
 <script setup lang="ts">
 import { formatBytes, formatPercent } from '~/utils/format'
+import { DAEMON_USAGE_NOTICE, limitsNotice, usageIsTheDaemons, withoutUnenforced } from '~/utils/limits'
 
 /** What the proxy saw of the application, and what its replicas used: both over the last hour, day or week. */
 const { name, detail, gone, hasActive, isStatic } = useApplication()
 
 const history = useMetricsHistory(name, () => hasActive.value && !gone.value && !isStatic.value)
+
+// The history carries the limits deploy.yaml asks for and not whether Docker
+// applies them; the server says that. A limit nothing is held to is not a
+// line in a chart, and an agent before 0.8, which does not say, changes nothing.
+const server = useServerInfo()
+const unenforced = computed(() => server.data.value?.docker?.unenforced_limits)
+const daemonUsage = computed(() => usageIsTheDaemons(unenforced.value))
+const charted = computed(() => (history.history.value ? withoutUnenforced(history.history.value, unenforced.value) : null))
+const notice = computed(() => {
+  const limits = history.history.value?.limits
+  return limits ? limitsNotice(unenforced.value, { memory: limits.memory_bytes, cpu: limits.cpu }) : ''
+})
 </script>
 
 <template>
@@ -34,9 +47,19 @@ const history = useMetricsHistory(name, () => hasActive.value && !gone.value && 
         :retrying="history.refreshing.value"
         @retry="history.refresh()"
       />
-      <div v-else-if="history.history.value" class="divide-y divide-line">
-        <MetricsHistoryChart :history="history.history.value" metric="cpu_percent" :range="history.range.value" label="CPU" :format="formatPercent" />
-        <MetricsHistoryChart :history="history.history.value" metric="memory_bytes" :range="history.range.value" label="Memory" :format="formatBytes" />
+      <EmptyState v-else-if="history.history.value && daemonUsage" title="Not measured per replica">
+        {{ DAEMON_USAGE_NOTICE }} {{ notice }}
+        <NuxtLink to="/servers" class="link">
+          Server status
+        </NuxtLink>
+      </EmptyState>
+      <div v-else-if="charted" class="divide-y divide-line">
+        <p v-if="notice" class="flex items-start gap-2 px-4 py-2 text-xs text-warn">
+          <UiIcon name="alert" :size="14" class="mt-px" />
+          <span class="min-w-0">{{ notice }}</span>
+        </p>
+        <MetricsHistoryChart :history="charted" metric="cpu_percent" :range="history.range.value" label="CPU" :format="formatPercent" />
+        <MetricsHistoryChart :history="charted" metric="memory_bytes" :range="history.range.value" label="Memory" :format="formatBytes" />
       </div>
     </UiPanel>
 

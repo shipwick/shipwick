@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,6 +60,11 @@ type Caddy struct {
 	// and runs the configuration without it. askedAt is when it last refused.
 	plainLookups bool
 	askedAt      time.Time
+
+	// kept: the configuration this agent last loaded finds replicas through
+	// Shipwick's source, which can be told to forget them (forget.go). Read
+	// without the lock: a load in progress must not hold up a rollout.
+	kept atomic.Bool
 }
 
 // NewCaddy creates a client for the admin endpoint at addr, given either as
@@ -151,6 +157,7 @@ func (c *Caddy) syncWith(ctx context.Context, routes []Route, plainLookups bool)
 		return c.tls.scrub(err)
 	}
 	c.applied, c.verifiedAt = fingerprint, time.Now()
+	c.kept.Store(!plainLookups)
 	return nil
 }
 

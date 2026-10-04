@@ -5,10 +5,12 @@ import type { Tone } from '~/utils/status'
 const props = withDefaults(defineProps<{
   tone: Tone
   label: string
-  /** The raw API value, shown as a tooltip when the label paraphrases it. */
+  /** The raw API value, where the label paraphrases it: shown to the pointer, and nothing a screen reader has not read. */
   raw?: string
+  /** What the label does not say — why it failed, what it means: a tooltip the keyboard reaches too. */
+  detail?: string
   size?: 'sm' | 'md'
-}>(), { raw: undefined, size: 'sm' })
+}>(), { raw: undefined, detail: undefined, size: 'sm' })
 
 const DOT: Record<Tone, string> = {
   ok: 'bg-ok-dot',
@@ -26,12 +28,13 @@ const TEXT: Record<Tone, string> = {
 </script>
 
 <template>
-  <span
+  <UiTooltip
+    :text="props.detail || props.raw"
+    :repeats="!props.detail"
     class="inline-flex items-center whitespace-nowrap font-medium"
     :class="[TEXT[props.tone], props.size === 'md' ? 'gap-2 text-base' : 'gap-1.5 text-sm']"
-    :title="props.raw"
   >
     <span class="inline-block shrink-0 rounded-full" :class="[DOT[props.tone], props.size === 'md' ? 'size-2' : 'size-1.5']" aria-hidden="true" />
     {{ props.label }}
-  </span>
+  </UiTooltip>
 </template>

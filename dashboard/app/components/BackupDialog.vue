@@ -180,16 +180,17 @@ const title = computed(() => `Backup #${props.backupId ?? ''} of ${props.applica
             <div v-for="v in b.volumes" :key="v.volume" class="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span class="mono">{{ v.volume }}</span>
               <span class="mono text-fg-muted">{{ formatBytes(v.size_bytes) }}</span>
-              <a
+              <UiTooltip
                 v-if="props.admin && !inUse"
+                as="a"
                 :href="archiveUrl(v)"
                 download
                 class="inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-sm border border-line-strong bg-bg px-2 text-xs font-medium hover:bg-hover"
-                :title="`Downloads ${v.volume} as it was in this backup: a tar archive, decrypted`"
+                :text="`Downloads ${v.volume} as it was in this backup: a tar archive, decrypted`"
               >
                 <UiIcon name="download" :size="12" />
                 Download
-              </a>
+              </UiTooltip>
             </div>
           </dd>
         </template>
@@ -260,15 +261,15 @@ const title = computed(() => `Backup #${props.backupId ?? ''} of ${props.applica
       </template>
       <template v-else>
         <template v-if="b">
-          <UiButton v-if="props.admin" variant="danger" class="mr-auto" :disabled="inUse || pending" :title="inUse ? 'This backup is in use' : undefined" @click="mode = 'remove'">
+          <UiButton v-if="props.admin" variant="danger" class="mr-auto" :disabled="inUse || pending" :hint="inUse ? 'This backup is in use' : undefined" @click="mode = 'remove'">
             <UiIcon name="trash" :size="12" />
             Remove
           </UiButton>
           <template v-if="usable">
-            <UiButton :disabled="!props.mayDeploy || inUse" :pending="pending" :title="!props.mayDeploy ? (deployHint ?? roleHint('deploy')) : inUse ? 'This backup is in use' : undefined" @click="verify">
+            <UiButton :disabled="!props.mayDeploy || inUse" :pending="pending" :hint="!props.mayDeploy ? (deployHint ?? roleHint('deploy')) : inUse ? 'This backup is in use' : undefined" @click="verify">
               Verify
             </UiButton>
-            <UiButton :disabled="!props.admin || inUse || props.busy || !props.stopped" :title="restoreTitle" @click="mode = 'restore'">
+            <UiButton :disabled="!props.admin || inUse || props.busy || !props.stopped" :hint="restoreTitle" @click="mode = 'restore'">
               <UiIcon name="upload" :size="12" />
               Restore…
             </UiButton>

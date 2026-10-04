@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { AgentError } from '~/utils/agentError'
+import { failureTitle } from '~/utils/agentError'
 
 /** Full-size error for a page or panel that has nothing to show. */
 const props = withDefaults(defineProps<{
@@ -11,12 +12,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{ retry: [] }>()
 
-const title = computed(() => {
-  if (props.error.unreachable) return 'Agent unreachable'
-  if (props.error.code === 'NETWORK') return 'Dashboard server unreachable'
-  if (props.error.notFound) return 'Not found'
-  return `Could not load ${props.subject}`
-})
+const title = computed(() => failureTitle(props.error, props.subject))
 
 const explanation = computed(() => {
   if (props.error.unreachable) {
@@ -36,9 +32,10 @@ const cause = computed(() => {
   <div class="flex flex-col items-start gap-3 px-4 py-8 sm:px-6" role="alert">
     <div class="flex items-center gap-2 text-danger">
       <UiIcon name="alert" />
-      <h3 class="text-base font-semibold">
+      <!-- Not a heading: the state stands under a page's title on one page and inside a panel on another, and is announced as an alert on both. -->
+      <p class="text-base font-semibold">
         {{ title }}
-      </h3>
+      </p>
     </div>
     <p class="max-w-prose text-fg-muted">
       {{ explanation }}

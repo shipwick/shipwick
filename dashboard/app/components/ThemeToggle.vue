@@ -19,20 +19,22 @@ const { onKeydown } = useRovingFocus(group, { selector: '[role="radio"]', onMove
 
 <template>
   <div ref="group" role="radiogroup" aria-label="Theme" class="inline-flex rounded-sm border border-line p-0.5" @keydown="onKeydown">
-    <button
+    <UiTooltip
       v-for="(option, index) in OPTIONS"
       :key="option.value"
+      as="button"
+      repeats
       type="button"
       role="radio"
       :aria-checked="preference === option.value"
       :aria-label="option.label"
-      :title="option.label"
+      :text="option.label"
       :tabindex="index === tabStop ? 0 : -1"
       class="target flex size-6 items-center justify-center rounded-xs transition-colors duration-100"
       :class="preference === option.value ? 'bg-active text-fg' : 'text-fg-subtle hover:text-fg'"
       @click="set(option.value)"
     >
       <UiIcon :name="option.icon" :size="14" />
-    </button>
+    </UiTooltip>
   </div>
 </template>

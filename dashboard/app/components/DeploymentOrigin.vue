@@ -19,11 +19,11 @@ const imported = computed(() => importLabel(props.deployment.kind))
 </script>
 
 <template>
-  <span
+  <UiTooltip
     v-if="imported"
     class="whitespace-nowrap text-fg-muted"
-    :title="props.deployment.kind === 'standby' ? 'Deployed stopped from an export of another server; a promotion starts it' : 'Deployed from an export of another server'"
-  >{{ imported }}</span>
+    :text="props.deployment.kind === 'standby' ? 'Deployed stopped from an export of another server; a promotion starts it' : 'Deployed from an export of another server'"
+  >{{ imported }}</UiTooltip>
   <span v-else-if="origin" class="whitespace-nowrap text-fg-muted">
     <template v-if="origin.source">
       {{ origin.phrase }}

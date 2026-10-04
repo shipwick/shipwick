@@ -195,11 +195,11 @@ async function signOut(email: string) {
                 {{ ruleSubject(r) }}
                 <span v-if="ruleReach(r, claim)" class="block font-sans text-xs font-normal text-fg-subtle">{{ ruleReach(r, claim) }}</span>
               </td>
-              <td data-label="Role" class="mono" :title="ROLE_DESCRIPTIONS[r.role] ?? undefined">
+              <td data-label="Role" class="mono">
                 {{ r.role }}
               </td>
-              <td data-label="Applications" :class="r.applications.length ? 'mono' : 'text-fg-muted'" :title="r.applications.join(', ') || 'Not limited: every application'">
-                {{ r.applications.length ? listNames(r.applications, 3) : 'all' }}
+              <td data-label="Applications" :class="r.applications.length ? 'mono' : 'text-fg-muted'">
+                <UiTooltip :text="r.applications.length > 3 ? r.applications.join(', ') : null">{{ r.applications.length ? listNames(r.applications, 3) : 'all' }}</UiTooltip>
               </td>
               <td data-label="Granted" class="text-fg-muted">
                 <TimeAgo :time="r.created_at" />
@@ -311,7 +311,7 @@ async function signOut(email: string) {
               <th>Applications</th>
               <th>Signed in</th>
               <th>Ends</th>
-              <th>Last used</th>
+              <th>Last used <span class="font-normal normal-case tracking-normal">· to the minute</span></th>
               <th class="right">
                 <span class="sr-only">Actions</span>
               </th>
@@ -325,21 +325,21 @@ async function signOut(email: string) {
               <td data-label="Role" class="mono">
                 {{ s.role }}
               </td>
-              <td data-label="Applications" :class="s.applications.length ? 'mono' : 'text-fg-muted'" :title="s.applications.join(', ') || undefined">
-                {{ s.applications.length ? listNames(s.applications, 3) : 'all' }}
+              <td data-label="Applications" :class="s.applications.length ? 'mono' : 'text-fg-muted'">
+                <UiTooltip :text="s.applications.length > 3 ? s.applications.join(', ') : null">{{ s.applications.length ? listNames(s.applications, 3) : 'all' }}</UiTooltip>
               </td>
               <td data-label="Signed in" class="text-fg-muted">
                 <TimeAgo :time="s.created_at" />
               </td>
-              <td data-label="Ends" class="text-fg-muted" :title="formatAbsoluteUtc(s.expires_at)">
+              <td data-label="Ends" class="text-fg-muted">
                 <TimeAgo :time="s.expires_at" />
               </td>
-              <td data-label="Last used" class="text-fg-muted" title="Kept to the minute">
+              <td data-label="Last used" class="text-fg-muted">
                 <TimeAgo v-if="s.last_used_at" :time="s.last_used_at" />
                 <span v-else>never</span>
               </td>
               <td class="right">
-                <UiButton size="sm" :pending="ending === s.email" title="Ends every session of this person; they can sign in again while a rule covers them" :aria-label="`Sign out ${s.email}`" @click="signOut(s.email)">
+                <UiButton size="sm" :pending="ending === s.email" hint="Ends every session of this person; they can sign in again while a rule covers them" :aria-label="`Sign out ${s.email}`" @click="signOut(s.email)">
                   Sign out
                 </UiButton>
               </td>

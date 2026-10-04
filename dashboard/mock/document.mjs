@@ -8,7 +8,12 @@
 //
 // A secret value is never written: one that was a reference to a stored
 // secret is written as that reference, any other as the mask, and `masked`
-// names those fields in document order.
+// names those fields in document order. An env value its deployment called
+// plain (`?plain=env.LOG_LEVEL`) is not a secret and is written as the
+// document wrote it: `references.plain` holds those texts by variable, since
+// the specs kept here hold masks, and `plain` names the fields.
+
+import { securityLines } from './security.mjs'
 
 export const MASK = '********'
 
@@ -20,6 +25,9 @@ const MASKED_NOTICE = `# A value shown as "${MASK}" was given when the applicati
 `
 
 const MASKED_COMMENT = '# not handed out: write the value again, or refer to a secret as ${NAME}'
+
+/** Whether a text refers to a stored secret: it holds a ${NAME} that is not escaped. */
+const isReference = value => typeof value === 'string' && /(?<!\$)\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(value)
 
 const quoted = value => JSON.stringify(String(value))
 
@@ -87,6 +95,7 @@ export function documentOf(spec, references = {}) {
   block(process)
 
   if (spec.init) block(['init: true'])
+  block(securityLines(spec.security, str))
   if (spec.port) block([`port: ${spec.port}`])
 
   const hostnames = []
@@ -100,7 +109,8 @@ export function documentOf(spec, references = {}) {
   if (!spec.static || (spec.replicas ?? 1) !== 1) block([`replicas: ${spec.replicas ?? 1}`])
 
   const env = Object.keys(spec.env ?? {}).sort()
-  if (env.length > 0) block(['env:', ...env.map(name => `  ${name}: ${secret(references.env?.[name], `env.${name}`)}`)])
+  const plain = env.filter(name => typeof references.plain?.[name] === 'string' && !isReference(references.env?.[name]))
+  if (env.length > 0) block(['env:', ...env.map(name => `  ${name}: ${plain.includes(name) ? str(references.plain[name]) : secret(references.env?.[name], `env.${name}`)}`)])
 
   if (spec.health) {
     const h = spec.health
@@ -166,7 +176,25 @@ export function documentOf(spec, references = {}) {
 
   if (!spec.static || spec.restart?.policy !== 'always') block(['restart:', `  policy: ${str(spec.restart?.policy ?? 'always')}`])
 
-  return { document: (masked.length > 0 ? MASKED_NOTICE : '') + blocks.join('\n'), masked }
+  return { document: (masked.length > 0 ? MASKED_NOTICE : '') + blocks.join('\n'), masked, plain: plain.map(name => `env.${name}`) }
+}
+
+/**
+ * What `?plain=` of a deployment says about its document: the texts of the
+ * env values it names, by variable. A field that is not an env value of the
+ * document is the agent's refusal, returned as `refused`; a value that refers
+ * to a stored secret stays a reference and is left out.
+ */
+export function plainOf(body, fields) {
+  const plain = {}
+  for (const field of fields) {
+    const name = /^env\.(.+)$/.exec(field)?.[1]
+    const env = body?.env
+    if (name === undefined || typeof env !== 'object' || env === null || !Object.hasOwn(env, name)) return { plain: {}, refused: field }
+    // YAML reads 8080 and true as what they look like; an env value is its text.
+    if (!isReference(env[name])) plain[name] = String(env[name])
+  }
+  return { plain, refused: '' }
 }
 
 /** The references of a document that has not had its values masked yet: every env value and basic-auth password with a `${NAME}` in it. */

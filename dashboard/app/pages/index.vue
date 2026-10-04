@@ -217,7 +217,7 @@ function retryAll() {
               <dt class="label">
                 Name
               </dt>
-              <dd class="mono mt-0.5 truncate" :title="server.data.value.hostname">
+              <dd class="mono mt-0.5 break-all">
                 {{ server.data.value.hostname }}
               </dd>
               <dd class="text-xs text-fg-subtle">
@@ -243,7 +243,7 @@ function retryAll() {
                 Reverse proxy
               </dt>
               <dd class="mt-0.5">
-                <StatusBadge v-if="proxy" :tone="proxy.tone" :label="proxy.label" :raw="server.data.value.proxy.error || undefined" />
+                <StatusBadge v-if="proxy" :tone="proxy.tone" :label="proxy.label" :detail="server.data.value.proxy.error || undefined" />
               </dd>
             </div>
             <div>
@@ -256,6 +256,10 @@ function retryAll() {
               </dd>
             </div>
           </dl>
+          <!-- With Docker silent both requests fail with the same sentence, and the notice above has said it. -->
+          <p v-else-if="server.error.value?.dockerSilent && apps.error.value?.dockerSilent" class="px-4 py-3 text-fg-muted">
+            Not known while Docker does not answer.
+          </p>
           <p v-else-if="server.error.value" class="px-4 py-3 text-danger">
             The server did not answer: {{ server.error.value.displayMessage }}
           </p>

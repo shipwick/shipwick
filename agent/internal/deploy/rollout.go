@@ -66,6 +66,10 @@ type rollout struct {
 	// executeDormant). A standby deployment is dormant by its kind, which is
 	// in its record and so survives a restart of the agent.
 	dormant bool
+
+	// failure is why the rollout was aborted, kept for the case that the
+	// database would not take it: see settle.go.
+	failure string
 }
 
 // progress orders the statuses a deployment passes through, on its way up
@@ -200,6 +204,10 @@ func (r *rollout) execute(ctx context.Context) error {
 		if err := e.pullImage(ctx, d); err != nil {
 			return err
 		}
+		if err := e.refuseRoot(ctx, d); err != nil {
+			return err
+		}
+		e.warnUnenforced(ctx, d)
 		if d.Spec.PreDeploy != nil {
 			if err := r.runHookOnce(ctx); err != nil {
 				return err
@@ -543,6 +551,7 @@ func (r *rollout) abort(cause error) {
 	defer cancel()
 
 	e.log.Error("deployment failed", "app", d.Application, "deployment", d.ID, "error", cause)
+	r.failure = cause.Error()
 	if err := e.transitionWithError(ctx, d, api.StatusFailed, cause.Error()); err != nil {
 		e.log.Error("could not mark deployment as failed", "deployment", d.ID, "error", err)
 	}
@@ -779,27 +788,18 @@ func (e *Engine) ensureReplicas(ctx context.Context, d store.Deployment, indexes
 func (e *Engine) createReplicas(ctx context.Context, d store.Deployment, indexes []int) ([]store.Replica, error) {
 	var created []store.Replica
 	for _, i := range indexes {
-		cspec := docker.ContainerSpec{
-			App:          d.Application,
-			DeploymentID: d.ID,
-			Sequence:     d.Sequence,
-			Replica:      i,
-			Image:        d.Spec.Image,
-			Env:          d.Spec.Env,
-			NanoCPUs:     d.Spec.Resources.NanoCPUs(),
-			MemoryBytes:  d.Spec.Resources.MemoryBytes,
-		}
+		cspec := containerFor(d)
+		cspec.Replica = i
 		for _, v := range d.Spec.Volumes {
 			cspec.Mounts = append(cspec.Mounts, docker.Mount{Volume: v.Name, Path: v.Path})
 		}
 		for _, p := range d.Spec.Publish {
 			cspec.Publish = append(cspec.Publish, docker.PortBinding{Port: p.Port, HostPort: p.Host, Address: p.Address, Protocol: p.Protocol})
 		}
-		cspec.Entrypoint, cspec.Command, cspec.User = d.Spec.Entrypoint, d.Spec.Command, d.Spec.User
+		cspec.Entrypoint, cspec.Command = d.Spec.Entrypoint, d.Spec.Command
 		if l := d.Spec.Logging; l != nil {
 			cspec.LogDriver, cspec.LogOptions = l.Driver, l.Options
 		}
-		cspec.Init = d.Spec.Init
 		id, name, err := e.createContainer(ctx, cspec)
 		if err != nil {
 			return created, fmt.Errorf("replica %d: %w", i, err)

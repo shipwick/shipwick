@@ -30,6 +30,18 @@ var memoryUnits = map[string]float64{
 
 // ParseMemory converts a human-readable size such as "512mb" or "1.5gb" to bytes.
 func ParseMemory(s string) (int64, error) {
+	bytes, err := parseSize(s)
+	if err != nil {
+		return 0, err
+	}
+	if bytes < MinMemoryBytes {
+		return 0, fmt.Errorf("invalid value %q: minimum is 6mb", s)
+	}
+	return bytes, nil
+}
+
+// parseSize is ParseMemory without the floor of a memory limit.
+func parseSize(s string) (int64, error) {
 	m := memoryPattern.FindStringSubmatch(strings.ToLower(strings.TrimSpace(s)))
 	if m == nil {
 		return 0, fmt.Errorf("invalid value %q", s)
@@ -45,9 +57,6 @@ func ParseMemory(s string) (int64, error) {
 	bytes := n * unit
 	if bytes > math.MaxInt64/2 {
 		return 0, fmt.Errorf("invalid value %q: too large", s)
-	}
-	if int64(bytes) < MinMemoryBytes {
-		return 0, fmt.Errorf("invalid value %q: minimum is 6mb", s)
 	}
 	return int64(bytes), nil
 }

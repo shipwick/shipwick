@@ -228,6 +228,11 @@ func TestIntegrationStats(t *testing.T) {
 	if err := rt.PullImage(ctx, testImage, nil); err != nil {
 		t.Fatalf("PullImage: %v", err)
 	}
+	// A daemon without cgroups reports the usage of everything it runs for
+	// every container: there is nothing of the container's to hold it to.
+	if info, err := rt.Info(ctx); err == nil && len(info.Unenforced) > 0 {
+		t.Skipf("the daemon enforces no %v limits (rootless: %v): its stats are not a container's", info.Unenforced, info.Rootless)
+	}
 	id, _, err := rt.CreateContainer(ctx, ContainerSpec{App: app, DeploymentID: 1, Sequence: 1, Replica: 1, Image: testImage, MemoryBytes: 64 << 20})
 	if err != nil {
 		t.Fatalf("CreateContainer: %v", err)

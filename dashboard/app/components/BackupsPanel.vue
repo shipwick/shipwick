@@ -120,10 +120,10 @@ function openRow(run: BackupRun, event: MouseEvent) {
 <template>
   <UiPanel v-if="!unsupported" title="Backups" :meta="runs.data.value?.length ?? null">
     <template #actions>
-      <UiButton v-if="props.admin" size="sm" variant="ghost" title="Record backups of this application that are in the backup destination and missing from this list" @click="adopting = true">
+      <UiButton v-if="props.admin" size="sm" variant="ghost" hint="Record backups of this application that are in the backup destination and missing from this list" @click="adopting = true">
         Adopt…
       </UiButton>
-      <UiButton size="sm" :disabled="!props.mayDeploy || props.busy || anyBusy" :pending="starting" :title="startTitle" @click="backUpNow">
+      <UiButton size="sm" :disabled="!props.mayDeploy || props.busy || anyBusy" :pending="starting" :hint="startTitle" @click="backUpNow">
         <UiIcon name="download" :size="12" />
         Back up now
       </UiButton>
@@ -180,7 +180,7 @@ function openRow(run: BackupRun, event: MouseEvent) {
                 <TimeAgo :time="r.started_at" />
               </td>
               <td data-label="Started by" class="text-fg-muted">
-                <span :title="r.trigger === 'adopted' ? 'Found in the backup destination and recorded afterwards; how it was taken is not known' : undefined">{{ triggerLabel(r.trigger) }}</span>
+                <UiTooltip :text="r.trigger === 'adopted' ? 'Found in the backup destination and recorded afterwards: how it was taken is not known, and what it holds was read from its files alone' : null">{{ triggerLabel(r.trigger) }}</UiTooltip>
               </td>
               <td data-label="Size" class="mono right whitespace-nowrap text-fg-muted">
                 {{ backupUsable(r) ? formatBytes(backupSize(r)) : '—' }}
@@ -188,18 +188,18 @@ function openRow(run: BackupRun, event: MouseEvent) {
               <td data-label="Kept in" class="mono whitespace-nowrap text-fg-muted">
                 <span class="inline-flex items-center gap-1.5">
                   {{ describeDestinations(r) }}
-                  <span v-if="r.encrypted && backupUsable(r)" class="inline-flex text-fg-subtle" title="Encrypted with the agent's passphrase">
+                  <UiTooltip v-if="r.encrypted && backupUsable(r)" repeats text="Encrypted with the agent's passphrase" class="inline-flex text-fg-subtle">
                     <UiIcon name="lock" :size="12" /><span class="sr-only">encrypted</span>
-                  </span>
+                  </UiTooltip>
                 </span>
               </td>
               <td data-label="Status">
                 <StatusBadge v-bind="backupStatusDisplay(r)" :raw="r.activity || r.status" />
-                <span v-if="r.status === 'failed' && r.error" class="block max-w-[15rem] truncate text-xs text-danger" :title="r.error">{{ r.error }}</span>
+                <UiTooltip v-if="r.status === 'failed' && r.error" repeats :text="r.error" class="block max-w-[15rem] truncate text-xs text-danger">{{ r.error }}</UiTooltip>
               </td>
               <td data-label="Verified">
-                <StatusBadge v-if="verificationDisplay(r, now)" v-bind="verificationDisplay(r, now)!" :raw="r.verify_error || r.verified_at || undefined" />
-                <span v-else-if="r.trigger === 'adopted' && backupUsable(r)" class="text-xs text-warn" title="What it holds was read from its files alone">not yet: verify before relying on it</span>
+                <StatusBadge v-if="verificationDisplay(r, now)" v-bind="verificationDisplay(r, now)!" :detail="r.verify_error || undefined" :raw="r.verified_at || undefined" />
+                <span v-else-if="r.trigger === 'adopted' && backupUsable(r)" class="text-xs text-warn">not yet: verify before relying on it</span>
                 <span v-else class="text-fg-subtle">never</span>
               </td>
               <td class="right">
@@ -208,7 +208,7 @@ function openRow(run: BackupRun, event: MouseEvent) {
                   size="sm"
                   :disabled="!props.mayDeploy || backupBusy(r)"
                   :pending="verifying === r.id"
-                  :title="verifyTitle(r)"
+                  :hint="verifyTitle(r)"
                   :aria-label="`Verify backup ${r.id}`"
                   @click="verify(r)"
                 >

@@ -56,7 +56,33 @@ authentications within a minute from one client address, its further wrong
 tokens are `429 RATE_LIMITED` for the next minute, with a `Retry-After` header
 in seconds. A valid token is never refused — behind the proxy every client
 shares one address — successful authentications never count, and `GET /health`
-is not limited. A valid token whose role does
+is not limited.
+
+The API answers the proxy, the dashboard and the server itself. A request
+that comes from the container of an application is `403 APPLICATION_CALLER`
+on every endpoint, `GET /health` included, whatever token it carries; the
+token is not looked at, and the request is not counted as a failed
+authentication:
+
+```json
+{ "error": { "code": "APPLICATION_CALLER",
+             "message": "the API answers the proxy, the dashboard and the server itself, not the containers of applications; from a container, call it at its hostname",
+             "details": {} } }
+```
+
+Which requests those are depends on how the agent is installed (handbook,
+§12, "Who can reach the API"). Requests from the server itself, over
+loopback, are always answered. On the address the agent has on the control
+network, every address that is not of that network is refused. On any other
+address it listens on, the addresses of the containers the agent manages are
+refused, and with the control arrangement in place every address of the two
+application networks as well. Where applications can still reach the API —
+the agent listens on a network they are on — `GET /server` carries
+`open_to_applications: true`. A
+request that reaches the API through the proxy, at the API's hostname, comes
+from the proxy and is answered like any other.
+
+A valid token whose role does
 not cover the endpoint is `403 FORBIDDEN`, and `details` says which role it has
 and which the endpoint wants:
 
@@ -140,6 +166,7 @@ Failure — `details` is always an object:
 | 403 | `FORBIDDEN` | The token's role does not cover this endpoint; `details: {role, required}` |
 | 403 | `TOKEN_LIMITED` | The role would do, and the token is limited to other applications; `details: {applications}`, and `application` when the request was about one |
 | 403 | `ACCESS_NOT_GRANTED` | A person signed in whom no [access rule](#access-rules) gives a role; `details: {email}` |
+| 403 | `APPLICATION_CALLER` | The request came from the container of an application; the API answers the proxy, the dashboard and the server itself. Answered without checking the token, see [Authentication](#authentication) |
 | 404 | `NOT_FOUND` | Unknown application, deployment or token, including a rollback's `deployment_id` that does not exist; a `deploy` whose `?static=` digest names no upload the agent has |
 | 404 | `ENDPOINT_NOT_FOUND` | This agent has no such operation — an older agent, a typo in the path, or a method the path does not support (there is no `405`). Answered without checking the token |
 | 409 | `DEPLOYMENT_IN_PROGRESS` | Another operation holds this application |
@@ -167,7 +194,8 @@ Failure — `details` is always an object:
 | 429 | `RATE_LIMITED` | A wrong token, after 20 authentications from this address failed within a minute; `Retry-After` says in how many seconds wrong tokens are answered `401` again. A valid token is never refused |
 | 413 | `INVALID_REQUEST` | A `deploy` body (the deploy.yaml) larger than 64 KB; a volume archive larger than 10 GB; an image archive larger than 4 GB; a static folder larger than 512 MB |
 | 502 | `SIGN_IN_UNAVAILABLE` | The sign-in provider could not be reached or used; `message` says what to change |
-| 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down |
+| 503 | `RUNTIME_UNAVAILABLE` | Agent is shutting down; or, from 0.8, the Docker daemon does not answer — it is not running, or it took a question — about a container, the list of them, or the daemon itself — and said nothing for 15 seconds. `message` says which, and for Docker where to look; an agent before 0.8 answers `500 INTERNAL_ERROR` for a daemon that is down and does not answer at all for one that is silent |
+| 507 | `DISK_FULL` | The server's disk has no room for what the request writes: a record in the agent's database, an uploaded folder, an image. Nothing was changed, and the same request succeeds once there is room. An agent before 0.8 answers `500 INTERNAL_ERROR`, or `400 INVALID_REQUEST` for a folder |
 | 500 | `INTERNAL_ERROR` | Anything else; `message` carries the cause |
 
 ## Endpoints
@@ -175,14 +203,14 @@ Failure — `details` is always an object:
 | Method | Path | Role | |
 |---|---|---|---|
 | `GET` | `/health` | — | Liveness. No token. `{status, version}` |
-| `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `swap_bytes` (how much swap the server has; `0` is none, absent where the agent cannot tell), `unlimited_memory` (the names of the running applications without a memory limit; absent when there are none), `proxy: {enabled, reachable, error, routes, dns_challenge, plain_lookups}` (`dns_challenge`: certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards; `plain_lookups`: present and `true` when the proxy is not Shipwick's image of this version, and finds replicas without keeping the last answer of a name lookup), `notifications: {webhook}`, `backups: {destination, encrypted, state_last_at, state_error}` (see [Backups the agent takes](#backups-the-agent-takes)), `token: {name, role, kind, applications, expires_at}` — the caller's own, see [Authentication](#authentication) — `sign_in: {configured, issuer, name_claim}`, `dashboard_url`: `https://<SHIPWICK_DASHBOARD_DOMAIN>`, or `""` when the dashboard has no hostname (an agent before 0.5 leaves the field out), `disk` and `alerts`, see [Alerts and disk](#alerts-and-disk), and `log_archive`, see [The log archive](#the-log-archive) |
+| `GET` | `/server` | read | Host facts: OS, Docker version, CPUs, memory, counts, `swap_bytes` (how much swap the server has; `0` is none, absent where the agent cannot tell), `unlimited_memory` (the names of the running applications without a memory limit; absent when there are none), `proxy: {enabled, reachable, error, routes, dns_challenge, plain_lookups}` (`dns_challenge`: certificates are obtained through a DNS record, so hostnames may be proxied by Cloudflare and may be wildcards; `plain_lookups`: present and `true` when the proxy is not Shipwick's image of this version, and finds replicas without keeping the last answer of a name lookup), `notifications: {webhook}`, `backups: {destination, encrypted, state_last_at, state_error}` (see [Backups the agent takes](#backups-the-agent-takes)), `token: {name, role, kind, applications, expires_at}` — the caller's own, see [Authentication](#authentication) — `sign_in: {configured, issuer, name_claim}`, `dashboard_url`: `https://<SHIPWICK_DASHBOARD_DOMAIN>`, or `""` when the dashboard has no hostname (an agent before 0.5 leaves the field out), `disk` and `alerts`, see [Alerts and disk](#alerts-and-disk), `log_archive`, see [The log archive](#the-log-archive), and `open_to_applications`: present and `true` when the containers of applications can reach the API over the network, so that only the token keeps them out; absent otherwise, and from agents before 0.8, which never say (see [Authentication](#authentication)); `docker: {rootless, unenforced_limits}`: whether the daemon runs as an ordinary user, and which of `memory` and `cpu` it accepts as a limit and does not apply — an empty list where it applies both; absent from an agent older than 0.8 |
 | `GET` | `/applications` | read | Summaries of all applications; each with `domain` and, when it serves only a part of it, `path`, and with `certificate_problem`, `alert_count` and `alert_severity`, see [Application status](#application-status) |
 | `GET` | `/applications/:name` | read | Detail: status, active spec (env values and basic-auth passwords masked), containers, and the [certificate](#certificate-status) of each hostname |
-| `POST` | `/applications/:name/deploy` | deploy | Start a deployment → `202`. A static application adds `?static=<digest>`, see [Static folders](#static-folders) |
+| `POST` | `/applications/:name/deploy` | deploy | Start a deployment → `202`. A static application adds `?static=<digest>`, see [Static folders](#static-folders); `?plain=` names the env values written in plain sight, see [Deploying](#deploying) |
 | `POST` | `/applications/:name/validate` | deploy | Ask whether a deployment of the document in the body would be accepted, without deploying it → `{valid}`, see [Validating before deploying](#validating-before-deploying) |
 | `POST` | `/applications` | deploy | Start a deployment of the document in the body, for the application the document names → `202`, see [A document without a name in the address](#a-document-without-a-name-in-the-address) |
 | `POST` | `/validate` | deploy | `validate` for such a document → `{valid}` |
-| `GET` | `/applications/:name/config?escape=false` | deploy | The deploy.yaml that describes what the application runs, with references to stored secrets kept and other secret values masked, see [The document of what runs](#the-document-of-what-runs) |
+| `GET` | `/applications/:name/config?escape=false` | deploy | The deploy.yaml that describes what the application runs, with references to stored secrets and values deployed as plain kept and other secret values masked, see [The document of what runs](#the-document-of-what-runs) |
 | `POST` | `/applications/:name/redeploy` | deploy | Deploy the active configuration again; optional body `{"image": "…"}` → `202` |
 | `POST` | `/applications/:name/rollback` | deploy | Deploy the configuration of an earlier successful deployment; optional body `{"deployment_id": 12}`, default: the most recent one → `202` |
 | `POST` | `/applications/:name/stop` | deploy | Stop all replicas; the app stays stopped |
@@ -276,6 +304,18 @@ redeploy or rollback of it. `$${NAME}` there is a literal `${NAME}`. A
 placeholder anywhere else is a convention of the CLI, which fills it in before
 sending, and is stored literally here.
 
+`?plain=env.LOG_LEVEL,env.REGION` — fields separated by commas, or the
+parameter repeated — says which `env` values of the document were written in
+it in plain sight, as opposed to filled in by whoever sends it. The agent
+keeps the statement with the deployment and does one thing with it: those
+values are in [the document of what runs](#the-document-of-what-runs) as they
+are, where every other value is masked. It is the sender's word, taken by an
+endpoint that takes `deploy`; nothing else the API returns changes, and
+without the parameter nothing is plain. A field that is not `env.<NAME>` with
+a variable the document sets is `400 INVALID_REQUEST`; one whose value holds
+a `${NAME}` for the agent stays the reference it is. An agent before 0.8
+ignores the parameter.
+
 ```bash
 curl -X POST http://localhost:9000/api/v1/applications/my-api/deploy \
   -H "Authorization: Bearer $SHIPWICK_AGENT_TOKEN" \
@@ -301,6 +341,11 @@ only success. `FAILED` means nothing of the previous version was lost;
 `ROLLED_BACK` means part of it had already been replaced and was restored —
 `error` says why the deployment failed in both cases. Do not stop at the first `ACTIVE`: the engine may still be retiring the
 old version, and a new operation would get `409` until `completed_at` appears.
+A deployment that ended while the agent's database could not be written —
+its disk is full — keeps the status of its last successful write and no
+`completed_at` until the database takes writes again. It is completed then,
+and if its status was still one of work, it becomes `FAILED` with the error
+it failed with at the time.
 
 `events` narrate progress; `type: "step"` entries are meant to be shown to users:
 
@@ -379,8 +424,8 @@ asking then.
 `POST /applications` is `POST /applications/:name/deploy`, and `POST /validate`
 is `POST /applications/:name/validate`, for a caller that has a document and
 has not parsed it: the application is the one the document's `name` says.
-Body, query (`?static=<digest>` for a static application), answers and errors
-are those of the endpoints they stand for.
+Body, query (`?static=<digest>` for a static application, `?plain=`), answers
+and errors are those of the endpoints they stand for.
 
 ```bash
 curl -X POST http://localhost:9000/api/v1/applications \
@@ -409,12 +454,14 @@ deployment as the deploy.yaml that describes it, in the key order and style
     "application": "my-api",
     "deployment_id": 12, "sequence": 7, "version": "1.4.2",
     "document": "# A value shown as \"********\" was given when …\n\nname: my-api\n\nimage: ghcr.io/company/my-api:1.4.2\n\n…",
-    "masked": ["env.LOG_LEVEL", "proxy.basic_auth[0].password"]
+    "masked": ["env.API_KEY", "proxy.basic_auth[0].password"],
+    "plain": ["env.LOG_LEVEL"]
   }
 }
 ```
 
-`document`, for an application deployed with one reference and one literal:
+`document`, for an application deployed with `?plain=env.LOG_LEVEL`, one
+reference and one value nobody spoke for:
 
 ```yaml
 # A value shown as "********" was given when the application was deployed and
@@ -431,28 +478,39 @@ port: 8080
 replicas: 1
 
 env:
+  API_KEY: "********" # not handed out: write the value again, or refer to a secret as ${NAME}
   DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app
-  LOG_LEVEL: "********" # not handed out: write the value again, or refer to a secret as ${NAME}
+  LOG_LEVEL: debug
 
 restart:
   policy: always
 ```
 
 The secret values of a configuration — `env` values and the passwords of
-`proxy.basic_auth` — are never in it:
+`proxy.basic_auth` — are never in it, and an `env` value is one unless its
+deployment said otherwise:
 
 - A value the deployed document wrote with a `${NAME}` that the agent filled
   in from its [secrets](#secrets) is that text again, the placeholders in
   place. The agent keeps it next to the deployment, encrypted like a secret;
   a redeploy and a rollback carry it on, and so do a key rotation, an export
   and an import.
-- Every other value — typed into the file, or filled in by the CLI from its
-  environment or `--env-file`, which the agent cannot tell apart — is the
-  mask, `"********"`, with a comment on its line. `masked` names those
-  fields, in the order of the document; it is `[]` when there are none. The
-  comment at the top is there only when there are some.
+- An `env` value that the deployment named in `?plain=` is the value, a
+  literal `${NAME}` in it written `$${NAME}`. `plain` names those fields,
+  sorted; it is `[]` when there are none, and absent from an agent before
+  0.8. The statement is kept and carried on like a reference. A deployment
+  of the document that names the same fields again keeps them plain; one
+  that does not masks them from then on. `shipwick deploy` names the values
+  that stand in the file as it sends them; the dashboard names the ones it
+  was handed out as plain and that were not edited.
+- Every other value — filled in by the CLI from its environment or
+  `--env-file`, or sent by a client that said nothing, which the agent cannot
+  tell apart from a password — is the mask, `"********"`, with a comment on
+  its line. `masked` names those fields, in the order of the document; it is
+  `[]` when there are none. The comment at the top is there only when there
+  are some. A basic-auth password is never plain.
 
-The text around a reference is given back as it arrived, which
+The text around a reference and a plain value are given back as they arrived, which
 `GET /applications/:name` masks along with the rest. That is why the endpoint
 takes `deploy`, and a limited token gets the documents of its applications
 only: whoever may deploy an application can read its environment by running a
@@ -467,7 +525,7 @@ document and whoever wrote it:
 ```json
 { "error": { "code": "INVALID_CONFIG", "message": "invalid deploy.yaml",
              "details": { "fields": [ {
-               "field": "env.LOG_LEVEL",
+               "field": "env.API_KEY",
                "message": "******** is what the server shows in the place of this value, not the value",
                "expected": "the value itself, or ${NAME} with the value stored by shipwick secret set NAME" } ] } } }
 ```
@@ -543,6 +601,64 @@ The application views carry `path` next to `domain`, left out when there is
 none; the address of an application is `https://<domain><path>`. The step
 event of a deployment with a path reads `Routed https://example.com/api to 2
 replicas`.
+
+### The security block
+
+`security` in the deploy.yaml comes back in every `spec` as it was
+understood:
+
+```json
+{
+  "user": "1000:1000",
+  "security": {
+    "read_only": true,
+    "tmpfs": [
+      { "path": "/tmp", "size_bytes": 67108864 },
+      { "path": "/var/cache/api", "size_bytes": 209715200 }
+    ],
+    "capabilities": [],
+    "non_root": true
+  }
+}
+```
+
+`security` is left out for an application without the block, and for a block
+that asks for nothing. `read_only` and `non_root` are left out when `false`,
+`tmpfs` when empty; `size_bytes` is always present, `67108864` when the
+document named no size. `capabilities` has three states: left out, the
+containers keep Docker's default set; `[]`, the document said `none` and they
+keep nothing; a list, they keep those, in upper case without `CAP_` and in
+alphabetical order whatever the document wrote. Nothing in the block is a
+secret, and nothing is masked. A client that reads a missing `capabilities`
+as an empty list turns "everything" into "nothing".
+
+A document is refused with `400 INVALID_CONFIG` and the usual `fields` for a
+key of the block that does not exist (`field` `security`), a capability
+outside Docker's default set or listed twice (`security.capabilities[i]`), an
+empty list (`security.capabilities`: `none` is how to say it), a `tmpfs` path
+that is not absolute and clean, is `/`, or is mounted already by a volume or
+another entry (`security.tmpfs[i].path`), a `size` outside 1 MB to 1 GB
+(`security.tmpfs[i].size`), more than 10 entries (`security.tmpfs`), the
+block next to `static`, and — under `non_root: true` — a `user` that is
+`root`, the id 0 or a name (`user`).
+
+What only the image can say is checked when the image is on the server. A
+deployment under `non_root: true` whose image names no user, the user
+`root`, the id 0 or a user by name, and whose spec has no `user`, is
+accepted with `202` and fails: `status` `FAILED`, no container created, the
+previous version untouched, and in `error`:
+
+```text
+security.non_root refuses image nginx:1.27: it names no user, and a container without one runs as root; set user in deploy.yaml to a numeric id the image can run as, e.g. user: "1000:1000", or build the image with a USER instruction
+```
+
+A job or a command that would create such a container later — the
+tag names another image by then — fails the same way: the run is `failed`
+with the sentence in its `output`.
+
+An agent before 0.8 answers a document with the block as it answers every
+key it does not know: `400 INVALID_CONFIG`, `field` `line N`, `message`
+`unknown field "security"`.
 
 ### Redeploy and rollback
 
@@ -1942,6 +2058,12 @@ agent has no DNS challenge; a new deployment that names one is refused:
 - **Memory is the working set**: usage minus the page cache the kernel would
   give back — what the limit is enforced against.
 - Limits are `0` when unlimited. Application-level numbers are sums over replicas.
+- `unenforced_limits` is present when the server's Docker has no cgroup
+  controller for a limit — rootless Docker without delegation — and lists
+  which: `["memory", "cpu"]`. The limits are then what `deploy.yaml` asks
+  for and nothing holds a replica to; with both listed on a rootless daemon,
+  the usage is that of everything the daemon runs, not the replica's. Absent
+  where Docker applies the limits, and from an agent older than 0.8.
 - A replica that is not running reports zeros; it never fails the request.
   An application with no active deployment answers `409 NOT_DEPLOYED`.
 - It is a **point-in-time sample**; the history is below. The agent keeps
@@ -2006,10 +2128,15 @@ them are about:
 }
 ```
 
-- `kind` is `memory`, `disk`, `restarts` or `unhealthy`; `severity` is
-  `warning` or `critical` (only `disk` and `unhealthy` become critical).
+- `kind` is `memory`, `disk`, `restarts`, `unhealthy` or, from 0.8, `docker`;
+  `severity` is `warning` or `critical` (`disk` and `unhealthy` become
+  critical; `docker` always is).
   `memory` and `restarts` name an `application` and a `replica`; `unhealthy`
-  an application, with `replica` 0; `disk` neither.
+  an application, with `replica` 0; `disk` and `docker` neither.
+- `docker` is raised when the Docker daemon has not answered for 30 seconds
+  and cleared by its first answer. While it stands, `GET /server` itself is
+  answered `503 RUNTIME_UNAVAILABLE`, so this alert is read from the webhook
+  and from [`/metrics`](#prometheus-metrics), which never asks Docker.
 - Only active alerts are listed, oldest first; `[]` when there are none.
   `since` is when the alert was raised, and stays when a warning turns
   critical. They are kept in memory: an agent that restarts raises again

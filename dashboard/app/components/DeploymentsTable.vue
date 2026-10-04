@@ -87,7 +87,7 @@ function open(d: Deployment, event: MouseEvent) {
           {{ duration(d) }}
         </td>
         <td :data-label="d.error ? 'Error' : undefined" class="max-w-0 text-fg-muted cards:max-w-none" :class="d.error ? '' : 'cards:!hidden'">
-          <span v-if="d.error" class="block truncate text-danger cards:whitespace-normal" :title="d.error">{{ d.error }}</span>
+          <UiTooltip v-if="d.error" repeats :text="d.error" class="block truncate text-danger cards:whitespace-normal">{{ d.error }}</UiTooltip>
         </td>
       </tr>
     </tbody>

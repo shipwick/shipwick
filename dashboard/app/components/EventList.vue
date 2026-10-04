@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { AgentEvent } from '~/types/api'
 import { formatAbsoluteUtc } from '~/utils/format'
-import { deploymentStatusDisplay, eventLevelTone } from '~/utils/status'
+import { eventLevelTone, stateEventLabel } from '~/utils/status'
 
 const props = withDefaults(defineProps<{
   events: AgentEvent[]
@@ -13,7 +13,7 @@ const props = withDefaults(defineProps<{
 
 const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', muted: 'text-fg' } as const
 
-// The agent's event types, in the words of the page. A state event's message is the status the deployment entered.
+// The agent's event types, in the words of the page. A state event's message is the status the deployment entered, with the cause of a failure after it.
 const TYPE_LABEL: Record<string, string> = { state: 'Phase', step: 'Step', log: 'Output', job: 'Job', app: 'Application', supervisor: 'Agent' }
 </script>
 
@@ -26,18 +26,18 @@ const TYPE_LABEL: Record<string, string> = { state: 'Phase', step: 'Step', log: 
       :style="{ '--time-col': props.absolute ? '17rem' : '5.5rem' }"
     >
       <div class="flex items-baseline gap-3 text-xs text-fg-subtle">
-        <TimeAgo :time="event.created_at" :class="props.absolute ? 'w-[4.5rem] shrink-0' : ''" />
+        <TimeAgo :time="event.created_at" :plain="props.absolute" :class="props.absolute ? 'w-[4.5rem] shrink-0' : ''" />
         <span v-if="props.absolute" class="mono text-fg-subtle">{{ formatAbsoluteUtc(event.created_at) }}</span>
       </div>
       <div class="flex min-w-0 gap-2" :class="event.type === 'log' ? 'items-start' : 'items-baseline'">
-        <span v-if="props.showType" class="label w-20 shrink-0" :title="event.type">{{ TYPE_LABEL[event.type] ?? event.type }}</span>
+        <UiTooltip v-if="props.showType" repeats :text="event.type" class="label w-20 shrink-0">{{ TYPE_LABEL[event.type] ?? event.type }}</UiTooltip>
         <span v-if="event.level !== 'info'" class="label shrink-0" :class="TONE_TEXT[eventLevelTone(event.level)]">{{ event.level }}</span>
         <pre
           v-if="event.type === 'log'"
           class="mono min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-sm border border-line bg-inset px-3 py-2 text-xs leading-[1.125rem]"
         >{{ event.message }}</pre>
         <!-- The level label carries the color; the message stays in ink so a crash loop is not a wall of amber. -->
-        <span v-else-if="event.type === 'state'" class="min-w-0 break-words text-fg-muted" :title="event.message">{{ deploymentStatusDisplay(event.message).label }}</span>
+        <UiTooltip v-else-if="event.type === 'state'" repeats :text="event.message" class="min-w-0 break-words text-fg-muted">{{ stateEventLabel(event.message) }}</UiTooltip>
         <span v-else class="min-w-0 break-words">{{ event.message }}</span>
       </div>
     </li>

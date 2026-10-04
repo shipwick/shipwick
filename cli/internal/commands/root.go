@@ -412,8 +412,17 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 			return "This server is being promoted; nothing is imported into it meanwhile.\n\nFollow the promotion with: shipwick standby promote"
 		case api.CodeSessionExpired, api.CodeSessionEnded:
 			return renderSessionOver(apiErr)
+		case api.CodeDiskFull:
+			return "Error: " + apiErr.Message + ".\n\nSee how full the disk is with: shipwick server status"
+		case api.CodeApplicationCaller:
+			return renderApplicationCaller()
 		}
 		return "Error: " + apiErr.Message
+	}
+
+	var older *olderAgentError
+	if errors.As(err, &older) {
+		return older.Error()
 	}
 
 	return "Error: " + strings.TrimSpace(err.Error())

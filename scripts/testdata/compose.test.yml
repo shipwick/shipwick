@@ -1,0 +1,12 @@
+# What the test scripts add to an arrangement so that test-cycle.sh can drive
+# it from the daemon's own container. Not for a server.
+services:
+  agent:
+    # The CLI reaches the API here; in production it has no published port.
+    ports: ["127.0.0.1:9000:9000"]
+    # The agent routes a hostname once it resolves to the server. Whether
+    # *.localhost resolves is up to the resolver the daemon forwards to.
+    extra_hosts:
+      - agent.localhost:127.0.0.1
+      - hello.localhost:127.0.0.1
+      - site.localhost:127.0.0.1

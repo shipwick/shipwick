@@ -149,7 +149,7 @@ const tooOld = computed(() => error.value?.code === 'ENDPOINT_NOT_FOUND')
       <UiButton :disabled="pending" @click="emit('close')">
         Cancel
       </UiButton>
-      <UiButton type="submit" form="token-edit-form" variant="primary" :pending="pending" :disabled="!changes.body" :title="changes.body ? undefined : changes.problem || 'Nothing has been changed'">
+      <UiButton type="submit" form="token-edit-form" variant="primary" :pending="pending" :disabled="!changes.body" :hint="changes.body ? undefined : changes.problem || 'Nothing has been changed'">
         Save changes
       </UiButton>
     </template>

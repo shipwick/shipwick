@@ -147,8 +147,8 @@ function closeRemove() {
                   <td data-label="Issuer">
                     {{ c.issuer || '—' }}
                   </td>
-                  <td data-label="Expires" :title="`Valid from ${formatDate(c.not_before)} until ${formatDate(c.not_after)}`">
-                    <span class="mono">{{ formatDate(c.not_after) }}</span>
+                  <td data-label="Expires">
+                    <UiTooltip class="mono" :text="`Valid from ${formatDate(c.not_before)} until ${formatDate(c.not_after)}`">{{ formatDate(c.not_after) }}</UiTooltip>
                     <StatusBadge
                       v-if="expiryDisplay(c.not_after, now).tone !== 'muted'"
                       v-bind="expiryDisplay(c.not_after, now)"

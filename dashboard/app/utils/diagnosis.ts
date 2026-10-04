@@ -25,6 +25,10 @@ export interface DiagnosisContext {
   alerts?: readonly Pick<Alert, 'kind' | 'replica'>[]
   /** Why the domain is not served, when the server's proxy is off or unreachable. */
   proxyProblem?: string
+  /** The limits the application sets and Docker on the server does not apply ("memory", "cpu"), by the agent's word; empty when it applies them or did not say. */
+  unenforcedLimits?: readonly string[]
+  /** The daemon has no cgroups at all: what it reports as a replica's usage is that of everything it runs. */
+  usageIsTheDaemons?: boolean
 }
 
 const page = (name: string, tab = '') => `/applications/${encodeURIComponent(name)}${tab ? `/${tab}` : ''}`
@@ -115,6 +119,19 @@ export function diagnose(app: ApplicationDetail, context: DiagnosisContext): Fin
 
   if (app.domain && context.proxyProblem) {
     findings.push({ key: 'proxy', tone: 'warn', title: `${app.domain} is not being served`, detail: `${context.proxyProblem}.`, action: { label: 'Server status', to: '/servers' } })
+  }
+
+  const unenforced = context.unenforcedLimits ?? []
+  if (unenforced.length > 0) {
+    const names = unenforced.map(limit => (limit === 'cpu' ? 'CPU' : limit)).join(' and ')
+    const keys = unenforced.map(limit => `resources.${limit}`).join(' and ')
+    findings.push({
+      key: 'limits',
+      tone: 'warn',
+      title: `Docker on this server does not enforce the ${names} ${unenforced.length === 1 ? 'limit' : 'limits'}`,
+      detail: `No replica is held to ${keys} of deploy.yaml${context.usageIsTheDaemons ? ', and the usage Docker reports for a replica is that of everything it runs, so it is not shown' : ''}. The server's page says what Docker lacks.`,
+      action: { label: 'Server status', to: '/servers' },
+    })
   }
 
   return findings

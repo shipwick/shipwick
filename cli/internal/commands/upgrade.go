@@ -46,6 +46,10 @@ type upgradeOptions struct {
 	// be the one this binary was built for: see machineArch.
 	machine string
 	version string
+	// cosign locates the program that verifies a release's signature, ""
+	// when this machine has none; run runs it. See signature.go.
+	cosign func() string
+	run    func(ctx context.Context, argv []string, out io.Writer) error
 }
 
 func (o upgradeOptions) withDefaults() upgradeOptions {
@@ -82,6 +86,12 @@ func (o upgradeOptions) withDefaults() upgradeOptions {
 	if o.version == "" {
 		o.version = version.Version
 	}
+	if o.cosign == nil {
+		o.cosign = findCosign
+	}
+	if o.run == nil {
+		o.run = runVerifier
+	}
 	return o
 }
 
@@ -100,6 +110,11 @@ func (c *cli) upgradeCommand() *cobra.Command {
 The release is downloaded from GitHub and verified against its published
 checksums before the binary is swapped. A shipwick installed with Homebrew or
 winget is left to the package manager; the command tells you what to run.
+
+The checksums are signed by the workflow that published the release. With
+cosign installed (2.4 or later) the signature is verified first, and an
+upgrade whose signature is not that workflow's changes nothing; without
+cosign the command says that it was not checked.
 
 The server is not upgraded by this command: the installer does that, on the
 server, with access to Docker. If the server is behind, the command says so.`,
@@ -152,23 +167,26 @@ func (c *cli) upgradeBinary(ctx context.Context, opts upgradeOptions, latest str
 	}
 
 	c.ui.Progress("Downloading shipwick %s…", latest)
-	err = c.replaceBinary(ctx, opts, latest, exe)
+	signature, err := c.replaceBinary(ctx, opts, latest, exe)
 	c.ui.Done()
 	if err != nil {
 		return err
 	}
 	c.ui.Success("Upgraded shipwick %s → %s", opts.version, latest)
 	c.ui.Println(c.ui.Styled(ui.Dim, "  "+exe))
+	c.ui.Println(c.ui.Styled(ui.Dim, "  "+signature.describe(latest)))
 	return nil
 }
 
 // replaceBinary downloads the release asset for this platform next to the
-// running binary, verifies it against checksums.txt and renames it into
-// place. Nothing about the old binary changes until the new one is verified.
-func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe string) error {
+// running binary, verifies it against checksums.txt — and checksums.txt
+// against the release's signature, where cosign is installed — and renames it
+// into place. Nothing about the old binary changes until the new one is
+// verified.
+func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe string) (signatureState, error) {
 	info, err := os.Stat(exe)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	asset := releaseAsset(opts.goos, opts.machine)
 
@@ -178,9 +196,9 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	f, err := os.OpenFile(staged, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
-			return notWritable(filepath.Dir(exe), releaseAsset(opts.goos, opts.machine))
+			return 0, notWritable(filepath.Dir(exe), releaseAsset(opts.goos, opts.machine))
 		}
-		return fmt.Errorf("write %s: %w", staged, err)
+		return 0, fmt.Errorf("write %s: %w", staged, err)
 	}
 	// Removing the staging file is a no-op once it has been renamed into
 	// place; on every other path it must not be left behind.
@@ -190,7 +208,11 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	base := opts.web + "/" + releaseRepo + "/releases/download/" + tag + "/"
 	sums, err := opts.fetch(ctx, base+"checksums.txt", "", 1<<20)
 	if err != nil {
-		return fmt.Errorf("download the release checksums: %w", err)
+		return 0, fmt.Errorf("download the release checksums: %w", err)
+	}
+	signature, _, err := opts.checkSignature(ctx, base, tag, sums)
+	if err != nil {
+		return 0, err
 	}
 	want, ok := checksumFor(sums, asset)
 	if !ok && opts.machine != opts.goarch {
@@ -201,34 +223,34 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 		}
 	}
 	if !ok {
-		return fmt.Errorf("release %s has no %s (looked in %s); nothing was changed", tag, asset, base+"checksums.txt")
+		return 0, fmt.Errorf("release %s has no %s (looked in %s); nothing was changed", tag, asset, base+"checksums.txt")
 	}
 
 	resp, err := opts.get(ctx, base+asset, "")
 	if err != nil {
-		return fmt.Errorf("download %s: %w", base+asset, err)
+		return 0, fmt.Errorf("download %s: %w", base+asset, err)
 	}
 	defer resp.Body.Close()
 	sum := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(f, sum), resp.Body); err != nil {
-		return fmt.Errorf("download %s: %w", base+asset, err)
+		return 0, fmt.Errorf("download %s: %w", base+asset, err)
 	}
 	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
-		return fmt.Errorf("%s does not match the checksum published with release %s; nothing was changed\n  downloaded from %s", asset, tag, base+asset)
+		return 0, fmt.Errorf("%s does not match the checksum published with release %s; nothing was changed\n  downloaded from %s", asset, tag, base+asset)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("write %s: %w", staged, err)
+		return 0, fmt.Errorf("write %s: %w", staged, err)
 	}
 	if err := os.Chmod(staged, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("set permissions on %s: %w", staged, err)
+		return 0, fmt.Errorf("set permissions on %s: %w", staged, err)
 	}
 	if err := replaceExecutable(exe, staged); err != nil {
 		if errors.Is(err, fs.ErrPermission) {
-			return notWritable(filepath.Dir(exe), releaseAsset(opts.goos, opts.machine))
+			return 0, notWritable(filepath.Dir(exe), releaseAsset(opts.goos, opts.machine))
 		}
-		return fmt.Errorf("replace %s: %w", exe, err)
+		return 0, fmt.Errorf("replace %s: %w", exe, err)
 	}
-	return nil
+	return signature, nil
 }
 
 // compareServer tells whether the server is behind the latest release, and

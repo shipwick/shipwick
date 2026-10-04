@@ -3,12 +3,100 @@
 package docker
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/moby/moby/client"
 )
+
+// A replica the runtime stops itself rests only until the proxy has forgotten
+// it, although Docker reports it as exited from then on; without the proxy's
+// word it rests in full.
+func TestIntegrationAnAddressTheProxyForgotDoesNotRestInFull(t *testing.T) {
+	rt, ctx := newIntegrationRuntime(t)
+	const rest = 4 * time.Second
+	rt.rest = newAddressRest(rest)
+	rt.rest.since = time.Now().Add(-time.Hour)
+	var mu sync.Mutex
+	var asked [][]string
+	confirms := true
+	rt.ForgetWith(func(_ context.Context, names []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, names)
+		if !confirms {
+			return errors.New("the proxy did not forget (HTTP 404)")
+		}
+		return nil
+	})
+	if err := rt.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork: %v", err)
+	}
+	if err := rt.PullImage(ctx, testImage, nil); err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+	suffix := time.Now().UnixNano() % 1_000_000
+	alpha, beta := fmt.Sprintf("it-forget-a-%d", suffix), fmt.Sprintf("it-forget-b-%d", suffix)
+	names := []string{alpha, alpha + "_80"}
+
+	started := func(app string, replica int) string {
+		t.Helper()
+		id, _, err := rt.CreateContainer(ctx, ContainerSpec{App: app, DeploymentID: 1, Sequence: 1, Replica: replica, Image: testImage})
+		if err != nil {
+			t.Fatalf("CreateContainer: %v", err)
+		}
+		t.Cleanup(func() { rt.RemoveContainer(ctx, id) })
+		if err := rt.StartContainer(ctx, id); err != nil {
+			t.Fatalf("StartContainer: %v", err)
+		}
+		return id
+	}
+	// stop retires a replica of alpha that carries its names, and returns how
+	// long a container of beta then takes to start.
+	stop := func(replica int) time.Duration {
+		t.Helper()
+		id := started(alpha, replica)
+		if err := rt.SetServiceNames(ctx, id, names); err != nil {
+			t.Fatalf("SetServiceNames: %v", err)
+		}
+		// Whatever the calls above left resting is over before the stop.
+		if err := rt.rest.wait(ctx, "", rt.exitedByApp); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		asked = nil
+		mu.Unlock()
+		if err := rt.StopContainer(ctx, id, time.Second); err != nil {
+			t.Fatalf("StopContainer: %v", err)
+		}
+		mu.Lock()
+		if len(asked) != 1 || !slices.Equal(asked[0], names) {
+			t.Errorf("the proxy was asked to forget %v, want %v once", asked, names)
+		}
+		mu.Unlock()
+		stopped := time.Now()
+		started(beta, replica)
+		return time.Since(stopped)
+	}
+
+	if took := stop(1); took >= rest {
+		t.Errorf("%s started %v after %s was stopped and forgotten: its address rested in full", beta, took, alpha)
+	} else if took < ForgottenRest {
+		t.Errorf("%s started %v after %s was stopped, before a request on its way there had given up (%v)", beta, took, alpha, ForgottenRest)
+	}
+
+	mu.Lock()
+	confirms = false
+	mu.Unlock()
+	if took := stop(2); took < rest {
+		t.Errorf("%s started %v after %s was stopped and not forgotten, before its address had rested %v", beta, took, alpha, rest)
+	}
+}
 
 // What the rest of addresses rests on: Docker gives the address of a
 // container that stopped to the next one that starts, and a container of

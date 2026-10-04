@@ -97,6 +97,7 @@ func (e *Engine) StartSupervisor() {
 			case now := <-ticker.C:
 				e.sup.tick(e.baseCtx, now)
 				e.scheduleJobs(e.baseCtx, now)
+				e.retrySettling(e.baseCtx)
 			}
 		}
 	}()
@@ -108,6 +109,9 @@ func (e *Engine) StartSupervisor() {
 // tick performs one supervision pass. Time is a parameter so that tests can
 // drive the backoff schedule without sleeping through it.
 func (s *supervisor) tick(ctx context.Context, now time.Time) {
+	if !s.e.dockerAnswers(ctx, now) {
+		return
+	}
 	apps, err := s.e.store.ListApplications(ctx)
 	if err != nil {
 		s.logErr(ctx, "list applications", err)

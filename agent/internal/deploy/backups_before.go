@@ -50,23 +50,14 @@ func (e *Engine) runBefore(ctx context.Context, d store.Deployment, replica stri
 // which nothing of the command is left.
 func (e *Engine) backupBeforeBeside(ctx context.Context, d store.Deployment, replica string, runID int64, b *spec.Backups) error {
 	limit := b.BeforeLimit()
-	cspec := docker.ContainerSpec{
-		App:          d.Application,
-		DeploymentID: d.ID,
-		Sequence:     d.Sequence,
-		Image:        d.Spec.Image,
-		Env:          d.Spec.Env,
-		NanoCPUs:     d.Spec.Resources.NanoCPUs(),
-		MemoryBytes:  d.Spec.Resources.MemoryBytes,
-		Command:      b.Before,
-		User:         d.Spec.User,
-		Job:          &docker.JobSpec{Name: beforeJobName, RunID: runID},
-		// An init process in front, whatever the application has: a command
-		// that is its container's first process does not see SIGTERM unless
-		// it handles it, and would be waited for until it is killed.
-		Init:   true,
-		Beside: &docker.BesideSpec{Container: replica},
-	}
+	cspec := containerFor(d)
+	cspec.Command = b.Before
+	cspec.Job = &docker.JobSpec{Name: beforeJobName, RunID: runID}
+	cspec.Beside = &docker.BesideSpec{Container: replica}
+	// An init process in front, whatever the application has: a command
+	// that is its container's first process does not see SIGTERM unless
+	// it handles it, and would be waited for until it is killed.
+	cspec.Init = true
 	// The replica writes these volumes too, and that is the point: the
 	// command is the application's own way of making them fit to be copied.
 	for _, v := range d.Spec.Volumes {

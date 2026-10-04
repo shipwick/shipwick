@@ -47,20 +47,20 @@ function pieces(message: string): string[] {
 </script>
 
 <template>
-  <div :class="props.wrap ? '' : 'w-max min-w-full'">
+  <UiTooltip as="div" within :class="props.wrap ? '' : 'w-max min-w-full'">
     <template v-for="(line, index) in props.lines" :key="line.seq ?? index">
       <div v-if="line.notice" class="log-row my-1 border-y border-line px-3 py-1 font-sans text-fg-subtle">
         {{ line.message }}
       </div>
       <div v-else class="log-row flex items-start gap-3 px-3 hover:bg-hover">
-        <span v-if="props.timestamps" class="shrink-0 select-none text-fg-subtle" :title="line.time">{{ formatLogTime(line.time) }}</span>
-        <span v-if="props.replicas" class="flex w-7 shrink-0 select-none items-center gap-1 text-fg-subtle" :title="line.container">
+        <span v-if="props.timestamps" class="shrink-0 select-none text-fg-subtle" :data-tooltip="line.time">{{ formatLogTime(line.time) }}</span>
+        <span v-if="props.replicas" class="flex w-7 shrink-0 select-none items-center gap-1 text-fg-subtle" :data-tooltip="line.container">
           <span class="h-3 w-0.5 rounded-full" :style="{ background: replicaColor(line.replica) }" aria-hidden="true" />r{{ line.replica }}
         </span>
         <span class="min-w-0" :class="props.wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'"><span v-if="line.stream === 'stderr'" class="mr-2 select-none text-2xs uppercase tracking-wider text-fg-subtle">err</span><template v-if="props.highlight === ''">{{ line.message }}</template><template v-for="(piece, n) in pieces(line.message)" v-else :key="n"><mark v-if="n % 2 === 1" class="rounded-xs bg-warn-bg text-fg">{{ piece }}</mark><template v-else>{{ piece }}</template></template></span>
       </div>
     </template>
-  </div>
+  </UiTooltip>
 </template>
 
 <style scoped>

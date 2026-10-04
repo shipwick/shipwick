@@ -11,6 +11,7 @@ import {
   replicaHealthDisplay,
   replicaSummary,
   sortBySeverity,
+  stateEventLabel,
 } from '../app/utils/status'
 
 describe('application status → tone', () => {
@@ -144,5 +145,23 @@ describe('isDraining', () => {
 
   it('is nothing for an application whose first deployment has not succeeded', () => {
     expect(isDraining({ deployment_id: 1 }, { deploying: false, active_deployment: null })).toBe(false)
+  })
+})
+
+describe('a state event of a timeline', () => {
+  it('says the status in the words of the page', () => {
+    expect(stateEventLabel('BUILDING')).toBe('Pulling image')
+    expect(stateEventLabel('ROLLED_BACK')).toBe('Rolled back')
+  })
+
+  it('keeps the cause of a failure as the agent wrote it: it names keys and commands', () => {
+    expect(stateEventLabel('FAILED: security.non_root refuses image nginx:alpine: it names no user; set user in deploy.yaml, or build the image with a USER instruction'))
+      .toBe('Failed: security.non_root refuses image nginx:alpine: it names no user; set user in deploy.yaml, or build the image with a USER instruction')
+    expect(stateEventLabel('FAILED: pre-deploy command exited 1')).toBe('Failed: pre-deploy command exited 1')
+  })
+
+  it('still reads a status it does not know', () => {
+    expect(stateEventLabel('SOMETHING_NEW')).toBe('Something new')
+    expect(stateEventLabel('')).toBe('')
   })
 })

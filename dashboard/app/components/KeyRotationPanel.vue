@@ -107,7 +107,7 @@ onBeforeUnmount(() => {
       <p class="max-w-prose text-fg-muted">
         Environment values, secrets, registry passwords and certificate keys are stored encrypted with one key. Rotating has the agent generate a new one and re-encrypt everything under it; nothing is deployed and nothing restarts.
       </p>
-      <UiButton size="sm" :disabled="!props.admin" :title="props.admin ? undefined : roleHint('admin')" @click="confirming = true">
+      <UiButton size="sm" :disabled="!props.admin" :hint="props.admin ? undefined : roleHint('admin')" @click="confirming = true">
         <UiIcon name="key" :size="12" />
         Rotate encryption key
       </UiButton>

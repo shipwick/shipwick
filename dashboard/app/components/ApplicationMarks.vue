@@ -16,14 +16,14 @@ const FRAME = {
 </script>
 
 <template>
-  <span
+  <UiTooltip
     v-for="mark in marks"
     :key="mark.key"
+    :text="mark.title"
     class="inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-sm border px-1.5 text-2xs font-medium"
     :class="FRAME[mark.tone]"
-    :title="mark.title"
   >
     <UiIcon :name="mark.key === 'certificate' ? 'certificate' : 'alert'" :size="10" />
     {{ mark.label }}
-  </span>
+  </UiTooltip>
 </template>

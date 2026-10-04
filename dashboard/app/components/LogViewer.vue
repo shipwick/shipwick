@@ -152,14 +152,15 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
       <slot name="leading" />
 
       <!-- The agent's semantics: when following, `tail` is per replica; otherwise it is the merged total. -->
-      <label
-        class="flex items-center gap-1.5 text-xs text-fg-muted"
-        :title="follow ? 'Each replica starts with its own last N lines' : 'The last N lines across all replicas, merged by time'"
-      >
+      <label class="flex items-center gap-1.5 text-xs text-fg-muted">
         Tail
-        <select v-model.number="tail" class="input mono !h-7 !w-auto !text-xs">
-          <option v-for="n in TAIL_OPTIONS" :key="n" :value="n">{{ n }}</option>
-        </select>
+        <UiTooltip :text="follow ? 'Each replica starts with its own last N lines' : 'The last N lines across all replicas, merged by time'">
+          <template #trigger="tip">
+            <select v-model.number="tail" class="input mono !h-7 !w-auto !text-xs" v-bind="tip">
+              <option v-for="n in TAIL_OPTIONS" :key="n" :value="n">{{ n }}</option>
+            </select>
+          </template>
+        </UiTooltip>
         <span v-if="follow" class="text-fg-subtle">per replica</span>
       </label>
 
@@ -205,19 +206,20 @@ const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.v
     <!-- Replica filter -->
     <div v-if="replicas.length > 1" class="flex flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5" role="group" aria-label="Replicas">
       <span class="label mr-1">Replicas</span>
-      <button
+      <UiTooltip
         v-for="replica in replicas"
         :key="replica"
+        as="button"
         type="button"
         class="target mono inline-flex h-6 items-center justify-center gap-1.5 rounded-sm border px-1.5 text-xs transition-colors duration-100"
         :class="hiddenReplicas.has(replica) ? 'border-line text-fg-subtle line-through' : 'border-line-strong text-fg hover:bg-hover'"
         :aria-pressed="!hiddenReplicas.has(replica)"
-        :title="hiddenReplicas.has(replica) ? `Show replica ${replica}` : `Hide replica ${replica}`"
+        :text="hiddenReplicas.has(replica) ? `Show replica ${replica}` : `Hide replica ${replica}`"
         @click="toggleReplica(replica)"
       >
         <span class="size-2 rounded-xs" :style="{ background: replicaColor(replica), opacity: hiddenReplicas.has(replica) ? 0.35 : 1 }" aria-hidden="true" />
         r{{ replica }}
-      </button>
+      </UiTooltip>
     </div>
 
     <!-- Lines -->

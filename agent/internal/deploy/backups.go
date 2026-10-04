@@ -846,21 +846,10 @@ func (e *Engine) verifyBackup(ctx context.Context, d store.Deployment, run store
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 
-	cspec := docker.ContainerSpec{
-		App:          d.Application,
-		DeploymentID: d.ID,
-		Sequence:     d.Sequence,
-		Image:        d.Spec.Image,
-		Env:          d.Spec.Env,
-		NanoCPUs:     d.Spec.Resources.NanoCPUs(),
-		MemoryBytes:  d.Spec.Resources.MemoryBytes,
-		Entrypoint:   d.Spec.Entrypoint,
-		Command:      d.Spec.Command,
-		User:         d.Spec.User,
-		// No published ports: those are the running replica's.
-		Job:  &docker.JobSpec{Name: docker.VerifyJob, RunID: run.ID},
-		Init: d.Spec.Init,
-	}
+	cspec := containerFor(d)
+	cspec.Entrypoint, cspec.Command = d.Spec.Entrypoint, d.Spec.Command
+	// No published ports: those are the running replica's.
+	cspec.Job = &docker.JobSpec{Name: docker.VerifyJob, RunID: run.ID}
 	paths := map[string]string{}
 	for _, v := range d.Spec.Volumes {
 		paths[v.Name] = v.Path

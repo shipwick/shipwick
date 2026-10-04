@@ -59,8 +59,28 @@ make lint               # gofmt, go vet
 make test               # unit tests: no Docker, a few seconds
 make test-race          # or test-race-docker on machines without cgo
 make test-integration   # needs a Docker daemon
+make test-full-disk     # what a disk without room does, on a small filesystem in a container
 make test-dashboard     # if you touched dashboard/
 ```
+
+### What CI runs where
+
+A pull request runs the checks above on Ubuntu 24.04 (amd64) with the Docker
+of GitHub's image, builds the images and the packages, and runs the
+installer once, on Alpine. `main` and every release also run four wider
+jobs. None of them can be run on a contributor's machine as a whole; each
+cell can (`scripts/test-install.sh`, or `DOCKER_HOST` at a `docker:<version>-dind`
+container for the integration tests).
+
+| Job | Cells | What a cell proves | What it does not |
+|---|---|---|---|
+| Installer | Debian 12, 13 · Ubuntu 22.04, 24.04, 26.04 · Rocky Linux 8, 9, 10 · Fedora · Alpine, each on amd64 and arm64 | `scripts/install.sh` of the commit installs and then upgrades the latest release with that distribution's `sh`, `awk`, `sed`, coreutils and `curl` (BusyBox `wget` on Alpine), on that architecture | The distribution's kernel, its own Docker packages, systemd, firewall, SELinux: the distribution is a container, the daemon is Docker's image. The agent, dashboard and proxy of the commit: the images installed are the release's |
+| Installer, older Engines | Debian 12 with Docker 20.10 and the current Compose plugin; Debian 13 with Docker 26.1 and its Compose (amd64) | The same installation against the Engine version that distribution packages | The distribution's build of that Engine: the daemon is Docker's image of the version |
+| Docker versions | Docker 20.10, 26.1, 28, 29, each on amd64 and arm64 | The integration tests — the agent's use of the Engine API — pass against a daemon of that version | Distribution patches to Docker; the kernel is the runner's, Ubuntu 24.04's |
+| Integration | Ubuntu 22.04 on amd64 and arm64, Ubuntu 24.04 on arm64 | The same tests on that image's kernel and its Docker, on real arm64 hardware | Other distributions' kernels: GitHub hosts Ubuntu only |
+
+A cell of the last two fails when a test is skipped: the tests skip without
+a daemon, and a cell that tested nothing must not be green.
 
 ## What a good change looks like
 

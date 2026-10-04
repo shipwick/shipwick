@@ -1,0 +1,23 @@
+# Shipwick on rootless Docker: the daemon, and with it everything the agent
+# can make it do, runs as an ordinary user of the server and not as root.
+#
+# An overlay on compose.production.yml, started as the user who runs the
+# rootless daemon (DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock):
+#
+#   docker compose -f compose.production.yml -f compose.rootless.yml up -d
+#
+# With the socket proxy as well, this file is not needed: set
+# SHIPWICK_DOCKER_SOCKET in .env and use compose.socket-proxy.yml, which reads
+# the same variable.
+#
+# What the server needs first — ports 80 and 443 for an ordinary user, cgroup
+# delegation for resource limits, lingering — and what does not work is in
+# docs/handbook.md, "Less than the whole socket".
+
+services:
+  agent:
+    volumes:
+      # The rootless daemon's socket; there is none at /var/run/docker.sock.
+      # The place inside the container is the same, so this entry replaces
+      # the one of compose.production.yml.
+      - ${SHIPWICK_DOCKER_SOCKET:-${XDG_RUNTIME_DIR:?start this as the user who runs rootless Docker, or set SHIPWICK_DOCKER_SOCKET}/docker.sock}:/var/run/docker.sock

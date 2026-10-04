@@ -80,6 +80,7 @@ func (e *Engine) Metrics(ctx context.Context, name string) (api.Metrics, error) 
 	})
 
 	out := api.Metrics{Application: name, CollectedAt: time.Now().UTC(), Replicas: perReplica}
+	out.UnenforcedLimits = e.unenforcedLimits(ctx)
 	for _, m := range perReplica {
 		out.CPUPercent += m.CPUPercent
 		out.CPULimitPercent += m.CPULimitPercent

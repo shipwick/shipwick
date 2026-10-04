@@ -3,7 +3,7 @@
 # proxy finds the replicas of an application by name on a Docker network, and
 # the dashboard brings its own Node.
 #
-# Start the agent first — it creates the two networks — then:
+# Start the agent first — it creates the three networks — then:
 #
 #   docker compose --env-file /etc/shipwick/agent.env -f /usr/share/shipwick/compose.yml up -d
 #
@@ -38,7 +38,9 @@ services:
       # only root can enter. The path is the same on both sides: the agent
       # repeats it in every configuration it loads.
       - /run/shipwick:/run/shipwick
-    networks: [shipwick, shipwick-services]
+    # On the control network the proxy reaches the agent, at the address the
+    # server has there.
+    networks: [shipwick, shipwick-services, shipwick-control]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
@@ -50,7 +52,9 @@ services:
       SHIPWICK_AGENT_URL: http://host.docker.internal:9000
       SHIPWICK_AGENTS: ${SHIPWICK_AGENTS:-}
     extra_hosts: ["host.docker.internal:host-gateway"]
-    networks: [shipwick]
+    # The control network alone: what the agent hears from an application
+    # network it refuses.
+    networks: [shipwick-control]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
@@ -71,4 +75,7 @@ networks:
     external: true
   shipwick-services:
     name: shipwick-services
+    external: true
+  shipwick-control:
+    name: shipwick-control
     external: true

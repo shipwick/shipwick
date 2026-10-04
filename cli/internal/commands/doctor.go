@@ -98,7 +98,8 @@ func (r *report) ok(format string, args ...any) { r.c.ui.Success(format, args...
 // wrong: nothing between one application's appetite and the others, and
 // nothing between a full memory and a killed process.
 func (r *report) memory(info api.Server) {
-	if n := len(info.UnlimitedMemory); n > 0 {
+	// Where no limit is enforced, setting one is no advice: see limits.
+	if n := len(info.UnlimitedMemory); n > 0 && !unenforced(info, api.LimitMemory) {
 		names := info.UnlimitedMemory
 		more := ""
 		if n > 5 {
@@ -227,11 +228,13 @@ func (c *cli) doctor(ctx context.Context) error {
 	default:
 		r.ok("Proxy serving %s", plural(p.Routes, "route"))
 		if p.PlainLookups {
-			r.hint("The proxy is not Shipwick's image of this version: a name lookup Docker leaves unanswered holds every request for seconds. On the server, run the installer again; an image of your own is built from Dockerfile.caddy")
+			r.hint("The proxy is not Shipwick's image of this version: a name lookup Docker leaves unanswered holds every request for seconds, and applications deployed together wait for each other. On the server, run the installer again; an image of your own is built from Dockerfile.caddy")
 		}
 	}
 	r.alerts(info.Alerts)
 	r.memory(info)
+	r.reach(info)
+	r.limits(info)
 	r.dnsChallenge = info.Proxy.DNSChallenge
 	// An agent from before supplied certificates has none to report.
 	if supplied, err := cl.Certificates(ctx); err == nil {

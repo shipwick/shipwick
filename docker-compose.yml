@@ -92,7 +92,10 @@ services:
       # Root-equivalent access to this machine. See README → Security.
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - shipwick
+      # The API is reached on this network and no other: no application is on
+      # it. The agent joins the application network by itself, for health
+      # checks, and does not listen there.
+      - shipwick-control
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
@@ -129,6 +132,7 @@ services:
     networks:
       - shipwick
       - shipwick-services
+      - shipwick-control
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
@@ -144,7 +148,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     networks:
-      - shipwick
+      - shipwick-control
     depends_on:
       - agent
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
@@ -164,10 +168,14 @@ volumes:
   caddy-static:
 
 networks:
-  # Applications, the agent (health checks) and Caddy (upstreams) share it.
+  # Applications and Caddy; the agent joins it by itself, for health checks.
   shipwick:
     name: shipwick
   # Replicas carry their application's name here while they are ready; Caddy
   # and other applications find them by it.
   shipwick-services:
     name: shipwick-services
+  # The agent, Caddy and the dashboard, and nothing else: where the API is
+  # reached. Named after the first: the agent derives it as "<network>-control".
+  shipwick-control:
+    name: shipwick-control

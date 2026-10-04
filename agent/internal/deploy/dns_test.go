@@ -258,6 +258,39 @@ func TestALookupFailureHoldsTheHostnameBackWithTheError(t *testing.T) {
 	}
 }
 
+func TestAHostnameBeingServedStaysWhenTheResolverIsSilent(t *testing.T) {
+	s, p := newGated(t)
+	s.deploy(web("web:1.0", 2))
+	if !p.hasRoute("web.example.com") {
+		t.Fatal("the hostname points here and must be served")
+	}
+
+	// The resolver stops answering. That says nothing about where the
+	// hostname points, and a resolver's bad minute is not the application's.
+	s.dns.fail("web.example.com", errors.New("lookup web.example.com: i/o timeout"))
+	s.advance(hostnameReadyFor)
+	s.advance(time.Second)
+	if !p.hasRoute("web.example.com") {
+		t.Fatal("a lookup nobody answered took a serving hostname out of the proxy")
+	}
+	// It is asked again as soon as a hostname that waits would be.
+	asked := s.dns.lookups("web.example.com")
+	s.advance(hostnameRetryAfter)
+	if s.dns.lookups("web.example.com") == asked {
+		t.Errorf("not asked again after %v", hostnameRetryAfter)
+	}
+	if !p.hasRoute("web.example.com") {
+		t.Fatal("still unanswered, still served")
+	}
+
+	// An answer is another matter: the record is gone.
+	s.dns.unresolved("web.example.com")
+	s.advance(hostnameRetryAfter)
+	if p.hasRoute("web.example.com") {
+		t.Error("a hostname whose record no longer exists must leave the proxy")
+	}
+}
+
 func TestAliasesAndRedirectsWaitForTheirOwnDNS(t *testing.T) {
 	s, p := newGated(t)
 	s.dns.unresolved("api.example.com")

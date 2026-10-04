@@ -143,10 +143,34 @@
 //                    without showing its page of accounts
 //   MOCK_HOSTNAME    the server's hostname (default shipwick-fsn1-01)
 //   MOCK_AGENT=0.6   answers like an agent before 0.7: what it added is 404
-//   MOCK_AGENT=0.7   answers like an agent before 0.8: GET /server has no
-//                    swap_bytes and no unlimited_memory
 //                    ENDPOINT_NOT_FOUND, its fields are absent and its filters are
 //                    ignored
+//   MOCK_AGENT=0.7   answers like an agent before 0.8: GET /server has no
+//                    swap_bytes, unlimited_memory, docker or
+//                    open_to_applications, ?plain= of a deployment is ignored,
+//                    …/config has no `plain`, metrics have no
+//                    unenforced_limits, `security` in a document is an unknown
+//                    field, a silent Docker is 500 INTERNAL_ERROR and a full
+//                    disk 500 too; MOCK_OPEN_API and MOCK_REFUSES_DASHBOARD do
+//                    nothing
+//   MOCK_OPEN_API=1  server.open_to_applications is true: application
+//                    containers can reach the API
+//   MOCK_REFUSES_DASHBOARD=1   every request, GET /health included, is 403
+//                    APPLICATION_CALLER before the token is looked at: the
+//                    dashboard calls from a network applications are on
+//   MOCK_DOCKER=rootless|nocgroups|nomemory|silent   the Docker daemon:
+//                    rootless with its limits enforced; rootless without
+//                    cgroup controllers (docker.unenforced_limits and the
+//                    metrics' name memory and cpu, every replica reports the
+//                    daemon's whole usage, a deployment with limits records
+//                    the warn step, the memory alert is not raised); a daemon
+//                    that enforces no memory limit; or one that does not
+//                    answer: what asks Docker is 503 RUNTIME_UNAVAILABLE,
+//                    what reads the database is answered
+//   MOCK_DISK=full   what writes is 507 DISK_FULL: a deployment, a redeploy,
+//                    a rollback, a static folder, an image
+//   MOCK_ALERTS=docker   the warnings plus the critical `docker` alert, as in
+//                    the moment after the daemon answered again
 //   MOCK_UPDATE=available|current|unknown|off   `update` on GET /server: a
 //                    newer release (the default), none, GitHub never answered,
 //                    or SHIPWICK_UPDATE_CHECK=off
@@ -162,7 +186,9 @@
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { parseYaml } from './yaml.mjs'
-import { documentOf, maskedFields, referencesOf } from './document.mjs'
+import { documentOf, maskedFields, plainOf, referencesOf } from './document.mjs'
+import { parseSecurity, rootRefusal } from './security.mjs'
+import { diskFull, dockerSilent, needsDocker, unenforcedLimits, unenforcedStep, writes } from './faults.mjs'
 
 const PORT = Number(process.env.MOCK_PORT || 9100)
 const HOST = process.env.MOCK_HOST || '127.0.0.1'
@@ -183,9 +209,17 @@ const OLD_AGENT = process.env.MOCK_OLD_AGENT === '1'
 const BEFORE_06 = OLD_AGENT || process.env.MOCK_AGENT === '0.5'
 // An agent before 0.7: no log archive, no document to edit, no token update, no update notice.
 const BEFORE_07 = BEFORE_06 || process.env.MOCK_AGENT === '0.6'
-// An agent before 0.8: says nothing about swap or about applications without a memory limit.
+// An agent before 0.8: says nothing about swap or about applications without a memory limit, and hands out no env value.
 const BEFORE_08 = BEFORE_07 || process.env.MOCK_AGENT === '0.7'
-const VERSION = OLD_AGENT ? 'v0.4.2' : BEFORE_06 ? 'v0.5.1' : BEFORE_07 ? 'v0.6.0' : 'v0.7.0'
+const VERSION = OLD_AGENT ? 'v0.4.2' : BEFORE_06 ? 'v0.5.1' : BEFORE_07 ? 'v0.6.0' : BEFORE_08 ? 'v0.7.0' : 'v0.8.0'
+/** Application containers can reach the API: what an installation that was not arranged again reports. */
+const OPEN_API = !BEFORE_08 && process.env.MOCK_OPEN_API === '1'
+/** The agent refuses whoever calls from a network applications are on, which is where this dashboard would be. */
+const REFUSES_DASHBOARD = !BEFORE_08 && process.env.MOCK_REFUSES_DASHBOARD === '1'
+/** The Docker daemon under the agent: as usual, rootless, without cgroup controllers, without the memory one, or not answering. */
+const DOCKER = ['rootless', 'nocgroups', 'nomemory', 'silent'].includes(process.env.MOCK_DOCKER) ? process.env.MOCK_DOCKER : ''
+const UNENFORCED = BEFORE_08 ? [] : unenforcedLimits(DOCKER)
+const DISK_FULL = process.env.MOCK_DISK === 'full'
 const UPDATE = ['available', 'current', 'unknown', 'off'].includes(process.env.MOCK_UPDATE) ? process.env.MOCK_UPDATE : 'available'
 const LOG_ARCHIVE = process.env.MOCK_LOG_ARCHIVE !== 'off'
 // The claim people are named by; anything but `email` names them by what stands before the @ of the stand-in provider's accounts.
@@ -194,7 +228,7 @@ const EXPORT_BYTES = (Number(process.env.MOCK_EXPORT_MB) > 0 ? Number(process.en
 const EXPORT_FAILS = ['trailer', 'breaks'].includes(process.env.MOCK_EXPORT) ? process.env.MOCK_EXPORT : ''
 const IMPORT_MS = Number(process.env.MOCK_IMPORT_MS) || 1500
 const TRAFFIC_AVAILABLE = PROXY_ENABLED && process.env.MOCK_NO_TRAFFIC !== '1'
-const ALERTS = ['none', 'warning', 'critical'].includes(process.env.MOCK_ALERTS) ? process.env.MOCK_ALERTS : 'warning'
+const ALERTS = ['none', 'warning', 'critical', 'docker'].includes(process.env.MOCK_ALERTS) ? process.env.MOCK_ALERTS : 'warning'
 const KEY_FROM_ENVIRONMENT = process.env.MOCK_KEY_ENV === '1'
 const PASSPHRASE = process.env.MOCK_NO_PASSPHRASE !== '1'
 const BUCKET = process.env.MOCK_NO_BUCKET !== '1'
@@ -296,7 +330,7 @@ const sessions = new Map()
 const idpCodes = new Map()
 /** Nonces of sign-ins that completed: each is accepted once. */
 const usedNonces = new Set()
-/** deployment id → the secret values its document wrote as references: {env: {NAME: text}, basic_auth: {index: text}} */
+/** deployment id → the secret values its document wrote as references, and the env values its deployment called plain: {env: {NAME: text}, basic_auth: {index: text}, plain: {NAME: text}} */
 const references = new Map()
 /** The log archive: the output of container runs that ended, oldest first, each with its lines. */
 const logArchive = []
@@ -535,6 +569,13 @@ function seed() {
       // In-flight requests get half a minute to finish when a replica is replaced or stopped.
       deploy: { strategy: 'rolling', stop_timeout: '30s' },
       ...(BEFORE_06 ? {} : { init: true }),
+      // Hardened: it runs as a user of its own, writes only to its scratch space and keeps no capability.
+      ...(BEFORE_08
+        ? {}
+        : {
+            user: '1000:1000',
+            security: { read_only: true, tmpfs: [{ path: '/tmp', size_bytes: 64 * 1024 ** 2 }, { path: '/var/cache/api', size_bytes: 200 * 1024 ** 2 }], capabilities: [], non_root: true },
+          }),
       jobs: [
         { name: 'nightly-report', schedule: '0 3 * * *', command: ['node', 'report.js'], timeout: '1h0m0s' },
         { name: 'cleanup-sessions', schedule: '*/15 * * * *', command: ['node', 'cleanup.js', '--older-than', '30d'], timeout: '5m0s' },
@@ -639,8 +680,10 @@ function seed() {
       // Archived every night after a checkpoint; a week of them is kept.
       backups: { schedule: '0 3 * * *', keep: 7, before: ['psql', '-h', 'localhost', '-U', 'postgres', '-c', 'CHECKPOINT'], ...(BEFORE_06 ? {} : { before_timeout: '2h0m0s' }), ...(BEFORE_07 ? {} : { before_in: 'container' }) },
       deploy: { strategy: 'recreate' },
+      // It starts as root to hand its files to the postgres user, and keeps the capabilities that takes.
+      ...(BEFORE_08 ? {} : { security: { read_only: true, tmpfs: [{ path: '/var/run/postgresql', size_bytes: 64 * 1024 ** 2 }, { path: '/tmp', size_bytes: 64 * 1024 ** 2 }], capabilities: ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID'] } }),
     })
-    const dbActive = addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
+    const dbActive =addDeployment(db, dbSpec, { status: 'ACTIVE', startedAtMs: startedAt - 9 * DAY, durationMs: 8300, events: successEvents(dbSpec, null) })
     db.active_deployment_id = dbActive.id
     db.updated_at = dbActive.completed_at
     db.containers = makeContainers(db, dbActive)
@@ -931,12 +974,13 @@ function seed() {
   if (IS_STANDBY && PROMOTING && !BEFORE_06) startPromotion(20 * SECOND)
 
   // What the documents of these applications wrote as references to stored
-  // secrets; every other value of theirs was a literal, and is masked for good.
-  const refer = (name, env) => {
-    for (const d of deployments.values()) if (d.application === name) references.set(d.id, { env, basic_auth: {} })
+  // secrets, and the values their deployment called plain. Every other value
+  // of theirs was filled in before it arrived, and is masked for good.
+  const refer = (name, env, plain = {}) => {
+    for (const d of deployments.values()) if (d.application === name) references.set(d.id, { env, basic_auth: {}, plain: BEFORE_08 ? {} : plain })
   }
-  refer('my-api', { DATABASE_URL: 'postgres://api:${POSTGRES_PASSWORD}@postgres:5432/api' })
-  refer('postgres', { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' })
+  refer('my-api', { DATABASE_URL: 'postgres://api:${POSTGRES_PASSWORD}@postgres:5432/api' }, { LOG_LEVEL: 'info' })
+  refer('postgres', { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD}' }, { POSTGRES_USER: 'api', POSTGRES_DB: 'api' })
   refer('billing', { STRIPE_KEY: '${STRIPE_KEY}' })
   if (!BEFORE_07 && LOG_ARCHIVE) seedLogArchive()
 
@@ -1122,6 +1166,8 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null, refs = nul
   const tag = d.version
   const n = sp.replicas
   const failAt = tag === 'fail' ? 1 : tag === 'rollback' ? Math.min(2, n) : 0
+  // The images here name no user, as most do, except one tagged `nonroot`.
+  const refused = sp.security?.non_root ? rootRefusal(sp.image, sp.user ?? '', tag.includes('nonroot') ? '65532:65532' : '') : ''
 
   let clock = 0
   /** Schedules fn `delay` ms after the previously scheduled step. */
@@ -1150,8 +1196,21 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null, refs = nul
   then(1100, () => {
     if (tag === 'local') pushDeploymentEvent(d, 'step', `Could not pull ${sp.image}: registry unreachable. Using the local copy`, 'warn')
     else pushDeploymentEvent(d, 'step', `Pulled image ${sp.image}`)
+    // Only the image can say which user its containers run as: asked once it is on the server, before anything is created.
+    if (refused) {
+      d.status = 'FAILED'
+      d.error = refused
+      pushDeploymentEvent(d, 'state', `FAILED: ${refused}`, 'error')
+      return
+    }
+    const unenforced = unenforcedStep(sp.resources, UNENFORCED)
+    if (unenforced) pushDeploymentEvent(d, 'step', unenforced, 'warn')
     if (!sp.pre_deploy) state('STARTING')
   })
+  if (refused) {
+    then(400, complete)
+    return d
+  }
 
   // The hook runs after the pull, before any replica is touched; its failure is the deployment's.
   if (sp.pre_deploy) {
@@ -1771,6 +1830,22 @@ function replicaSample(container, limits, cpu, mem) {
   }
 }
 
+/** What every running container of the server uses together: all a daemon without cgroups can say. */
+function daemonUsage() {
+  let cpu = 0
+  let memory = 0
+  for (const app of apps.values()) {
+    const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
+    for (const c of app.containers) {
+      if (c.state !== 'running') continue
+      const sample = sampleContainer(app, c, active?.spec.resources ?? {})
+      cpu += sample.cpu_percent
+      memory += sample.memory_bytes
+    }
+  }
+  return { cpu: round1(cpu), memory }
+}
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 const round1 = v => Math.round(v * 10) / 10
 
@@ -1778,9 +1853,16 @@ function metrics(app) {
   const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
   const limits = active ? active.spec.resources : {}
   // A replica that is not running reports zeros; it is never an error.
-  const replicas = app.containers
+  let replicas = app.containers
     .map(c => (c.state === 'running' ? sampleContainer(app, c, limits) : replicaSample(c, limits, 0, 0)))
+  // A daemon without cgroups has one account for everything it runs, and reports it as every container's.
+  if (UNENFORCED.length === 2) {
+    const everything = daemonUsage()
+    replicas = replicas.map(r => ({ ...r, cpu_percent: everything.cpu, memory_bytes: everything.memory }))
+  }
   return {
+    // Present only where Docker applies less than it was asked for.
+    ...(UNENFORCED.length > 0 ? { unenforced_limits: UNENFORCED } : {}),
     application: app.name,
     collected_at: iso(Date.now()),
     cpu_percent: round1(replicas.reduce((sum, r) => sum + r.cpu_percent, 0)),
@@ -2552,7 +2634,8 @@ async function readConfig(req) {
   return value
 }
 
-const SPEC_KEYS = ['name', 'image', 'build', 'static', 'port', 'domain', 'aliases', 'redirects', 'replicas', 'env', 'health', 'resources', 'volumes', 'publish', 'entrypoint', 'command', 'user', 'pre_deploy', 'jobs', 'logging', 'path', 'proxy', 'backups', 'restart', 'deploy', 'init']
+// An agent before 0.8 does not know `security` and refuses it like any key it cannot read.
+const SPEC_KEYS = ['name', 'image', 'build', 'static', 'port', 'domain', 'aliases', 'redirects', 'replicas', 'env', 'health', 'resources', 'volumes', 'publish', 'entrypoint', 'command', 'user', 'pre_deploy', 'jobs', 'logging', 'path', 'proxy', 'backups', 'restart', 'deploy', 'init', ...(BEFORE_08 ? [] : ['security'])]
 
 /** "512mb", "1gb" as bytes; null for anything else. */
 function parseSize(text) {
@@ -2799,6 +2882,11 @@ function parseSpec(name, body, { validating = false } = {}) {
     }
   }
 
+  // What the containers go without. Every key takes away, so the block is
+  // read strictly: a key that is misspelt must not pass for one left out.
+  const hardened = BEFORE_08 ? { security: undefined, problems: [] } : parseSecurity(body.security, { volumes: Array.isArray(body.volumes) ? body.volumes : [], user: body.user ?? '', isStatic })
+  fields.push(...hardened.problems)
+
   // What validation finds comes first, as in the agent, where the document is
   // validated before its secrets are looked at; then the mask, which is what
   // the server shows in the place of a value and never a value; then the
@@ -2839,6 +2927,7 @@ function parseSpec(name, body, { validating = false } = {}) {
     ...(body.user ? { user: body.user } : {}),
     ...(body.logging ? { logging: body.logging } : {}),
     ...(body.init === true && !BEFORE_06 ? { init: true } : {}),
+    ...(hardened.security ? { security: hardened.security } : {}),
     ...routing,
     ...(backupPlan ? { backups: backupPlan } : {}),
     restart: body.restart ?? { policy: 'always' },
@@ -3064,7 +3153,10 @@ function activeAlerts() {
     if (running('worker')) list.push({ kind: 'unhealthy', severity: 'critical', application: 'worker', replica: 0, message: 'worker has had 1 of 2 replicas healthy for 1h. See why with: shipwick status worker', since: ago(72 * MINUTE) })
   }
   if (running('worker')) list.push({ kind: 'restarts', severity: 'warning', application: 'worker', replica: 2, message: 'worker replica 2 was restarted 3 times in 10 minutes. Its last output says why: shipwick logs worker', since: ago(11 * MINUTE) })
-  if (running('web')) list.push({ kind: 'memory', severity: 'warning', application: 'web', replica: 3, message: 'web replica 3 is at 93% of its memory limit (476 MB of 512 MB). At the limit it is killed and restarted; raise resources.memory in deploy.yaml, or watch it with: shipwick status web', since: ago(6 * MINUTE) })
+  // Raised when the daemon has not answered for thirty seconds and cleared by its first answer: GET /server shows it only in between.
+  if (ALERTS === 'docker' && !BEFORE_08) list.push({ kind: 'docker', severity: 'critical', application: '', replica: 0, message: 'Docker does not answer. Applications that are running keep running, but nothing is restarted, deployed or routed until it does. On the server: systemctl status docker', since: ago(38 * SECOND) })
+  // Without a memory limit that is enforced there is nothing a replica comes near.
+  if (running('web') && !UNENFORCED.includes('memory')) list.push({ kind: 'memory', severity: 'warning', application: 'web', replica: 3, message: 'web replica 3 is at 93% of its memory limit (476 MB of 512 MB). At the limit it is killed and restarted; raise resources.memory in deploy.yaml, or watch it with: shipwick status web', since: ago(6 * MINUTE) })
   return list.sort((a, b) => a.since.localeCompare(b.since))
 }
 
@@ -3624,10 +3716,15 @@ function updateStatus() {
   if (UPDATE === 'off') return { enabled: false, latest_version: '', checked_at: null, available: false }
   if (UPDATE === 'unknown') return { enabled: true, latest_version: '', checked_at: null, available: false }
   if (UPDATE === 'current') return { enabled: true, latest_version: VERSION, checked_at: checkedAt, available: false }
-  return { enabled: true, latest_version: 'v0.7.1', checked_at: checkedAt, available: true }
+  return { enabled: true, latest_version: BEFORE_08 ? 'v0.7.1' : 'v0.8.1', checked_at: checkedAt, available: true }
 }
 
 /** `?static=` of a deployment: the digest PUT …/static answered, or null. */
+/** ?plain= of a deployment: fields separated by commas, or the parameter repeated. */
+function plainFields(url) {
+  return url.searchParams.getAll('plain').flatMap(list => list.split(',')).filter(field => field !== '')
+}
+
 function staticDigest(url) {
   const digest = url.searchParams.get('static')
   if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new HttpError(400, 'INVALID_REQUEST', 'static: must be the digest PUT …/static answered, sha256:<64 hex characters>')
@@ -3652,8 +3749,11 @@ function documentName(who, body) {
 }
 
 /** Deploys a document under `name`: what POST /applications/:name/deploy and POST /applications both do. */
-function deployDocument(name, body, digest, who) {
+function deployDocument(name, body, digest, who, fields = []) {
   const sp = parseSpec(name, body)
+  // An agent before 0.8 does not read the statement, and masks as it always did.
+  const said = plainOf(body, BEFORE_08 ? [] : fields)
+  if (said.refused) throw new HttpError(400, 'INVALID_REQUEST', `plain names ${JSON.stringify(said.refused)}, which is not an env value of the document; it takes fields such as env.LOG_LEVEL`)
   let files = null
   if (isStaticSpec(sp)) {
     if (digest === null) throw new HttpError(400, 'INVALID_REQUEST', `static: the folder ${sp.static.dir}/ has not been uploaded for this deployment; upload it with PUT /applications/${name}/static first and pass its digest as ?static=`)
@@ -3666,7 +3766,7 @@ function deployDocument(name, body, digest, who) {
   const app = apps.get(name) ?? addApp(name, iso(Date.now()))
   requireIdle(app)
   checkConflicts(app, sp)
-  return startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name, files, refs: referencesOf(body) })
+  return startDeployment(app, sp, { kind: 'deploy', sourceId: null, by: who.name, files, refs: { ...referencesOf(body), plain: said.plain } })
 }
 
 /** The filters GET /audit and its export share, with the agent's refusals; `described` is how an export's entry in the trail names them. */
@@ -3837,6 +3937,12 @@ async function handle(req, res) {
   const method = req.method ?? 'GET'
   const path = url.pathname
 
+  // Refused for where the request comes from, on every endpoint and before
+  // anything else: the token is not looked at, and nothing is counted against the address.
+  if (REFUSES_DASHBOARD && path.startsWith('/api/v1/')) {
+    return sendError(res, 403, 'APPLICATION_CALLER', 'the API answers the proxy, the dashboard and the server itself, not the containers of applications; from a container, call it at its hostname')
+  }
+
   if (method === 'GET' && path === '/api/v1/health') {
     return sendJSON(res, 200, { status: 'ok', version: VERSION })
   }
@@ -3901,6 +4007,18 @@ async function handle(req, res) {
   // Stop/start events name the actor unless it is root, as the agent does.
   const byWho = who.name === 'root' ? '' : ` by ${who.name}`
 
+  // Found out by the handler, so after the token and the role were checked:
+  // Docker does not answer what the request asks it, or the disk has no room
+  // for what it writes. The agent itself is fine, and GET /health says so.
+  if (DOCKER === 'silent' && needsDocker(route)) {
+    const answer = dockerSilent(BEFORE_08)
+    return sendError(res, answer.status, answer.code, answer.message)
+  }
+  if (DISK_FULL && writes(route)) {
+    const answer = diskFull(route, BEFORE_08)
+    return sendError(res, answer.status, answer.code, answer.message)
+  }
+
   switch (route) {
     case 'GET /server': {
       const routes = [...apps.values()].filter(a => appSummary(a).domain && a.desired_state === 'running' && a.active_deployment_id).length
@@ -3929,6 +4047,9 @@ async function handle(req, res) {
               sign_in: { configured: SIGN_IN, issuer: signInConfig().issuer, ...(BEFORE_07 ? {} : { name_claim: SIGN_IN ? NAME_CLAIM : '' }) },
             }),
         ...(BEFORE_07 ? {} : { log_archive: logArchiveStatus(), update: updateStatus() }),
+        // Present only when true, like proxy.plain_lookups; `docker` always, from 0.8.
+        ...(OPEN_API ? { open_to_applications: true } : {}),
+        ...(BEFORE_08 ? {} : { docker: { rootless: DOCKER === 'rootless' || DOCKER === 'nocgroups', unenforced_limits: UNENFORCED } }),
       })
     }
 
@@ -3985,6 +4106,7 @@ async function handle(req, res) {
         // With escape a literal ${NAME} outside the secret values is written $${NAME}, for a file the CLI reads.
         document: escape ? written.document.replace(/^((?:entrypoint|command|user|image|domain|path):.*)$/gm, line => line.replace(/(?<!\$)\$\{/g, '$$${')) : written.document,
         masked: written.masked,
+        ...(BEFORE_08 ? {} : { plain: written.plain }),
         ...(active.static ? { static_digest: active.static.digest } : {}),
       })
     }
@@ -4002,7 +4124,7 @@ async function handle(req, res) {
       const body = await readConfig(req)
       const name = documentName(who, body)
       if (name !== '') res.auditApplication = name
-      const d = deployDocument(name, body, digest, who)
+      const d = deployDocument(name, body, digest, who, plainFields(url))
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 
@@ -4574,7 +4696,7 @@ async function handle(req, res) {
     case 'POST /applications/:p/deploy': {
       if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(param)) throw new HttpError(400, 'INVALID_REQUEST', 'name: lowercase letters, digits and dashes only')
       const digest = staticDigest(url)
-      const d = deployDocument(param, await readConfig(req), digest, who)
+      const d = deployDocument(param, await readConfig(req), digest, who, plainFields(url))
       return sendJSON(res, 202, deploymentView(d), { location: `/api/v1/deployments/${d.id}` })
     }
 

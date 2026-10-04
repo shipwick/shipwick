@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cliOnlyReason, describesStatic, inspectDocument, maskedLabel, maskedSecretName, maskedVariable, remainingMasks, stillMasked } from '../app/utils/deployDocument'
+import { cliOnlyReason, describesStatic, inspectDocument, keysNewerThanAgent, maskedLabel, maskedSecretName, maskedVariable, remainingMasks, stillMasked } from '../app/utils/deployDocument'
 
 // What GET /applications/:name/config hands out for an application with one reference and three literals.
 const DOCUMENT = `# A value shown as "********" was given when the application was deployed and
@@ -112,5 +112,22 @@ describe('inspectDocument, for an agent before 0.7', () => {
     expect(cliOnlyReason('build')).toContain('built from its project')
     expect(cliOnlyReason('static')).toContain('folder of files')
     expect(cliOnlyReason('image')).toBe('')
+  })
+})
+
+describe('a key the agent is too old for', () => {
+  const refused = [{ field: 'line 5', message: 'unknown field "security"' }]
+
+  it('is named when the agent says nothing of its Docker daemon, as one before 0.8 does', () => {
+    expect(keysNewerThanAgent(refused, { agent_version: 'v0.7.0' } as { docker?: unknown })).toEqual(['security'])
+  })
+
+  it('is not claimed of an agent that knows the key, nor before the server has answered', () => {
+    expect(keysNewerThanAgent(refused, { docker: { rootless: false, unenforced_limits: [] } })).toEqual([])
+    expect(keysNewerThanAgent(refused, null)).toEqual([])
+  })
+
+  it('leaves a key the dashboard does not know either to the agent\'s own words: it may be a typo', () => {
+    expect(keysNewerThanAgent([{ message: 'unknown field "securty"' }, { message: 'is required' }], {})).toEqual([])
   })
 })

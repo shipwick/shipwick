@@ -1,4 +1,4 @@
-import type { Application, AppSpec, SpecBuild, SpecHealth, SpecPublish, StaticFiles } from '~/types/api'
+import type { Application, AppSpec, SpecBuild, SpecHealth, SpecPublish, SpecSecurity, StaticFiles } from '~/types/api'
 import { formatBytes, pluralize } from '~/utils/format'
 
 /**
@@ -142,6 +142,22 @@ export function hasProxySettings(spec: Pick<AppSpec, 'proxy'> | null | undefined
   const p = spec?.proxy
   if (!p) return false
   return Boolean(p.strip_prefix) || Object.keys(p.headers ?? {}).length > 0 || (p.basic_auth?.length ?? 0) > 0 || (p.redirects?.length ?? 0) > 0
+}
+
+/**
+ * The `security` block, one line per thing the containers go without, in the
+ * order deploy.yaml names them. Empty without the block. `capabilities` has
+ * three states and only two of them say anything: absent, the containers keep
+ * Docker's default set and there is no line; `[]`, they keep none.
+ */
+export function describeSecurity(security: SpecSecurity | null | undefined): string[] {
+  if (!security) return []
+  const lines: string[] = []
+  if (security.read_only) lines.push('Read-only root filesystem')
+  if (security.tmpfs?.length) lines.push(`Scratch space: ${security.tmpfs.map(t => `${t.path} (${formatBytes(t.size_bytes)})`).join(', ')}`)
+  if (Array.isArray(security.capabilities)) lines.push(security.capabilities.length === 0 ? 'Capabilities: none' : `Capabilities kept: ${security.capabilities.join(', ')}`)
+  if (security.non_root) lines.push('Refuses to run as root')
+  return lines
 }
 
 /** Docker keeps a local copy of the logs only for these drivers; any other ships them elsewhere. */

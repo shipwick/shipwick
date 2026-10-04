@@ -6,34 +6,100 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.8 — Hardening
+## 0.9 — What hardening left open
 
-No new features. The release before 1.0 is for finding out what the earlier
-ones got wrong: stability under failure, the last checks, and security looked
-at by someone other than the people who wrote it.
+0.8 went looking for what the earlier releases got wrong, found it and fixed
+it. What it could not finish from where it was done is here: things that need
+a machine, a person or a release that 0.8 did not have. No new features.
 
-### Left over from 0.7
+### Run where it has not run
 
-Small things 0.7 says in its documentation rather than hides. None of them is
-a feature; each is a loose end of one that exists.
+**The release workflow, signing.** Releases are signed without a key, carry
+bills of materials and provenance, and the installer and the CLI verify the
+signature when `cosign` is there. The workflow that does it was linted and
+its parts were tried by hand; it had not run when it was written. The first
+release candidate is its test, and `docs/releasing.md` says what to watch.
 
-**A configuration that comes back whole.** `shipwick config` returns
-references to stored secrets as references and every other value of `env` as
-a mask, a log level as much as a password: the agent cannot tell which of the
-values it was sent were secret. The CLI knows which ones it filled in, and
-should say.
+**The matrix in CI.** The installer on ten distributions and the integration
+tests on eight Docker versions passed on one amd64 machine. The same on
+GitHub's runners, arm64 included, has not run once.
 
-**The dashboard, listened to.** Every page works with the keyboard and passes
-an automated check of names, roles and contrast. Nobody has used it with a
-screen reader, and what a tooltip explains — an absolute time, why a button
-is disabled — is still out of reach without a pointer.
+**Rootless Docker on a real server.** It was run in containers. A server
+that reboots, SELinux or AppArmor enforcing, and the port driver that is said
+to keep the client's address were not tried; the handbook says so.
 
 **Packages on a hardened host.** The `.deb` and the `.rpm` were installed
 and run on Debian and Rocky Linux. With SELinux enforcing, or with a host
-firewall between Docker's networks and the bridge address, they were not.
+firewall between Docker's networks and the bridge address, they were not;
+nor were they built and installed with the network of its own that the API
+has since 0.8.
 
 **Windows on Arm, run.** The build exists and `shipwick upgrade` chooses it;
 it has been compiled and never started on such a machine.
+
+**The limits on a rented server.** What one server carries was measured in a
+container held to a server's size on a developer's machine, in full at two
+processors and four gigabytes; at twice that, the requests and the restores
+only. Its disk and its network are not a server's: the same script on the
+smallest and on a mid-sized virtual server, and the numbers next to the ones
+in the handbook.
+
+**The dashboard, listened to.** Every page works with the keyboard, passes an
+automated check of names, roles and contrast, and says what its tooltips say
+without a pointer. Nobody has used it with a screen reader.
+
+### Loose ends
+
+**A socket proxy that is a boundary.** The proxy in front of the Docker
+socket allows the calls the agent makes and no others, and refuses host
+mounts. It cannot look into the body of a request that creates a container,
+so a privileged one passes; no maintained proxy can. Docker's authorization
+plugins can, and were not tried.
+
+**An API that is closed on every Docker.** With the API's port published on
+a Docker before 28, the agent has to listen where applications can reach it,
+and says so. Either a way to keep the port without that, or the published
+port gone from what the installer writes.
+
+**A proxy on both its networks, checked.** A proxy container whose start was
+refused once can come back on one of its networks only, and then serves
+nothing for some applications. `shipwick doctor` should see it.
+
+**An export an older agent reads in full.** An agent before 0.8 importing an
+export from 0.8 drops the `security` block without a word, because an
+unknown key in the file is skipped. The next change to the export's format
+should make an older agent refuse what it cannot keep.
+
+**A full disk and a rollback.** While the agent's database cannot be written,
+a rollout that fails half-way is not rolled back, because the rollback
+cannot be recorded: the old version runs short of the replicas already
+replaced until there is room.
+
+**A supervisor whose pass costs the same at any size.** Every second the
+agent asks Docker for the list of all containers three times and for each
+application's once more. At ten applications that is nothing; from about a
+hundred, on two processors, the pass no longer fits in its second, the
+server idles at one and a half processors, and a replica that died is away
+for nine seconds instead of three. One list per pass, shared.
+
+**Hostnames looked up side by side.** Whether each hostname still points at
+the server is asked one hostname after the other, in the path of a rollout.
+With a resolver that answers in a millisecond it costs nothing; with one
+that takes 180 ms and two hundred hostnames, a rolling deployment took 57
+seconds.
+
+**A server near the kernel's limit, said.** Between 300 and 400 containers
+the kernel's table of neighbours fills and containers stop reaching each
+other. The handbook names the setting; `shipwick doctor` should say when a
+server is close.
+
+**The second and a half.** Three applications deployed together take about a
+second and a half longer than one alone. It is not the rest of addresses;
+what it is has not been found.
+
+**The editor says what it masks.** A value changed in the dashboard's
+configuration editor is masked from then on, until the CLI deploys the file
+again. The page should say so before the deployment, not after.
 
 **`winget install` in the documentation.** The package is submitted to
 winget-pkgs and waits for review; once it is accepted, `winget install
@@ -47,57 +113,7 @@ GitHub token with write access to a fork of winget-pkgs stored in this
 repository, which the Homebrew tap deliberately avoids; worth it once the
 cadence makes the two commands a chore.
 
-### Hardening
-
-**What happens when things break, written down and tested.** A full disk, a
-Docker daemon that stops answering, a network that drops in the middle of a
-pull, an agent killed half-way through a rollout: each with a test that
-produces it, the behaviour that test pins down, and a page that says what the
-operator sees and does. Some of this is tested today; none of it is in one
-place.
-
-**Applications deployed together, as fast as one.** An address rests for 2.5
-seconds before another application's container may take it, which is what
-keeps one application's requests from reaching another, and which makes
-applications that are deployed at once wait for each other: three of two
-replicas each take 18 to 20 seconds where they took 6. The rest is as long
-as the proxy may remember an address. Telling the proxy to forget the
-replicas the agent has just stopped would make it a matter of milliseconds
-for every stop the agent does itself, and leave the wait to crashes.
-
-**More than one distribution in CI.** The integration tests run on one Ubuntu
-image with one Docker version. A matrix over the distributions the installer
-claims to support and the Docker versions still in use, on amd64 and arm64.
-
-**Every upgrade path, walked.** From each 0.x release to the current one on a
-server with real applications and data: the migrations, the proxy's
-configuration, the volumes, the secrets. An upgrade that needs a manual step
-gets it written down or removed.
-
-**The limits, measured.** How many applications, replicas and requests per
-second one server of a given size carries before deployments slow down or the
-proxy does; how large the database grows in a year; how long a restore takes.
-Numbers from tests anyone can run, in the documentation, with the point at
-which the honest answer is "you have outgrown Shipwick".
-
-**The API reachable only from the proxy and the dashboard.** Application
-containers share the `shipwick` network with the agent, which needs it for
-health checks, so today they can reach the API and try tokens against it. The
-agent should answer only the proxy, the dashboard and the server itself.
-
-**Less than the whole Docker socket.** The agent holds the Docker socket,
-which is root on the server. Running it against a socket proxy that allows
-only the calls it makes, and against rootless Docker, each documented and
-tested, for installations where that matters more than convenience.
-
-**Containers locked down further, on request.** Replicas already run without
-new privileges, without host mounts and without ports they did not ask for.
-`security` in `deploy.yaml` for the rest: a read-only root filesystem,
-dropped capabilities, a refusal to run as root.
-
-**Signed releases.** Every binary, package and image signed at release time, with a
-software bill of materials and build provenance, so that what a server runs as
-root can be traced to a commit in this repository.
+### Looked at by someone else
 
 **An independent security review.** The agent's use of the Docker Engine API,
 the proxy configuration it generates, and the handling of tokens, secrets and
@@ -107,11 +123,6 @@ published with the release.
 ## Documentation, as it becomes true
 
 Not tied to a version; written when someone needs them.
-
-**Preparing a server.** What Shipwick does not do and a server needs before
-it carries real data: SSH without passwords, automatic security updates, a
-swap file, a firewall and what Docker does to it. `shipwick doctor` says what
-it can see from where it runs; the rest stays the operator's, on one page.
 
 **From Docker Compose.** A guide for the commonest starting point: a
 `docker-compose.yml` on a server, and what each of its parts becomes in

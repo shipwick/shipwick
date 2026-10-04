@@ -98,6 +98,8 @@ shipwick_disk_bytes{state="used"} 3.758096384e+10
 # TYPE shipwick_alerts gauge
 shipwick_alerts{kind="disk",severity="critical"} 1
 shipwick_alerts{kind="disk",severity="warning"} 0
+shipwick_alerts{kind="docker",severity="critical"} 0
+shipwick_alerts{kind="docker",severity="warning"} 0
 shipwick_alerts{kind="memory",severity="critical"} 0
 shipwick_alerts{kind="memory",severity="warning"} 2
 shipwick_alerts{kind="restarts",severity="critical"} 0

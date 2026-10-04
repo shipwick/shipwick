@@ -178,6 +178,15 @@ func (e *Engine) Recover(ctx context.Context) error {
 	for _, d := range interrupted {
 		e.log.Warn("found interrupted deployment", "app", d.Application, "deployment", d.ID, "status", d.Status)
 		ok, why := resumable(d, inFlight[d.Application])
+		if ok {
+			stale, err := e.superseded(ctx, d)
+			if err != nil {
+				return err
+			}
+			if stale {
+				ok, why = false, "its end was never recorded, and the application has been deployed again since"
+			}
+		}
 		if !ok {
 			if err := e.failInterrupted(ctx, &d, why); err != nil {
 				return err
@@ -198,6 +207,11 @@ func (e *Engine) Recover(ctx context.Context) error {
 		if err := r.prepare(ctx); err != nil {
 			e.clearRouteOverride(d.Application)
 			e.unlock(d.Application)
+			if IsRuntimeUnavailable(err) {
+				// Nothing was learned about the deployment: it stays as it
+				// is, for the start that finds Docker answering.
+				return fmt.Errorf("resume deployment %d of %s: %w", d.ID, d.Application, err)
+			}
 			if err := e.failInterrupted(ctx, r.d, err.Error()); err != nil {
 				return err
 			}

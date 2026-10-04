@@ -6,6 +6,7 @@ import { alertsFor } from '~/utils/alerts'
 import { describeIssued, hostnameCertificateDisplay } from '~/utils/certificates'
 import { diagnose } from '~/utils/diagnosis'
 import { formatBytes, formatMemoryUsage, formatPercent, splitImage } from '~/utils/format'
+import { DAEMON_USAGE_NOTICE, isUnenforced, unenforcedLimits, unenforcedOf, usageIsTheDaemons } from '~/utils/limits'
 import { describeBuild, describeStatic, formatPublish, hostnamesOf } from '~/utils/spec'
 import { DRAINING_DISPLAY, containerStateDisplay, isDraining, replicaHealthDisplay } from '~/utils/status'
 import { applicationPath } from '~/utils/tabs'
@@ -15,6 +16,17 @@ const { name, detail, spec, deployments, events, gone, hasActive, isStatic, prog
 
 const server = useServerInfo()
 const metrics = useLiveMetrics(name, () => hasActive.value && !gone.value && !isStatic.value)
+
+// --- limits Docker does not apply ----------------------------------------------
+
+// The agent's word, from the sample or from the server; an agent before 0.8
+// says nothing, and then nothing is marked. A limit that is not enforced is
+// still shown, as what deploy.yaml asks for, and usage is not drawn against it.
+const unenforced = computed(() => unenforcedLimits(metrics.latest.value, server.data.value?.docker))
+const cpuUnenforced = computed(() => isUnenforced(unenforced.value, 'cpu'))
+const memoryUnenforced = computed(() => isUnenforced(unenforced.value, 'memory'))
+/** Without any cgroup the daemon reports its own usage for every container: not a number to show as a replica's. */
+const daemonUsage = computed(() => usageIsTheDaemons(unenforced.value))
 
 // --- what needs attention -----------------------------------------------------
 
@@ -34,6 +46,8 @@ const findings = computed(() => diagnose(detail.value, {
   deployments: deployments.data.value ?? [],
   alerts: alerts.value,
   proxyProblem: proxyProblem.value,
+  unenforcedLimits: unenforcedOf(unenforced.value, { memory: spec.value?.resources.memory_bytes ?? 0, cpu: spec.value?.resources.cpu ?? 0 }),
+  usageIsTheDaemons: daemonUsage.value,
 }).filter(finding => finding.key !== `attempt-${progress.value?.deploymentId}`))
 
 // --- identity -----------------------------------------------------------------
@@ -70,16 +84,13 @@ const sampleTimes = computed(() => metrics.samples.value.map(s => s.collected_at
 // Limits come with the sample (percent of one core, summed over the replicas
 // that were measured; 0 = unlimited), so they stay right while a rollout
 // changes the number of containers.
-const cpuCeiling = computed(() => metrics.latest.value?.cpu_limit_percent || null)
-const memoryCeiling = computed(() => metrics.latest.value?.memory_limit_bytes || null)
+const cpuLimit = computed(() => metrics.latest.value?.cpu_limit_percent || null)
+const memoryLimit = computed(() => metrics.latest.value?.memory_limit_bytes || null)
+const cpuCeiling = computed(() => (cpuUnenforced.value ? null : cpuLimit.value))
+const memoryCeiling = computed(() => (memoryUnenforced.value ? null : memoryLimit.value))
 
 function replicaMetrics(container: Container) {
   return metrics.latest.value?.replicas.find(r => r.container === container.name) ?? null
-}
-
-function replicaCpuTitle(container: Container): string | undefined {
-  const limit = replicaMetrics(container)?.cpu_limit_percent
-  return limit ? `Limit ${formatPercent(limit)} (percent of one core)` : undefined
 }
 
 // --- replicas -----------------------------------------------------------------
@@ -157,7 +168,7 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
           </dt>
           <dd class="mono [overflow-wrap:anywhere]">
             {{ detail.image || '—' }}
-            <span v-if="buildOrigin" class="block font-sans text-fg-muted" title="The agent never builds: a new image comes from running shipwick deploy in the project">{{ buildOrigin }}</span>
+            <UiTooltip v-if="buildOrigin" class="block font-sans text-fg-muted" text="The agent never builds: a new image comes from running shipwick deploy in the project">{{ buildOrigin }}</UiTooltip>
           </dd>
         </template>
         <dt class="label pt-0.5">
@@ -166,29 +177,30 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
         <dd>
           <template v-if="hostnames.length > 0">
             <div v-for="entry in hostnames" :key="entry.host" class="flex flex-wrap items-center gap-x-2">
-              <a
+              <UiTooltip
                 v-if="entry.url"
+                as="a"
                 :href="entry.url"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="mono link inline-flex min-w-0 items-center gap-1 break-all"
                 :class="entry.kind === 'redirect' ? 'text-fg-muted' : ''"
-                :title="certificateTitle(entry.host)"
-              >{{ entry.address }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></a>
+                :text="certificateTitle(entry.host)"
+              >{{ entry.address }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></UiTooltip>
               <!-- A wildcard is a pattern, not an address: there is nothing to open. -->
-              <span v-else class="mono break-all" :title="certificateTitle(entry.host) ?? 'Every name one label below is served alike'">{{ entry.address }}</span>
-              <span v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :title="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</span>
+              <UiTooltip v-else class="mono break-all" :text="certificateTitle(entry.host) ?? 'Every name one label below is served alike'">{{ entry.address }}</UiTooltip>
+              <UiTooltip v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :text="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</UiTooltip>
               <span v-else-if="entry.kind === 'alias'" class="text-xs text-fg-subtle">alias</span>
-              <StatusBadge v-if="certificateBadge(entry.host)" v-bind="certificateBadge(entry.host)!" :raw="certificateOf.get(entry.host)?.message || certificateOf.get(entry.host)?.status" />
+              <StatusBadge v-if="certificateBadge(entry.host)" v-bind="certificateBadge(entry.host)!" :detail="certificateOf.get(entry.host)?.message || undefined" :raw="certificateOf.get(entry.host)?.status" />
             </div>
           </template>
           <span v-else class="text-fg-muted">No domain: nothing reaches it through the proxy</span>
         </dd>
         <template v-if="published.length > 0">
           <dt class="label pt-0.5">
-            Published
+            <UiTooltip text="Reachable from outside the reverse proxy, on the server's own port">Published</UiTooltip>
           </dt>
-          <dd class="mono" title="Reachable from outside the reverse proxy, on the server's own port">
+          <dd class="mono">
             <div v-for="line in published" :key="line">
               {{ line }}
             </div>
@@ -205,11 +217,13 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
         <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-4 px-4 py-2.5 sm:grid-cols-[4.5rem_11rem_minmax(0,1fr)]">
           <span class="label">CPU</span>
           <span class="mono">
-            {{ formatPercent(metrics.latest.value?.cpu_percent) }}
-            <span v-if="metrics.latest.value && cpuCeiling" class="text-fg-subtle">/ {{ formatPercent(cpuCeiling) }}</span>
+            {{ daemonUsage ? '—' : formatPercent(metrics.latest.value?.cpu_percent) }}
+            <span v-if="metrics.latest.value && cpuLimit" class="text-fg-subtle">/ {{ formatPercent(cpuLimit) }}</span>
+            <span v-if="metrics.latest.value && cpuLimit && cpuUnenforced" class="block font-sans text-xs text-warn">limit not enforced</span>
           </span>
+          <span v-if="daemonUsage" class="text-xs text-fg-muted max-sm:col-span-2">{{ DAEMON_USAGE_NOTICE }}</span>
           <Sparkline
-            v-if="metrics.availability.value === 'available'"
+            v-else-if="metrics.availability.value === 'available'"
             class="max-sm:col-span-2 max-sm:mt-1.5"
             label="CPU"
             :values="cpuValues"
@@ -222,9 +236,17 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
         </div>
         <div class="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-x-4 px-4 py-2.5 sm:grid-cols-[4.5rem_11rem_minmax(0,1fr)]">
           <span class="label">Memory</span>
-          <span class="mono">{{ formatMemoryUsage(metrics.latest.value?.memory_bytes, metrics.latest.value?.memory_limit_bytes) }}</span>
+          <span class="mono">
+            <template v-if="daemonUsage">
+              — <span v-if="memoryLimit" class="text-fg-subtle">/ {{ formatBytes(memoryLimit) }}</span>
+            </template>
+            <template v-else>
+              {{ formatMemoryUsage(metrics.latest.value?.memory_bytes, metrics.latest.value?.memory_limit_bytes) }}
+            </template>
+            <span v-if="metrics.latest.value && memoryLimit && memoryUnenforced" class="block font-sans text-xs text-warn">limit not enforced</span>
+          </span>
           <Sparkline
-            v-if="metrics.availability.value === 'available'"
+            v-if="metrics.availability.value === 'available' && !daemonUsage"
             class="max-sm:col-span-2 max-sm:mt-1.5"
             label="Memory"
             :values="memoryValues"
@@ -279,17 +301,17 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
               <td data-primary class="mono">
                 <span :class="draining(c) ? 'line-through decoration-fg-faint' : ''">{{ c.replica }}</span><span class="ml-2 text-fg-muted rows:hidden">{{ c.name }}</span>
               </td>
-              <td class="mono cards:!hidden" :title="`${c.id.slice(0, 12)} · ${c.ip || 'no address'}`">
-                {{ c.name }}
-                <span v-if="mixedVersions" class="ml-2 text-fg-subtle" :title="c.image">
+              <td class="mono cards:!hidden">
+                <UiTooltip :text="`${c.id.slice(0, 12)} · ${c.ip || 'no address'}`">{{ c.name }}</UiTooltip>
+                <UiTooltip v-if="mixedVersions" repeats :text="c.image" class="ml-2 text-fg-subtle">
                   {{ splitImage(c.image).tag || 'latest' }}<template v-if="sequenceById.get(c.deployment_id)"> · #{{ sequenceById.get(c.deployment_id) }}</template>
-                </span>
+                </UiTooltip>
               </td>
               <td data-label="State">
                 <StatusBadge
                   v-if="draining(c)"
                   v-bind="DRAINING_DISPLAY"
-                  raw="On its way out: it was asked to stop and has its stop_timeout to exit. It is no longer a replica."
+                  detail="On its way out: it was asked to stop and has its stop_timeout to exit. It is no longer a replica."
                 />
                 <StatusBadge v-else v-bind="containerStateDisplay(c)" :raw="c.state" />
               </td>
@@ -300,19 +322,24 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
               <td data-label="Restarts" class="mono" :class="draining(c) ? '' : c.crash_loop ? 'text-danger' : c.restarts > 0 ? 'text-warn' : 'text-fg-muted'">
                 <span v-if="draining(c)" class="text-fg-subtle">—</span>
                 <span v-else>{{ c.restarts }}<span v-if="c.crash_loop" class="font-sans"> (keeps crashing)</span></span>
-                <NuxtLink
+                <UiTooltip
                   v-if="lastOutput(c)"
                   :to="logsPath(name, { view: 'archive', entry: lastOutput(c)!.id })"
                   class="link ml-2 whitespace-nowrap font-sans text-xs text-fg-muted"
-                  :title="`Replica ${c.replica} ${endedBecause(lastOutput(c)!)}: what it wrote before that`"
+                  :text="`Replica ${c.replica} ${endedBecause(lastOutput(c)!)}: what it wrote before that`"
                   :aria-label="`Last output of replica ${c.replica}`"
-                >last output</NuxtLink>
+                >last output</UiTooltip>
               </td>
-              <td data-label="CPU" class="mono right text-fg-muted" :title="replicaCpuTitle(c)">
-                {{ formatPercent(replicaMetrics(c)?.cpu_percent) }}
+              <td data-label="CPU" class="mono right text-fg-muted">
+                <template v-if="daemonUsage">
+                  —
+                </template>
+                <template v-else>
+                  {{ formatPercent(replicaMetrics(c)?.cpu_percent) }}<template v-if="replicaMetrics(c)?.cpu_limit_percent && !cpuUnenforced"> / {{ formatPercent(replicaMetrics(c)?.cpu_limit_percent) }}</template>
+                </template>
               </td>
               <td data-label="Memory" class="mono right text-fg-muted">
-                {{ formatMemoryUsage(replicaMetrics(c)?.memory_bytes, replicaMetrics(c)?.memory_limit_bytes) }}
+                {{ daemonUsage ? '—' : formatMemoryUsage(replicaMetrics(c)?.memory_bytes, memoryUnenforced ? 0 : replicaMetrics(c)?.memory_limit_bytes) }}
               </td>
               <td data-label="Started" class="right text-fg-muted">
                 <TimeAgo :time="c.started_at" />

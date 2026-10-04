@@ -4,6 +4,8 @@
 #   shipwick_<os>_<arch>[.exe]   the CLI, for every supported platform
 #   shipwick-agent_<arch>.deb     the agent as a plain binary with a systemd unit,
 #   shipwick-agent_<arch>.rpm     for amd64 and arm64 (scripts/build-packages.sh)
+#   <binary>.spdx.json            the bill of materials of each CLI binary and of
+#                                 the agent in the packages (scripts/build-sbom.sh)
 #   compose.production.yml        with the three images pinned to this version
 #   install.sh                    the installer as it was when the release was cut
 #   checksums.txt                 SHA-256 of all of the above
@@ -12,11 +14,13 @@
 #
 # The release workflow runs exactly this; run it yourself to see what a release
 # would contain. The names are a contract with scripts/install.sh. The packages
-# are put together in containers: it needs Docker as well as Go.
+# are put together and the binaries read in containers: it needs Docker as
+# well as Go.
 #
 # image-digests.txt, the digests of the release's images, is not written here:
 # the images do not exist yet. The release workflow adds it, and its line in
-# checksums.txt, once they are pushed (scripts/image-digests.sh).
+# checksums.txt, once they are pushed (scripts/image-digests.sh). The signature
+# of checksums.txt is the workflow's too: only it has the identity to sign with.
 
 set -eu
 
@@ -41,6 +45,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 wi
         -ldflags "-s -w -X github.com/shipwick/shipwick/pkg/version.Version=$VERSION" \
         -o "$out" ./cli/cmd/shipwick
     echo "built $out"
+    sh scripts/build-sbom.sh "$VERSION" "$out" "$out.spdx.json"
 done
 
 # A server installed from this release runs this release, not whatever

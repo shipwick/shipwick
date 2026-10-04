@@ -2,7 +2,7 @@
 import type { Deployment, LogArchiveEntry } from '~/types/api'
 import type { AgentError } from '~/utils/agentError'
 import { isAbortError, toAgentError } from '~/utils/agentError'
-import { formatAbsoluteUtc, formatBytes, pluralize } from '~/utils/format'
+import { formatBytes, pluralize } from '~/utils/format'
 import { endedBadly, endedBecause, linesKept, logsPath, outputOf } from '~/utils/logArchive'
 
 /**
@@ -176,17 +176,17 @@ const number = (value: string) => (value === '' ? null : Number(value))
           <tbody>
             <tr v-for="e in entries" :key="e.id">
               <td data-primary>
-                <NuxtLink :to="logsPath(props.application, { view: 'archive', entry: e.id })" class="mono link font-medium" :title="e.container">{{ outputOf(e) }}</NuxtLink>
+                <UiTooltip :to="logsPath(props.application, { view: 'archive', entry: e.id })" class="mono link font-medium" :text="e.container">{{ outputOf(e) }}</UiTooltip>
                 <span v-if="e.version" class="mono ml-2 text-xs text-fg-subtle">{{ e.version }}</span>
               </td>
-              <td data-label="Ended" class="whitespace-nowrap text-fg-muted" :title="formatAbsoluteUtc(e.ended_at)">
+              <td data-label="Ended" class="whitespace-nowrap text-fg-muted">
                 <TimeAgo :time="e.ended_at" />
               </td>
-              <td data-label="How it ended" :class="endedBadly(e) ? 'text-danger' : 'text-fg-muted'" :title="e.reason">
-                {{ endedBecause(e) }}
+              <td data-label="How it ended" :class="endedBadly(e) ? 'text-danger' : 'text-fg-muted'">
+                <UiTooltip repeats :text="e.reason">{{ endedBecause(e) }}</UiTooltip>
               </td>
-              <td data-label="Lines" class="mono right whitespace-nowrap text-fg-muted" :title="e.truncated ? 'It wrote more than is kept of one container: these are its last lines' : undefined">
-                {{ linesKept(e) }}
+              <td data-label="Lines" class="mono right whitespace-nowrap text-fg-muted">
+                <UiTooltip :text="e.truncated ? 'It wrote more than is kept of one container: these are its last lines' : null">{{ linesKept(e) }}</UiTooltip>
               </td>
               <td data-label="Size" class="mono right whitespace-nowrap text-fg-muted">
                 {{ e.lines > 0 ? formatBytes(e.bytes) : '—' }}

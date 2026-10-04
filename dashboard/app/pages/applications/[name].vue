@@ -172,7 +172,7 @@ provideApplication({
           variant="primary"
           size="sm"
           :disabled="busy || !hasActive || !mayDeploy"
-          :title="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : 'Deploy another version of the image with the same configuration')"
+          :hint="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : 'Deploy another version of the image with the same configuration')"
           @click="dialog = 'deploy'"
         >
           Deploy
@@ -180,7 +180,7 @@ provideApplication({
         <UiButton
           size="sm"
           :disabled="busy || rollbackTargets.length === 0 || !mayDeploy"
-          :title="deployHint ?? (rollbackTargets.length === 0 ? 'No earlier successful deployment to go back to' : 'Go back to an earlier deployment')"
+          :hint="deployHint ?? (rollbackTargets.length === 0 ? 'No earlier successful deployment to go back to' : 'Go back to an earlier deployment')"
           @click="dialog = 'rollback'"
         >
           Roll back
@@ -189,18 +189,18 @@ provideApplication({
           v-if="stopped"
           size="sm"
           :disabled="busy || !hasActive || !mayDeploy"
-          :title="deployHint"
+          :hint="deployHint"
           :pending="actionPending && dialog === null"
           @click="setRunning(true)"
         >
           <UiIcon name="play" :size="12" />
           Start
         </UiButton>
-        <UiButton v-else size="sm" :disabled="busy || !hasActive || !mayDeploy" :title="deployHint" @click="dialog = 'stop'">
+        <UiButton v-else size="sm" :disabled="busy || !hasActive || !mayDeploy" :hint="deployHint" @click="dialog = 'stop'">
           <UiIcon name="pause" :size="12" />
           Stop
         </UiButton>
-        <UiButton variant="danger" size="sm" :disabled="busy || !mayAdmin" :title="mayAdmin ? undefined : roleHint('admin')" @click="dialog = 'delete'">
+        <UiButton variant="danger" size="sm" :disabled="busy || !mayAdmin" :hint="mayAdmin ? undefined : roleHint('admin')" @click="dialog = 'delete'">
           <UiIcon name="trash" :size="12" />
           Delete
         </UiButton>
@@ -233,9 +233,9 @@ provideApplication({
               {{ app.data.value.name }}
             </p>
             <StatusBadge :tone="status.tone" :label="status.label" :raw="app.data.value.status" size="md" />
-            <NuxtLink v-if="app.data.value.deploying && app.data.value.status !== 'DEPLOYING'" :to="path" class="label !text-warn underline decoration-warn-line underline-offset-2" title="Watch the deployment on the overview">
+            <UiTooltip v-if="app.data.value.deploying && app.data.value.status !== 'DEPLOYING'" :to="path" class="label !text-warn underline decoration-warn-line underline-offset-2" text="Watch the deployment on the overview">
               Deploying
-            </NuxtLink>
+            </UiTooltip>
           </div>
           <p class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-fg-muted">
             <span>{{ state }}</span>

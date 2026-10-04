@@ -90,7 +90,8 @@ type raw struct {
 		Strategy    string `yaml:"strategy"`
 		StopTimeout string `yaml:"stop_timeout"`
 	} `yaml:"deploy"`
-	Init *bool `yaml:"init"`
+	Init     *bool     `yaml:"init"`
+	Security yaml.Node `yaml:"security"`
 }
 
 // Parse decodes and validates a deploy.yaml document. JSON is accepted too,
@@ -320,6 +321,7 @@ func (r raw) validate() (App, error) {
 	}
 	app.Publish = r.validatePublish(verr, app)
 	app.Init = r.validateInit(verr)
+	app.Security = r.validateSecurity(verr, app)
 
 	if len(verr.Fields) > 0 {
 		return App{}, verr
@@ -353,7 +355,7 @@ func (r raw) validateVolumes(verr *ValidationError) []Volume {
 		switch {
 		case p == "":
 			verr.add(field+".path", "is required", "/var/lib/postgresql/data")
-		case !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\x00\r\n") || path.Clean(p) != p || p == "/":
+		case !validMountPath(p):
 			verr.add(field+".path", fmt.Sprintf("invalid value %q", v.Path), "an absolute path inside the container, e.g. /var/lib/postgresql/data")
 		case paths[p]:
 			verr.add(field+".path", fmt.Sprintf("%q is mounted twice", p), "a different path for each volume")
@@ -362,6 +364,13 @@ func (r raw) validateVolumes(verr *ValidationError) []Volume {
 		out = append(out, Volume{Name: v.Name, Path: p})
 	}
 	return out
+}
+
+// validMountPath reports whether something can be mounted at p inside a
+// container: an absolute path, written the one way there is to write it, and
+// not the root.
+func validMountPath(p string) bool {
+	return strings.HasPrefix(p, "/") && !strings.ContainsAny(p, "\x00\r\n") && path.Clean(p) == p && p != "/"
 }
 
 func (r raw) validateEnv(verr *ValidationError) map[string]string {

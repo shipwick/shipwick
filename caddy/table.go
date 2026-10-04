@@ -54,6 +54,9 @@ type entry struct {
 	err      error     // why, or errNoReplicas
 	inFlight chan struct{}
 	used     time.Time
+	// dropped counts how often the name was dropped: a lookup that was out
+	// meanwhile must not be believed.
+	dropped int
 }
 
 func newTable() *table {
@@ -110,7 +113,7 @@ func (t *table) addresses(ctx context.Context, name string, s settings) ([]strin
 		e.inFlight = make(chan struct{})
 		go t.lookup(name, e, s.timeout)
 	}
-	done := e.inFlight
+	done, dropped := e.inFlight, e.dropped
 	kept := e.kept(now, s.keep)
 	// How long this request waits is counted from the question, not from the
 	// request: one lost answer delays the requests of its first moments, not
@@ -130,12 +133,23 @@ func (t *table) addresses(ctx context.Context, name string, s settings) ([]strin
 	if kept != nil {
 		giveUp = t.after(patience)
 	}
-	select {
-	case <-done:
-	case <-giveUp:
-		return kept, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	for waiting := true; waiting; {
+		select {
+		case <-done:
+			waiting = false
+		case <-giveUp:
+			t.mu.Lock()
+			current := e.dropped == dropped
+			t.mu.Unlock()
+			if current {
+				return kept, nil
+			}
+			// Dropped while this request waited: the answer it would have
+			// fallen back on names a replica that is gone.
+			giveUp = nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	t.mu.Lock()
@@ -171,14 +185,30 @@ func (e *entry) kept(now time.Time, keep time.Duration) []string {
 }
 
 func (t *table) lookup(name string, e *entry, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	addrs, err := t.resolve(ctx, name)
-	cancel()
-	// Docker's DNS answers in an order that rotates; a list that changes its
-	// order every second would restart the round robin every second.
-	slices.Sort(addrs)
+	var addrs []string
+	var err error
+	for {
+		t.mu.Lock()
+		dropped := e.dropped
+		t.mu.Unlock()
 
-	t.mu.Lock()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		addrs, err = t.resolve(ctx, name)
+		cancel()
+		// Docker's DNS answers in an order that rotates; a list that changes
+		// its order every second would restart the round robin every second.
+		slices.Sort(addrs)
+
+		t.mu.Lock()
+		if e.dropped == dropped {
+			break
+		}
+		// The name was dropped while the question was out, and the answer may
+		// have been given before the replica stopped. It is asked again, and
+		// the requests that wait go on waiting.
+		e.asked = t.now()
+		t.mu.Unlock()
+	}
 	wasFailing := e.failing
 	switch {
 	case err == nil, errors.Is(err, errNoReplicas):
@@ -205,6 +235,25 @@ func (t *table) setChanged(f func(name string, err error)) {
 	t.mu.Lock()
 	t.changed = f
 	t.mu.Unlock()
+}
+
+// drop forgets what names resolved to. The agent says so when it has stopped
+// a replica that carried them: Docker gives that replica's address to the next
+// container that starts, which may be another application's. When drop
+// returns, the table holds no answer for these names that is older than the
+// call, and stores none that was asked for before it; their next request
+// waits for a new one.
+func (t *table) drop(names []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, name := range names {
+		e := t.entries[name]
+		if e == nil {
+			continue
+		}
+		e.dropped++
+		e.addrs, e.answered, e.asked = nil, time.Time{}, time.Time{}
+	}
 }
 
 // forget drops the names nobody has asked for in a while, so that the table

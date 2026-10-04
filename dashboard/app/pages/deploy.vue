@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ApplicationConfig, Deployment, Validation } from '~/types/api'
 import { AgentError, toAgentError } from '~/utils/agentError'
-import { EXAMPLE_DOCUMENT, cliOnlyReason, describesStatic, inspectDocument, maskedLabel, maskedSecretName, maskedVariable, remainingMasks } from '~/utils/deployDocument'
+import { EXAMPLE_DOCUMENT, cliOnlyReason, describesStatic, inspectDocument, keptPlain, keysNewerThanAgent, maskedLabel, maskedSecretName, maskedVariable, remainingMasks } from '~/utils/deployDocument'
 import { pluralize } from '~/utils/format'
 import { missingSecrets } from '~/utils/secrets'
 import { wantedServer } from '~/utils/servers'
@@ -94,6 +94,8 @@ watch(text, () => {
 const body = computed(() => ({ content: text.value, type: 'application/yaml' }))
 /** A folder of files is deployed again by the digest of what was uploaded: the dashboard has no folder to upload. */
 const staticDigest = computed(() => (config.value?.static_digest && describesStatic(text.value) ? config.value.static_digest : undefined))
+/** The values the agent handed out as they are and the document still holds unchanged: the deployment says so, or the agent masks them from now on. */
+const plain = computed(() => (config.value ? keptPlain(text.value, config.value.document, config.value.plain ?? []).join(',') : '') || undefined)
 
 /** Sends the document as it is; to an agent that has no such endpoint, under the name read out of it. */
 async function send<T>(nameless: string, named: string, query?: Record<string, string | undefined>): Promise<T> {
@@ -137,7 +139,7 @@ async function deploy() {
   try {
     // Asked first, so that every problem is listed at once and nothing is recorded for a document that would be refused.
     await validate()
-    const deployment = await send<Deployment>('/applications', 'deploy', { static: staticDigest.value })
+    const deployment = await send<Deployment>('/applications', 'deploy', { static: staticDigest.value, plain: plain.value })
     // The application's page picks the deployment up and narrates it.
     await navigateTo(`/applications/${encodeURIComponent(deployment.application)}`)
   }
@@ -155,6 +157,9 @@ function useExample() {
 
 const fields = computed(() => error.value?.fields ?? [])
 const secrets = computed(() => (error.value?.code === 'INVALID_CONFIG' ? missingSecrets(fields.value) : []))
+/** A key the agent calls unknown because it is older than the key: said, since "unknown field" alone reads like a typo. */
+const server = useServerInfo()
+const newerKeys = computed(() => keysNewerThanAgent(fields.value, server.data.value))
 
 const crumbs = computed(() => (target.value
   ? [{ label: 'Applications', to: '/applications' }, { label: target.value, to: `/applications/${target.value}`, mono: true }, { label: 'Change the configuration' }]
@@ -222,7 +227,7 @@ const crumbs = computed(() => (target.value
                   class="link text-xs text-fg-muted"
                   :aria-label="`Store as a secret: ${mask.label} (opens in a new tab)`"
                 >Store as a secret</NuxtLink>
-                <span class="mono text-xs text-fg-subtle" :title="`What to write in the document once the secret ${mask.secret} is stored`">{{ '${' + mask.secret + '}' }}</span>
+                <UiTooltip class="mono text-xs text-fg-subtle" :text="`What to write in the document once the secret ${mask.secret} is stored`">{{ '${' + mask.secret + '}' }}</UiTooltip>
               </li>
             </ul>
           </div>
@@ -285,6 +290,15 @@ const crumbs = computed(() => (target.value
                 </span>
               </li>
             </ul>
+            <p v-if="newerKeys.length > 0" class="border-t border-line px-3 py-2 text-xs text-fg-muted">
+              <template v-for="(key, index) in newerKeys" :key="key">
+                <template v-if="index > 0">
+                  {{ index === newerKeys.length - 1 ? ' and ' : ', ' }}
+                </template>
+                <span class="mono text-fg">{{ key }}</span>
+              </template>
+              {{ newerKeys.length === 1 ? 'is a key' : 'are keys' }} of deploy.yaml that came with 0.8, and this server's agent is <span class="mono text-fg">{{ server.data.value?.agent_version }}</span>. Upgrade the agent — on the server, run the installer again, or install the newer package — then deploy again.
+            </p>
             <p v-if="secrets.length > 0" class="border-t border-line px-3 py-2 text-xs text-fg-muted">
               Store
               <template v-for="(name, index) in secrets" :key="name">
@@ -308,7 +322,7 @@ const crumbs = computed(() => (target.value
               variant="primary"
               :pending="working === 'deploy'"
               :disabled="!deployable || working !== null"
-              :title="ready && stillMasked.size > 0 ? `Replace the ${pluralize(stillMasked.size, 'value')} shown as ******** first` : undefined"
+              :hint="ready && stillMasked.size > 0 ? `Replace the ${pluralize(stillMasked.size, 'value')} shown as ******** first` : undefined"
             >
               Deploy
             </UiButton>

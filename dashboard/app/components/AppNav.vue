@@ -71,12 +71,12 @@ async function signOut() {
 
     <!-- Which server all of this is about. With several servers, this is where one is chosen. -->
     <details v-if="session.multiple.value" ref="switcher" class="group relative mx-2 mt-2 shrink-0" @keydown.esc="closeSwitcher(true)" @focusout="onSwitcherFocusOut">
-      <summary class="target flex cursor-pointer list-none items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong [&::-webkit-details-marker]:hidden" title="The server this dashboard shows; choose another">
+      <summary class="target flex cursor-pointer list-none items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong [&::-webkit-details-marker]:hidden">
         <span class="size-1.5 shrink-0 rounded-full" :class="props.serverError ? 'bg-danger-dot' : props.server ? 'bg-ok-dot' : 'bg-muted-dot'" aria-hidden="true" />
         <span class="min-w-0 flex-1">
           <span class="block truncate text-xs font-medium"><span class="sr-only">Server </span>{{ session.selected.value }}</span>
           <span v-if="props.serverError" class="block truncate text-2xs text-danger">{{ props.serverError.unreachable ? 'Agent unreachable' : 'Not responding' }}</span>
-          <span v-else-if="props.server" class="mono block truncate text-2xs text-fg-subtle" :title="props.server.hostname">{{ props.server.hostname }}<span class="sr-only">, connected</span></span>
+          <UiTooltip v-else-if="props.server" repeats :text="props.server.hostname" class="mono block truncate text-2xs text-fg-subtle">{{ props.server.hostname }}<span class="sr-only">, connected</span></UiTooltip>
         </span>
         <UiIcon name="chevron-right" :size="12" class="rotate-90 text-fg-subtle transition-transform duration-100 group-open:-rotate-90" />
       </summary>
@@ -107,10 +107,16 @@ async function signOut() {
         </a>
       </div>
     </details>
-    <NuxtLink v-else to="/servers" class="target mx-2 mt-2 flex shrink-0 items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong" title="The server this dashboard shows" @click="emit('navigate')">
+    <UiTooltip
+      v-else
+      to="/servers"
+      :text="props.server && !props.serverError ? `The server this dashboard shows: ${props.server.hostname}` : 'The server this dashboard shows'"
+      class="target mx-2 mt-2 flex shrink-0 items-center gap-2 rounded-sm border border-line bg-bg px-2.5 py-1.5 hover:border-line-strong"
+      @click="emit('navigate')"
+    >
       <template v-if="props.server && !props.serverError">
         <span class="size-1.5 shrink-0 rounded-full bg-ok-dot" aria-hidden="true" />
-        <span class="mono min-w-0 flex-1 truncate text-xs" :title="props.server.hostname">{{ props.server.hostname }}</span>
+        <span class="mono min-w-0 flex-1 truncate text-xs">{{ props.server.hostname }}</span>
         <span class="sr-only">connected</span>
       </template>
       <template v-else-if="props.serverError">
@@ -118,7 +124,7 @@ async function signOut() {
         <span class="min-w-0 flex-1 truncate text-xs text-danger">{{ props.serverError.unreachable ? 'Agent unreachable' : 'Not responding' }}</span>
       </template>
       <span v-else class="skeleton my-1 w-24" /><span v-if="!props.server && !props.serverError" class="sr-only">Server</span>
-    </NuxtLink>
+    </UiTooltip>
 
     <nav aria-label="Main" class="flex-1 overflow-y-auto p-2">
       <div v-for="(group, index) in groups" :key="group.label" :class="index > 0 ? 'mt-4' : ''">
@@ -127,8 +133,9 @@ async function signOut() {
         </p>
         <ul class="space-y-px" :aria-labelledby="group.label ? `nav-${group.label}` : undefined">
           <li v-for="item in group.items" :key="item.to">
-            <NuxtLink
+            <UiTooltip
               :to="item.to"
+              :text="item.to === '/servers' && alertTone ? summarizeAlerts(alerts) : null"
               class="target flex h-8 items-center gap-2.5 rounded-sm px-2 transition-colors duration-100"
               :class="isActive(item, route.path) ? 'bg-active font-medium text-fg' : 'text-fg-muted hover:bg-hover hover:text-fg'"
               :aria-current="isActive(item, route.path) ? 'page' : undefined"
@@ -140,11 +147,10 @@ async function signOut() {
                 v-if="item.to === '/servers' && alertTone"
                 class="mono ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-2xs font-medium"
                 :class="alertTone === 'danger' ? 'bg-danger-solid text-[#fff]' : 'border border-warn-line bg-warn-bg text-warn'"
-                :title="summarizeAlerts(alerts)"
               >
                 {{ alerts.length }}<span class="sr-only"> {{ alerts.length === 1 ? 'alert' : 'alerts' }}</span>
               </span>
-            </NuxtLink>
+            </UiTooltip>
           </li>
         </ul>
       </div>
@@ -154,9 +160,9 @@ async function signOut() {
       <!-- Who is signed in, so what the buttons allow is never a surprise. -->
       <div v-if="access.token.value" class="px-1">
         <span class="label block">Signed in as</span>
-        <span class="mono block truncate text-xs" :title="access.token.value.name">
+        <UiTooltip repeats :text="access.token.value.name" class="mono block truncate text-xs">
           {{ access.token.value.name }} <span class="text-fg-muted">· {{ access.token.value.role }}</span>
-        </span>
+        </UiTooltip>
         <span class="block text-2xs text-fg-subtle">{{ accessSummary(access.token.value) }}<template v-if="until">, {{ until }}</template></span>
         <span v-if="expiryWarning" class="mt-1 flex items-start gap-1 text-2xs text-warn" role="status">
           <UiIcon name="alert" :size="12" class="mt-px" />

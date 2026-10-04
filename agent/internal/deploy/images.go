@@ -134,7 +134,9 @@ func (e *Engine) pruneImages(ctx context.Context, candidates []string) int {
 	}
 	removed := 0
 	for _, image := range candidates {
-		if keep[image] {
+		// A static application's deployments have no image, and a removal
+		// without a name is a request the daemon has no route for.
+		if image == "" || keep[image] {
 			continue
 		}
 		switch err := e.rt.RemoveImage(ctx, image); {

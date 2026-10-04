@@ -90,8 +90,10 @@ func (c *cli) status(ctx context.Context, name string, verbose bool) error {
 	}
 	// Usage is a nicety here: an agent too old to report it, or an application
 	// with nothing running, simply has no such lines. A folder has none to ask for.
+	var unapplied []string
 	if !app.Static {
 		if m, err := cl.Metrics(ctx, name); err == nil && app.Replicas.Running > 0 {
+			unapplied = m.UnenforcedLimits
 			fields = append(fields,
 				[2]string{"CPU", formatCPUUsage(m.CPUPercent, m.CPULimitPercent)},
 				[2]string{"Memory", formatMemoryUsage(m.MemoryBytes, m.MemoryLimitBytes)},
@@ -102,7 +104,7 @@ func (c *cli) status(ctx context.Context, name string, verbose bool) error {
 		if h := app.Spec.Health; h != nil {
 			fields = append(fields, [2]string{"Health", fmt.Sprintf("%s every %s", describeHealthCheck(*h), h.Interval)})
 		}
-		fields = append(fields, [2]string{"Limits", describeResources(app.Spec.Resources)})
+		fields = append(fields, [2]string{"Limits", describeResources(app.Spec.Resources) + notEnforced(app.Spec.Resources, unapplied)})
 	}
 	fields = append(fields, c.backupStatusFields(ctx, cl, app)...)
 	c.ui.Fields(fields)

@@ -46,8 +46,11 @@ func (s *Server) handleUploadStatic(w http.ResponseWriter, r *http.Request, name
 // written here; ok says whether d is a deployment to answer with.
 func (s *Server) startDeploy(w http.ResponseWriter, r *http.Request, app spec.App) (d store.Deployment, ok bool) {
 	digest := r.URL.Query().Get("static")
-	var err error
+	plain, err := plainEnv(r, app)
 	switch {
+	case err != nil:
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
+		return d, false
 	case app.Static == nil && digest != "":
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "static names an uploaded folder, and this deploy.yaml describes a container application", nil)
 		return d, false
@@ -58,7 +61,7 @@ func (s *Server) startDeploy(w http.ResponseWriter, r *http.Request, app spec.Ap
 	case app.Static != nil:
 		d, err = s.engine.DeployStatic(r.Context(), app, digest)
 	default:
-		d, err = s.engine.Deploy(r.Context(), app)
+		d, err = s.engine.DeployWith(r.Context(), app, plain)
 	}
 	if err != nil {
 		s.writeEngineError(w, r, err)
