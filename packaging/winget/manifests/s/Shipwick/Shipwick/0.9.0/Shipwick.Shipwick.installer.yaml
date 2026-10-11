@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: Shipwick.Shipwick
+PackageVersion: 0.9.0
+InstallerType: portable
+Commands:
+- shipwick
+ReleaseDate: 2026-10-11
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/shipwick/shipwick/releases/download/v0.9.0/shipwick_windows_amd64.exe
+  InstallerSha256: CBB0F2F8978EE1601E9C8322D3EB182B4A7A97C052AD0EE9632FD5E67EA54B28
+- Architecture: arm64
+  InstallerUrl: https://github.com/shipwick/shipwick/releases/download/v0.9.0/shipwick_windows_arm64.exe
+  InstallerSha256: 9F37CAB87F0E32CE8F6F67856FB20EB2CE1F545C938137EC07EAFD75924A60FB
+ManifestType: installer
+ManifestVersion: 1.12.0
