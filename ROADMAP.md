@@ -6,11 +6,93 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.9 — What hardening left open
+## 0.9 — Stability and ease
 
-0.8 went looking for what the earlier releases got wrong, found it and fixed
-it. What it could not finish from where it was done is here: things that need
-a machine, a person or a release that 0.8 did not have. No new features.
+The last minor version before 1.0, and the one that closes the list: what a
+real installation from nothing to a live application taught, what 0.8 left
+open, and what could not be run from where 0.8 was built. No new product
+areas. When it ships, what is left is 1.0's own promise.
+
+### What one installation taught
+
+On 2026-10-11 a server was set up from a bare machine and an application put
+live on it, by hand, with every mistake written down. Each entry below is
+one of them, and what Shipwick does about it.
+
+**Installing the CLI on Windows is a download and a checksum by hand.** A
+PowerShell installer at `get.shipwick.com/windows`, the counterpart of
+`install.sh`: downloads the release's binary, verifies it against
+`checksums.txt`, puts it on the PATH, says what it did. `shipwick upgrade`
+learns `--version`, so that a release candidate can be tried without
+downloading it by hand.
+
+**A server the key does not open.** `shipwick server install` answered
+`Permission denied (publickey,password)` and stopped. It should say what that
+means — the server does not know the key it offered, which one it offered,
+and the three ways out (the provider's key list at creation, its rescue
+system, a key the provider installs) — and *Preparing a server* should say
+to pick the key when the server is created.
+
+**A provider's firewall in front of the server.** With 80 and 443 closed at
+the provider, the installer finished, `shipwick doctor` said the agent
+"cannot be reached … is it running?", and the certificates failed in Caddy's
+log where nobody looked. After an installation, `server install` probes 80
+and 443 from where it runs and names the firewall when they time out; `doctor`
+tells a timeout from a refusal and says the same; and a certificate that
+cannot be obtained is in `GET /server`, in `shipwick status` and in
+`doctor`, with Caddy's reason.
+
+**A Cloudflare token that cannot do its job.** Two tokens in a row failed in
+ways the agent could have told: one refused requests from the server's IPv6
+address (an IP filter that named the IPv4 only), one lacked *DNS → Edit*
+(another "DNS …" permission was picked). The agent verifies the token when it
+starts and `doctor` on request — the token itself, the permission, every
+zone, from the address the server really uses — and says in words what is
+missing. The handbook's Cloudflare page gets the IPv6 line and the exact
+permission names.
+
+**Changing the agent's settings means SSH, an editor and a compose
+command.** `shipwick server configure KEY=value …` does over SSH what
+`server install` does: writes to `/opt/shipwick/.env`, runs the compose
+command, waits for the agent, and for `SHIPWICK_CLOUDFLARE_API_TOKEN` runs
+the verification above before it says done.
+
+**Behind Cloudflare only.** A server whose firewall admits Cloudflare's
+addresses alone is a sound arrangement and nowhere described: every hostname
+proxied, SSL mode *Full (strict)*, certificates through DNS, and what
+`doctor` can and cannot see from outside. One page in the handbook, and
+`doctor` saying "behind Cloudflare only" instead of "not checked".
+
+**Secrets of several applications.** Secrets are one list per server. A
+second application with its own `RESEND_API_KEY` cannot have one; the
+workaround is a prefix in the name, which nothing suggests. `shipwick secret
+set NAME --app api` stores a secret that only that application's `${NAME}`
+resolves to, before the server-wide one; `secret ls` shows the scope; the
+handbook recommends it for anything an application owns.
+
+**A redirect loop nobody saw coming.** The application sent its bare domain
+to `www`, and `redirects` sent `www` back: every request looped, and the
+deployment was reported a success. After a deployment, the agent asks the
+application's own hostname once through the proxy; an answer that redirects
+to a hostname of `redirects` is a loop, and the deployment's output says so
+and what to swap.
+
+**The dashboard asks for a token the installer never showed.** The
+installer's summary and `server install` say how to sign in: a token of its
+own, `shipwick token create dashboard --role admin`, and why not the root
+token.
+
+**A followed log through Cloudflare's proxy.** Cloudflare closes a response
+that has been silent for about a minute: `shipwick logs -f` ended after 60
+seconds with `stream error: INTERNAL_ERROR`, while the same stream through
+Caddy alone ran on. The agent keeps its long streams alive with a line of
+nothing every so often, and the CLI takes up a cut stream from the last line
+it saw instead of stopping with an error.
+
+**A password for a database, written into a URL.** A secret used in
+`DATABASE_URL` must not hold `@`, `:`, `/`, `#` or `%`; nothing says so
+until the connection fails. `shipwick secret set` warns when a value with
+such characters is stored, and the handbook says which characters are safe.
 
 ### Run where it has not run
 
@@ -96,14 +178,6 @@ server is close.
 **The second and a half.** Three applications deployed together take about a
 second and a half longer than one alone. It is not the rest of addresses;
 what it is has not been found.
-
-**A log that is followed through Cloudflare.** Cloudflare's proxy closes a
-response that has been silent for about a minute: `shipwick logs -f` against
-an API hostname behind it ended after 60 seconds with `stream error:
-INTERNAL_ERROR`, while the same stream through Caddy alone ran on. The agent
-should keep its long streams alive with a line of nothing every so often, and
-the CLI should take up a cut stream from the last line it saw instead of
-stopping with an error.
 
 **The editor says what it masks.** A value changed in the dashboard's
 configuration editor is masked from then on, until the CLI deploys the file
