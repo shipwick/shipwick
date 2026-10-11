@@ -97,6 +97,14 @@ server is close.
 second and a half longer than one alone. It is not the rest of addresses;
 what it is has not been found.
 
+**A log that is followed through Cloudflare.** Cloudflare's proxy closes a
+response that has been silent for about a minute: `shipwick logs -f` against
+an API hostname behind it ended after 60 seconds with `stream error:
+INTERNAL_ERROR`, while the same stream through Caddy alone ran on. The agent
+should keep its long streams alive with a line of nothing every so often, and
+the CLI should take up a cut stream from the last line it saw instead of
+stopping with an error.
+
 **The editor says what it masks.** A value changed in the dashboard's
 configuration editor is masked from then on, until the CLI deploys the file
 again. The page should say so before the deployment, not after.
