@@ -79,6 +79,8 @@ var auditedRoutes = map[string]auditedRoute{
 	"PUT /api/v1/tokens/{name}": {action: "token.update", target: "name"},
 	"GET /api/v1/audit/export":  {action: "audit.export"},
 	"POST /api/v1/applications": {action: "deploy"},
+
+	"POST /api/v1/server/cloudflare/verify": {action: "cloudflare.verify"},
 }
 
 // unauditedRoutes are the endpoints that are not GETs and change nothing.

@@ -18,8 +18,9 @@ type Semver struct {
 	Prerelease          string
 }
 
-// Parse reads "v1.2.3", "1.2.3" or "v1.2.3-rc.1". A development build ("dev")
-// and anything else that is not a version returns false.
+// Parse reads "v1.2.3", "1.2.3" or "v1.2.3-rc.1". A development build ("dev",
+// or what `git describe` says of a commit after a tag: "v1.2.3-3-gabcdef",
+// "v1.2.3-dirty") and anything else that is not a version returns false.
 func Parse(s string) (Semver, bool) {
 	s = strings.TrimPrefix(strings.TrimSpace(s), "v")
 	if i := strings.IndexByte(s, '+'); i >= 0 {
@@ -29,7 +30,7 @@ func Parse(s string) (Semver, bool) {
 	if i := strings.IndexByte(s, '-'); i >= 0 {
 		v.Prerelease = s[i+1:]
 		s = s[:i]
-		if v.Prerelease == "" {
+		if v.Prerelease == "" || describesCommit(v.Prerelease) {
 			return Semver{}, false
 		}
 	}
@@ -47,6 +48,38 @@ func Parse(s string) (Semver, bool) {
 	}
 	v.Major, v.Minor, v.Patch = nums[0], nums[1], nums[2]
 	return v, true
+}
+
+// describesCommit recognizes the suffix `git describe --tags --dirty` adds to
+// the nearest tag for a commit that is not the tag: the number of commits
+// since and the abbreviated hash, "3-gabcdef", and "dirty" for uncommitted
+// changes. Such a build was made after a release and is not that release;
+// read as a pre-release it would sort before it and be offered an "upgrade"
+// to the very release it was built past.
+func describesCommit(prerelease string) bool {
+	rest, dirty := strings.CutSuffix(prerelease, "dirty")
+	if dirty && rest == "" {
+		return true
+	}
+	parts := strings.Split(strings.TrimSuffix(rest, "-"), "-")
+	if len(parts) < 2 {
+		return false
+	}
+	count, hash := parts[len(parts)-2], strings.TrimPrefix(parts[len(parts)-1], "g")
+	if count == "" || len(hash) < 4 || len(hash) == len(parts[len(parts)-1]) {
+		return false
+	}
+	for _, c := range count {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	for _, c := range hash {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Compare orders two versions the way semver.org does: by major, minor and

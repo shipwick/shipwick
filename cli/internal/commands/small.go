@@ -38,6 +38,9 @@ type localOptions struct {
 	goos        string
 	// sleep waits between retries; tests make it return at once.
 	sleep func(time.Duration)
+	// execInput is exec with something on the program's standard input:
+	// how data reaches a remote command without becoming part of it.
+	execInput func(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
 func (o localOptions) withDefaults() localOptions {
@@ -66,6 +69,9 @@ func (o localOptions) withDefaults() localOptions {
 	if o.sleep == nil {
 		o.sleep = time.Sleep
 	}
+	if o.execInput == nil {
+		o.execInput = runProgramWithInput
+	}
 	return o
 }
 
@@ -74,7 +80,12 @@ func (o localOptions) withDefaults() localOptions {
 const portCheckTimeout = 3 * time.Second
 
 func runProgram(ctx context.Context, argv []string, stdout, stderr io.Writer) error {
+	return runProgramWithInput(ctx, argv, nil, stdout, stderr)
+}
+
+func runProgramWithInput(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()

@@ -284,7 +284,7 @@ func TestDoctorAcceptsCloudflaresProxyWhenTheAgentUsesTheDNSChallenge(t *testing
 	c.checkDNS(context.Background(), r, local, "missing.example.com", addrs)
 	assertInOrder(t, out.String(), []string{
 		"✓ agent.example.com → Cloudflare's proxy (104.21.5.6, 2606:4700:3030::6815:506)",
-		"! The server's own address is not known behind Cloudflare's proxy: ports 80 and 443 and the records' targets are not checked",
+		"! Behind Cloudflare only: ports and record targets are not checked from outside",
 		"✓ api.example.com → Cloudflare's proxy (104.21.5.6, 2606:4700:3030::6815:506)",
 		"✗ missing.example.com does not resolve. Create an A record for it pointing at the server\n",
 	})

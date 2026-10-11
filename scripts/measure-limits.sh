@@ -240,7 +240,7 @@ done
 EOF
     put /root/list <<'EOF'
 #!/bin/sh
-# list [APP] — what the supervisor asks Docker every second: the containers
+# list [APP] — what the supervisor asks Docker once a second: the containers
 # Shipwick manages, stopped ones included; with APP, those of one application.
 filters='%22com.shipwick.managed%3Dtrue%22'
 [ -z "${1:-}" ] || filters="$filters%2C%22com.shipwick.app%3D$1%22"
@@ -377,7 +377,7 @@ measure_apps() {
     note "The server's resolver answers for a hostname in $(timed 9 nslookup -type=a a001.localhost "$SERVER_ADDRESS" 2>/dev/null) ms."
     note "Memory in MB. CPU in percent of one core over 30 s with no request and no deployment. Times are medians: of 5 runs for the commands and requests, of 3 for the killed replica; the rolling deployment is one run."
     note "\"answer\" is how many of the applications answered one request through the proxy with 200."
-    note "\"list\" is one question to Docker for every container Shipwick manages, \"list app\" for those of one application: the supervisor asks the first three times a second and the second once for every application."
+    note "\"list\" is one question to Docker for every container Shipwick manages, \"list app\" for those of one application: the supervisor asks the first once a second, and before 0.9 asked it three times and the second once for every application."
     printf '%-5s %-10s %-8s %-7s %-6s %-6s %-9s %-7s %-6s %-6s %-7s %-9s %-10s %-8s %-6s %-8s %-8s %-9s %-9s\n' \
         apps containers answer server agent proxy dashboard cpu agent ps status "GET apps" "GET server" metrics list "list app" deploy recovery "added in"
     for step in $STEPS; do

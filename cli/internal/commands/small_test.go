@@ -305,7 +305,7 @@ func TestServerInstallExplainsSSHFailures(t *testing.T) {
 		return errors.New("exit status 255")
 	}}
 	_, _, err = f.run(t.TempDir(), "server", "install", "root@203.0.113.10")
-	if err == nil || !strings.Contains(err.Error(), "Permission denied (publickey)") || !strings.Contains(err.Error(), "ssh-copy-id root@203.0.113.10") {
+	if err == nil || !strings.Contains(err.Error(), "Permission denied (publickey)") || !strings.Contains(err.Error(), "does not know the SSH key") {
 		t.Errorf("refused login: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestDoctorReportsAHealthySetup(t *testing.T) {
 	assertInOrder(t, out, []string{
 		"! shipwick v0.3.1; v0.4.0 is available. Upgrade with: shipwick upgrade",
 		"✓ Agent http://127.0.0.1:",
-		"runs 1.2.3, the latest release",
+		"runs 1.2.3, ahead of the latest release (v0.4.0)",
 		"✓ Token laptop (admin)",
 		"✓ Docker 29.8.0 on the server",
 		"✓ Proxy serving 2 routes",
@@ -539,7 +539,7 @@ func TestDoctorSaysWhenTheAgentIsDown(t *testing.T) {
 	if !errors.Is(err, ErrReported) {
 		t.Fatalf("err = %v", err)
 	}
-	assertInOrder(t, out, []string{"✗ The agent at http://127.0.0.1:1 cannot be reached:", "ssh -L 9000:127.0.0.1:9000", "1 problem found."})
+	assertInOrder(t, out, []string{"✗ The agent at http://127.0.0.1:1 refused the connection: nothing listens there.", "ssh -L 9000:127.0.0.1:9000", "1 problem found."})
 
 	f.env = map[string]string{cliconfig.EnvToken: "wrong"}
 	out, _, err = f.run(t.TempDir(), "doctor")
@@ -688,6 +688,41 @@ func TestServerInstallWaitsForADockerThatIsStillStarting(t *testing.T) {
 	for _, argv := range programs.argvs {
 		if strings.Contains(remote(argv), "get.docker.com") {
 			t.Error("Docker was there; nothing should be installed")
+		}
+	}
+}
+
+func TestDoctorCountsAPrereleaseAheadOfTheLatestReleaseAsCurrent(t *testing.T) {
+	f := doctorAgent(t,
+		func(string) ([]string, error) { return []string{"203.0.113.10"}, nil },
+		func(*http.Request) (*http.Response, error) { return answer(200), nil })
+	f.upgrade.version = "v0.5.0-rc.1"
+	out, _, err := f.run(t.TempDir(), "doctor")
+	if err != nil {
+		t.Fatalf("doctor: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "✓ shipwick v0.5.0-rc.1, ahead of the latest release (v0.4.0)") || strings.Contains(out, "Upgrade with: shipwick upgrade") {
+		t.Errorf("a pre-release installed on purpose is not behind the release it precedes:\n%s", out)
+	}
+}
+
+func TestDoctorTellsADevelopmentBuildFromARelease(t *testing.T) {
+	for _, build := range []string{"v0.3.1-3-gabcdef", "dev"} {
+		f := doctorAgent(t,
+			func(string) ([]string, error) { return []string{"203.0.113.10"}, nil },
+			func(*http.Request) (*http.Response, error) { return answer(200), nil })
+		f.upgrade.version = build
+		f.health = api.Health{Status: "ok", Version: "v0.3.1-3-gabcdef"}
+		out, _, err := f.run(t.TempDir(), "doctor")
+		if err != nil {
+			t.Fatalf("doctor: %v\n%s", err, out)
+		}
+		assertInOrder(t, out, []string{
+			"✓ This shipwick is a development build (" + build + "); the latest release is v0.4.0",
+			"runs a development build (v0.3.1-3-gabcdef); the latest release is v0.4.0",
+		})
+		if strings.Contains(out, "is available") {
+			t.Errorf("a build made after a tag is not offered that tag as an upgrade:\n%s", out)
 		}
 	}
 }

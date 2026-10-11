@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_VALUE_BYTES, missingSecrets, replaces, secretNameProblem, secretRemovalConsequence, secretValueProblem } from '../app/utils/secrets'
+import { MAX_VALUE_BYTES, applicationsWithSecrets, missingSecrets, replaces, scopeLabel, scopesKnown, secretNameProblem, secretRemovalConsequence, secretScopeProblem, secretValueProblem, sortSecrets, urlCharacterHint, urlUnsafeCharacters } from '../app/utils/secrets'
 
 describe('secretNameProblem', () => {
   it('accepts environment variable names', () => {
@@ -84,5 +84,104 @@ describe('missingSecrets', () => {
       { field: 'env.Z', expected: 'run shipwick secret set NAME first' },
     ])).toEqual([])
     expect(missingSecrets([])).toEqual([])
+  })
+})
+
+describe('a secret of one application', () => {
+  const stored = [
+    { name: 'DATABASE_PASSWORD', application: '' },
+    { name: 'DATABASE_PASSWORD', application: 'api' },
+    { name: 'STRIPE_KEY', application: 'shop' },
+  ]
+
+  it('replaces by scope and name, not by name alone', () => {
+    expect(replaces('DATABASE_PASSWORD', stored)).toBe(true)
+    expect(replaces('DATABASE_PASSWORD', stored, 'api')).toBe(true)
+    expect(replaces('DATABASE_PASSWORD', stored, 'web')).toBe(false)
+    expect(replaces('STRIPE_KEY', stored)).toBe(false)
+    expect(replaces('STRIPE_KEY', stored, 'shop')).toBe(true)
+  })
+
+  it('reads a row without application, from an agent before 0.9, as the server\'s', () => {
+    expect(replaces('TOKEN', [{ name: 'TOKEN' }])).toBe(true)
+    expect(replaces('TOKEN', [{ name: 'TOKEN' }], 'api')).toBe(false)
+  })
+
+  it('validates the scope as an application name, since the application may not exist yet', () => {
+    expect(secretScopeProblem('')).toBe('')
+    expect(secretScopeProblem('my-api')).toBe('')
+    expect(secretScopeProblem('My_API')).toContain('lowercase letters, digits and dashes')
+    expect(secretScopeProblem('-api')).not.toBe('')
+    expect(secretScopeProblem('a'.repeat(64))).not.toBe('')
+  })
+
+  it('labels the server\'s scope and names an application\'s', () => {
+    expect(scopeLabel('')).toBe('Server')
+    expect(scopeLabel(undefined)).toBe('Server')
+    expect(scopeLabel('api')).toBe('api')
+  })
+
+  it('sorts by name with the server\'s before the applications\' of the same name', () => {
+    expect(sortSecrets([
+      { name: 'STRIPE_KEY', application: 'shop' },
+      { name: 'DATABASE_PASSWORD', application: 'api' },
+      { name: 'DATABASE_PASSWORD', application: '' },
+    ]).map(s => `${s.application}/${s.name}`)).toEqual(['/DATABASE_PASSWORD', 'api/DATABASE_PASSWORD', 'shop/STRIPE_KEY'])
+  })
+
+  it('knows the scopes only when every row says one, and nothing of an empty list', () => {
+    expect(scopesKnown(stored)).toBe(true)
+    expect(scopesKnown([{ name: 'A' }, { name: 'B' }])).toBe(false)
+    expect(scopesKnown([])).toBeNull()
+  })
+
+  it('offers the applications that have secrets of their own, once each and sorted', () => {
+    expect(applicationsWithSecrets([...stored, { name: 'X', application: 'api' }, { name: 'Y' }])).toEqual(['api', 'shop'])
+  })
+})
+
+describe('urlCharacterHint', () => {
+  it('names the characters a URL cannot carry, never the value', () => {
+    expect(urlUnsafeCharacters('p@ss:word/with?odd#chars%20 and space')).toEqual(['@', ':', '/', '?', '#', '%', 'whitespace'])
+    const hint = urlCharacterHint('secret@2026')
+    expect(hint).toContain('@')
+    expect(hint).toContain('connection string')
+    expect(hint).toContain('stored all the same')
+    expect(hint).not.toContain('secret@2026')
+    expect(hint).not.toContain('2026')
+  })
+
+  it('says nothing of a value that is safe anywhere in a URL', () => {
+    expect(urlUnsafeCharacters('a-b_c.d~E9')).toEqual([])
+    expect(urlCharacterHint('a-b_c.d~E9')).toBe('')
+    expect(urlCharacterHint('')).toBe('')
+  })
+})
+
+describe('secretRemovalConsequence, by scope', () => {
+  const stored = [
+    { name: 'DATABASE_PASSWORD', application: '' },
+    { name: 'DATABASE_PASSWORD', application: 'api' },
+    { name: 'DATABASE_PASSWORD', application: 'web' },
+    { name: 'ONLY_OWN', application: 'api' },
+  ]
+
+  it('removing the server\'s says which applications keep their own', () => {
+    const text = secretRemovalConsequence('DATABASE_PASSWORD', '', stored)
+    expect(text).toContain('api, web keep their own DATABASE_PASSWORD')
+    expect(text).toContain('every other application')
+    expect(secretRemovalConsequence('DATABASE_PASSWORD', '', stored.filter(s => s.application !== 'web'))).toContain('api keeps its own')
+  })
+
+  it('removing an application\'s says the server-wide one answers from the next deployment on, when there is one', () => {
+    const text = secretRemovalConsequence('DATABASE_PASSWORD', 'api', stored)
+    expect(text).toContain('${DATABASE_PASSWORD} in api\'s deploy.yaml resolves to the server-wide DATABASE_PASSWORD')
+    expect(text).not.toContain('refused')
+  })
+
+  it('removing an application\'s only one says its next deploy is refused', () => {
+    const text = secretRemovalConsequence('ONLY_OWN', 'api', stored)
+    expect(text).toContain('next deploy of api')
+    expect(text).toContain('refused')
   })
 })

@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import type { Container, LogArchiveEntry } from '~/types/api'
+import type { Container, DeploymentDetail, LogArchiveEntry } from '~/types/api'
 import { LIVE_METRICS_SAMPLES } from '~/composables/useLiveMetrics'
 import { archiveSupported, endedBecause, hasDied, lastOutputEntry, logsPath } from '~/utils/logArchive'
 import { alertsFor } from '~/utils/alerts'
-import { describeIssued, hostnameCertificateDisplay } from '~/utils/certificates'
+import { certificateFailureLine, describeIssued, hostnameCertificateDisplay } from '~/utils/certificates'
 import { diagnose } from '~/utils/diagnosis'
 import { formatBytes, formatMemoryUsage, formatPercent, splitImage } from '~/utils/format'
 import { DAEMON_USAGE_NOTICE, isUnenforced, unenforcedLimits, unenforcedOf, usageIsTheDaemons } from '~/utils/limits'
+import { probeExpected, probeFinding, probeOf } from '~/utils/probe'
 import { describeBuild, describeStatic, formatPublish, hostnamesOf } from '~/utils/spec'
 import { DRAINING_DISPLAY, containerStateDisplay, isDraining, replicaHealthDisplay } from '~/utils/status'
 import { applicationPath } from '~/utils/tabs'
@@ -15,6 +16,7 @@ import { applicationPath } from '~/utils/tabs'
 const { name, detail, spec, deployments, events, gone, hasActive, isStatic, progress, dismissProgress } = useApplication()
 
 const server = useServerInfo()
+const agent = useAgent()
 const metrics = useLiveMetrics(name, () => hasActive.value && !gone.value && !isStatic.value)
 
 // --- limits Docker does not apply ----------------------------------------------
@@ -41,14 +43,38 @@ const proxyProblem = computed(() => {
 
 /** The alerts the agent holds about this application; the server page has them all. */
 const alerts = computed(() => alertsFor(server.data.value?.alerts, name.value))
+
+// After a deployment with a routed domain, an agent from 0.9 on asks the
+// application through the proxy and records what it found as a `probe` event
+// of the deployment, after completed_at. A warning there — a redirect loop,
+// a proxy that could not be asked — is shown here while that deployment is
+// active. The event lives on the deployment, so the active one is fetched;
+// asked again every few seconds only while a probe is still to be expected.
+const activeId = computed(() => detail.value.active_deployment?.id ?? null)
+const routed = computed(() => activeId.value !== null && Boolean(detail.value.domain) && !isStatic.value && !gone.value)
+const activeDetail = usePolling<DeploymentDetail>(
+  signal => agent.get<DeploymentDetail>(`/deployments/${activeId.value}`, { signal }),
+  { interval: 5000, enabled: routed, until: d => !probeExpected(d) },
+)
+watch(activeId, () => void activeDetail.reset())
+const probe = computed(() => {
+  const active = detail.value.active_deployment
+  const fetched = activeDetail.data.value
+  if (!active || !fetched || fetched.id !== active.id) return null
+  return probeFinding(probeOf(fetched.events), active)
+})
+
 // The deployment the panel below narrates is not also listed as a finding.
-const findings = computed(() => diagnose(detail.value, {
-  deployments: deployments.data.value ?? [],
-  alerts: alerts.value,
-  proxyProblem: proxyProblem.value,
-  unenforcedLimits: unenforcedOf(unenforced.value, { memory: spec.value?.resources.memory_bytes ?? 0, cpu: spec.value?.resources.cpu ?? 0 }),
-  usageIsTheDaemons: daemonUsage.value,
-}).filter(finding => finding.key !== `attempt-${progress.value?.deploymentId}`))
+const findings = computed(() => [
+  ...diagnose(detail.value, {
+    deployments: deployments.data.value ?? [],
+    alerts: alerts.value,
+    proxyProblem: proxyProblem.value,
+    unenforcedLimits: unenforcedOf(unenforced.value, { memory: spec.value?.resources.memory_bytes ?? 0, cpu: spec.value?.resources.cpu ?? 0 }),
+    usageIsTheDaemons: daemonUsage.value,
+  }).filter(finding => finding.key !== `attempt-${progress.value?.deploymentId}`),
+  ...(probe.value ? [probe.value] : []),
+])
 
 // --- identity -----------------------------------------------------------------
 
@@ -73,6 +99,11 @@ function certificateTitle(host: string): string | undefined {
   const certificate = certificateOf.value.get(host)
   const issued = certificate ? describeIssued(certificate) : ''
   return issued ? `Certificate: ${issued}` : undefined
+}
+/** Why the proxy could not obtain or renew the hostname's certificate, when an agent from 0.9 on read it in the proxy's log. */
+function certificateFailure(host: string) {
+  const certificate = certificateOf.value.get(host)
+  return certificate ? certificateFailureLine(certificate) : null
 }
 
 // --- live numbers -------------------------------------------------------------
@@ -120,7 +151,6 @@ const drainingCount = computed(() => detail.value.containers.length - replicaCou
 // A replica that restarted or lies dead said why before it ended, and the
 // agent kept that: the row links to it. Asked only while such a replica is
 // listed, and only of an agent that keeps output.
-const agent = useAgent()
 const someDied = computed(() => !isStatic.value && archiveSupported(server.data.value) && detail.value.containers.some(c => !draining(c) && hasDied(c)))
 const kept = usePolling<LogArchiveEntry[]>(
   signal => agent.get<LogArchiveEntry[]>(`/applications/${encodeURIComponent(name.value)}/logs/archive`, { query: { kind: 'replica', limit: 50 }, signal }),
@@ -192,6 +222,21 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
               <UiTooltip v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :text="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</UiTooltip>
               <span v-else-if="entry.kind === 'alias'" class="text-xs text-fg-subtle">alias</span>
               <StatusBadge v-if="certificateBadge(entry.host)" v-bind="certificateBadge(entry.host)!" :detail="certificateOf.get(entry.host)?.message || undefined" :raw="certificateOf.get(entry.host)?.status" />
+              <!-- The last failure the proxy logged for this hostname's certificate: the cause in the agent's words, the proxy's own behind it. -->
+              <div v-if="certificateFailure(entry.host)" class="basis-full pb-1 text-xs">
+                <p class="text-danger">
+                  <template v-if="certificateFailure(entry.host)!.renewal">The certificate serves, and its renewal is failing: </template>{{ certificateFailure(entry.host)!.reason }}
+                  <span class="text-fg-subtle"> · <TimeAgo :time="certificateFailure(entry.host)!.at" /></span>
+                </p>
+                <details v-if="certificateFailure(entry.host)!.detail" class="mt-0.5">
+                  <summary class="cursor-pointer select-none text-fg-subtle hover:text-fg">
+                    The proxy's words
+                  </summary>
+                  <p class="mono mt-0.5 break-words text-fg-muted">
+                    {{ certificateFailure(entry.host)!.detail }}
+                  </p>
+                </details>
+              </div>
             </div>
           </template>
           <span v-else class="text-fg-muted">No domain: nothing reaches it through the proxy</span>

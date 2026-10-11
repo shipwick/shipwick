@@ -109,11 +109,13 @@ export function diagnose(app: ApplicationDetail, context: DiagnosisContext): Fin
   for (const certificate of app.certificates ?? []) {
     const display = hostnameCertificateDisplay(certificate)
     if (!display || display.tone === 'muted') continue
+    // A renewal that fails has no message: the failure's reason says why.
+    const said = certificate.message || certificate.failure?.reason || ''
     findings.push({
       key: `certificate-${certificate.hostname}`,
       tone: display.tone,
       title: `${certificate.hostname}: ${display.label.charAt(0).toLowerCase()}${display.label.slice(1)}`,
-      detail: certificate.message ? `${certificate.message.charAt(0).toUpperCase()}${certificate.message.slice(1)}.`.replace(/\.\.$/, '.') : '',
+      detail: said ? `${said.charAt(0).toUpperCase()}${said.slice(1)}.`.replace(/([.?])\.$/, '$1') : '',
     })
   }
 

@@ -287,6 +287,15 @@ type Server struct {
 	OpenToApplications bool `json:"open_to_applications,omitempty"`
 	// Docker is absent from agents older than 0.8.
 	Docker *DockerStatus `json:"docker,omitempty"`
+	// KernelLimits is what the agent could read of the kernel's limits a
+	// server full of containers runs into. Absent where it could read none
+	// — an agent in a container has no view of them — and from agents older
+	// than 0.9.
+	KernelLimits *KernelLimits `json:"kernel_limits,omitempty"`
+	// Cloudflare is what the agent found out about its Cloudflare API token
+	// the last time it checked. Absent without a token, and from agents
+	// older than 0.9.
+	Cloudflare *CloudflareStatus `json:"cloudflare,omitempty"`
 }
 
 // ProxyStatus describes the reverse proxy in front of the applications.
@@ -303,6 +312,11 @@ type ProxyStatus struct {
 	// version: it finds an application's replicas without keeping the last
 	// answer, so a name lookup that goes unanswered holds every request.
 	PlainLookups bool `json:"plain_lookups,omitempty"`
+	// NetworksMissing names the networks of the installation the proxy's
+	// container is not attached to: it then serves some applications and
+	// not others, or cannot reach the agent. Absent when it is on all of
+	// them, and from agents older than 0.9.
+	NetworksMissing []string `json:"networks_missing,omitempty"`
 }
 
 // Deployment kinds.
@@ -539,11 +553,19 @@ type Secret struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// Application is the application the secret belongs to, whose ${NAME}
+	// alone it answers; "" for a secret of the whole server, which every
+	// application falls back to. Agents before 0.9 leave it out: every
+	// secret of theirs is the server's.
+	Application string `json:"application"`
 }
 
 // SetSecretRequest is the body of PUT /secrets/:name.
 type SetSecretRequest struct {
 	Value string `json:"value"`
+	// Application stores the secret for one application; "" or absent, for
+	// the whole server. An agent before 0.9 refuses a body that has it.
+	Application string `json:"application,omitempty"`
 }
 
 // Images built where the developer runs shipwick deploy.
@@ -822,6 +844,10 @@ type HostnameCertificate struct {
 	Issuer   string     `json:"issuer"`
 	NotAfter *time.Time `json:"not_after"`
 	Message  string     `json:"message"`
+	// Failure is the last failure the proxy logged while obtaining or
+	// renewing the certificate, nil while it logged none since the
+	// certificate last arrived. Absent from agents older than 0.9.
+	Failure *CertificateFailure `json:"failure,omitempty"`
 }
 
 // Validating a deploy.yaml before deploying it.
@@ -1421,3 +1447,105 @@ type DockerStatus struct {
 	// container's memory and CPU is then not that container's either.
 	UnenforcedLimits []string `json:"unenforced_limits"`
 }
+
+// After a deployment: what the agent found when it asked the application
+// through the proxy, and a limit of the server it runs on.
+
+// EventProbe is the agent's one look at a deployed application through the
+// proxy: whether https://<domain> answers, and whether what it answers sends
+// visitors round in a circle. One per deployment, recorded after
+// completed_at; at level `warn` it is something to fix.
+const EventProbe = "probe"
+
+// KernelLimits are the kernel's limits the agent could read.
+type KernelLimits struct {
+	// NeighbourTable is net.ipv4.neigh.default.gc_thresh3: how many
+	// neighbours — addresses on the server's networks, every container's
+	// among them — the kernel keeps before containers stop reaching each
+	// other.
+	NeighbourTable int `json:"neighbour_table"`
+}
+
+// The Cloudflare token, checked; and why a certificate did not come.
+
+// CloudflareStatus is what the agent found out about SHIPWICK_CLOUDFLARE_API_TOKEN
+// when it last checked: GET /server carries it as `cloudflare`, and
+// POST /server/cloudflare/verify checks again. Nothing of the token itself is
+// in it.
+type CloudflareStatus struct {
+	CheckedAt time.Time `json:"checked_at"`
+	// OK is true when the token is valid, active, sees at least one zone and
+	// can edit the DNS records of every zone it sees.
+	OK bool `json:"ok"`
+	// Address is the address Cloudflare saw the check come from: the one an
+	// IP filter on the token has to name. "" when it could not be learned.
+	Address string           `json:"address"`
+	Zones   []CloudflareZone `json:"zones"`
+	// Problems are sentences a person acts on, one per thing that is wrong;
+	// empty when OK.
+	Problems []string `json:"problems"`
+}
+
+// CloudflareZone is one zone the token sees, and whether it may edit the
+// zone's DNS records, which the agent found out by creating and removing a
+// TXT record of its own.
+type CloudflareZone struct {
+	Name    string `json:"name"`
+	DNSEdit bool   `json:"dns_edit"`
+}
+
+const (
+	// CodeCloudflareNotConfigured means a check of the Cloudflare token was
+	// asked of an agent that has none. HTTP 409.
+	CodeCloudflareNotConfigured = "CLOUDFLARE_NOT_CONFIGURED"
+	// CodeCloudflareCheckedRecently means the token was checked less than a
+	// minute ago, and a check writes a DNS record in every zone: GET /server
+	// has the result; details: {checked_at, retry_after_seconds}. HTTP 429.
+	CodeCloudflareCheckedRecently = "CLOUDFLARE_CHECKED_RECENTLY"
+)
+
+// CertificateFailure is why the proxy could not obtain or renew the
+// certificate of a hostname, from the last failure it logged.
+type CertificateFailure struct {
+	At time.Time `json:"at"`
+	// Challenge is the ACME challenge that failed — tls-alpn-01, http-01,
+	// dns-01 — or "" when the failure came before one was tried.
+	Challenge string `json:"challenge"`
+	// Reason is a sentence: the cause, and what to look at.
+	Reason string `json:"reason"`
+	// Detail is what the proxy logged, as it logged it, trimmed.
+	Detail string `json:"detail"`
+}
+
+// A followed log, besides its lines.
+
+// LogHeartbeat is the line a followed log carries when it has carried
+// nothing else for a while: {"heartbeat":true,"time":"…"}. It is not a log
+// line — a reader tells it from one by the field — and its time is the
+// agent's clock when it was sent, so that a reader has a time of the
+// server's to take the stream up from even when the application printed
+// nothing.
+type LogHeartbeat struct {
+	Heartbeat bool      `json:"heartbeat"`
+	Time      time.Time `json:"time"`
+}
+
+// LogSinceHeader is the response header of a followed log that was asked for
+// `since`: the time the stream begins at, as the agent read it. An agent
+// before 0.9 does not know `since`, leaves the header out and begins with
+// the last `tail` lines instead.
+const LogSinceHeader = "X-Shipwick-Log-Since"
+
+// LogEnd is the last line of a followed log the agent ends on purpose, and
+// says why: {"end":"containers"} — every followed container is gone, which
+// is what a new deployment does — or {"end":"shutdown"}, the agent is
+// stopping and a client that wants to go on reconnects in a moment. Not a
+// log line either. Agents before 0.9 end a stream without one.
+type LogEnd struct {
+	End string `json:"end"`
+}
+
+const (
+	LogEndContainers = "containers"
+	LogEndShutdown   = "shutdown"
+)

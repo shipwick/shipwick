@@ -24,6 +24,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/deploy"
 	"github.com/shipwick/shipwick/agent/internal/disk"
 	"github.com/shipwick/shipwick/agent/internal/docker"
+	"github.com/shipwick/shipwick/agent/internal/kernel"
 	"github.com/shipwick/shipwick/agent/internal/memory"
 	"github.com/shipwick/shipwick/agent/internal/notify"
 	"github.com/shipwick/shipwick/agent/internal/oidc"
@@ -207,11 +208,13 @@ func run() error {
 		return sharedapi.DiskUsage{TotalBytes: u.Total, UsedBytes: u.Used}, ok
 	}
 	opts.SwapBytes = memory.Swap
+	opts.NeighbourTable = kernel.NeighbourTable
 	if cfg.CloudflareToken != "" {
 		// Config.Load has made sure there is a proxy to give it to.
 		if caddy, ok := opts.Proxy.(*proxy.Caddy); ok {
 			caddy.UseCloudflare(cfg.CloudflareToken)
 			opts.DNSChallenge = true
+			opts.Cloudflare = cloudflareVerifier(startCtx, rt, cfg.CloudflareToken)
 			log.Info("certificates are obtained through Cloudflare DNS; hostnames may be proxied by Cloudflare, and may be wildcards")
 		}
 	}
@@ -250,6 +253,7 @@ func run() error {
 	}
 	engine.StartTransfers()
 	engine.StartUpdateCheck()
+	engine.StartCloudflareCheck()
 
 	apiServer := api.New(engine, st, tokenHash, log)
 	if cfg.SignIn != nil {

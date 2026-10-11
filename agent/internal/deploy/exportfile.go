@@ -52,11 +52,19 @@ type exportManifest struct {
 	Certificates []exportCertificate `json:"certificates"`
 	// Applications names what follows, in order.
 	Applications []string `json:"applications"`
+	// Requires names the keys of the applications' entries a reader must
+	// know, as paths in app.json (exportkeys.go). An export written before
+	// 0.9 has none.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type exportSecret struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+	// Application is the application the secret belongs to; absent for a
+	// secret of the whole server, and in an export written before
+	// applications had secrets of their own.
+	Application string `json:"application,omitempty"`
 }
 
 type exportRegistry struct {

@@ -2,7 +2,6 @@
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -153,31 +152,10 @@ func (c *Client) Logs(ctx context.Context, name string, tail int) ([]api.LogLine
 }
 
 // FollowLogs streams log lines to fn until ctx is cancelled or the agent ends
-// the stream (nil error in both cases).
+// the stream (nil error in both cases); heartbeats are dropped. Follow is the
+// same stream with everything it carries.
 func (c *Client) FollowLogs(ctx context.Context, name string, tail int, fn func(api.LogLine)) error {
-	q := url.Values{"follow": {"true"}, "tail": {strconv.Itoa(tail)}}
-	resp, err := c.send(ctx, c.stream, http.MethodGet, "/applications/"+url.PathEscape(name)+"/logs", q, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return decodeError(resp)
-	}
-
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-	for sc.Scan() {
-		var line api.LogLine
-		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
-			return fmt.Errorf("malformed log stream: %w", err)
-		}
-		fn(line)
-	}
-	if err := sc.Err(); err != nil && ctx.Err() == nil {
-		return fmt.Errorf("log stream interrupted: %w", err)
-	}
-	return nil
+	return c.Follow(ctx, name, FollowOptions{Tail: tail}, lineHandler(fn))
 }
 
 func get[T any](ctx context.Context, c *Client, path string, query url.Values) (T, error) {

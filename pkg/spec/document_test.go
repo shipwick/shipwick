@@ -101,6 +101,33 @@ func TestADocumentSaysAReferenceWhereOneWasWritten(t *testing.T) {
 	}
 }
 
+func TestScopedNamesFollowTheReferencesThatStillApply(t *testing.T) {
+	a := everyField()[0]
+	a.Env = map[string]string{"DATABASE_URL": "x", "KEYS": "y"}
+	refs := References{
+		Env:       map[string]string{"DATABASE_URL": "postgres://shop:${DB_PASSWORD}@db/shop", "KEYS": "${API_KEY},${MAIL_KEY}", "GONE": "${GONE}"},
+		BasicAuth: map[int]string{0: "${ADMIN_PASSWORD}"},
+		Scoped:    []string{"MAIL_KEY", "GONE", "DB_PASSWORD", "ADMIN_PASSWORD", "NEVER_REFERRED"},
+	}
+	got := refs.For(a)
+	// Kept for the names a kept reference still says, in order; a name whose
+	// reference is gone, or that no reference names, says nothing.
+	accounts := 0
+	if a.Proxy != nil {
+		accounts = len(a.Proxy.BasicAuth)
+	}
+	want := []string{"DB_PASSWORD", "MAIL_KEY"}
+	if accounts > 0 {
+		want = []string{"ADMIN_PASSWORD", "DB_PASSWORD", "MAIL_KEY"}
+	}
+	if !reflect.DeepEqual(got.Scoped, want) {
+		t.Errorf("scoped = %v, want %v", got.Scoped, want)
+	}
+	if !reflect.DeepEqual(References{Scoped: []string{"X"}}.For(a), References{}) {
+		t.Error("a scoped name without a reference is nothing")
+	}
+}
+
 func TestADocumentWithoutMasksHasNoNotice(t *testing.T) {
 	a := everyField()[1]
 	a.Env = map[string]string{"TOKEN": "resolved"}

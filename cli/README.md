@@ -5,12 +5,14 @@ The Shipwick command-line client.
 ```bash
 curl -fsSL https://get.shipwick.com | sh -s -- --cli    # Linux, macOS
 brew install shipwick/tap/shipwick                      # Homebrew
+irm https://get.shipwick.com/windows | iex              # Windows, in PowerShell
 go build -o bin/shipwick ./cli/cmd/shipwick             # from source; or: make build
 ```
 
-On Windows, download `shipwick_windows_amd64.exe`, or `shipwick_windows_arm64.exe`
-for a machine with an Arm processor, from the
-[releases](https://github.com/shipwick/shipwick/releases).
+Each installer downloads the build for the machine from the latest release
+and verifies it against the release's checksums before anything is put in
+place; the Windows one puts `shipwick.exe` in `%LOCALAPPDATA%\Programs\shipwick`
+and adds that directory to your `PATH` ([scripts/README.md](../scripts/README.md)).
 
 ## Commands
 
@@ -24,7 +26,7 @@ for a machine with an Arm processor, from the
 | `shipwick config <app> [-o file]` | Print the `deploy.yaml` of what the application runs, or write it to a file (`--force` to overwrite): the file back when it was lost. A value that referred to a secret on the server is that `${NAME}` again, and an env value that stood in the deployed file as it is comes back as it is; one that `deploy` filled in from the environment or `--env-file`, and a basic-auth password, is `"********"` and is listed on standard error — write it again or store it as a secret, `deploy` refuses the file until then. Needs a token that may deploy the application |
 | `shipwick status [app]` | Version, CPU and memory, replica health and restart counts, recent deployments, and what the supervisor has been doing. A replaced container that is still on its way out is listed as `stopping`, below the replicas. A hostname whose certificate is being obtained, waiting for DNS or about to expire gets a line; `--verbose` lists every hostname's certificate |
 | `shipwick ps` | All applications on the server. One with a certificate that is not in order, or with active alerts, says so at the end of its line: `certificate waiting for DNS, 2 alerts` |
-| `shipwick logs [app]` | `-n 100` lines, `-f` to follow, `-t` for timestamps |
+| `shipwick logs [app]` | `-n 100` lines, `-f` to follow (reconnecting where it left off when the connection is lost), `-t` for timestamps |
 | `shipwick logs [app] --previous` | The output of the last container that ended — crashed, restarted, replaced — kept by the agent; `-p` for short. `--list` shows what is kept, `--id <n>` one entry, `--run <id>` the output of a job's or command's run |
 | `shipwick logs [app] --search TEXT` | Lines that contain the text, whatever its case, in the kept output and the running containers; `--since 2h`, `--until`, `--deployment <#>` and `--replica <n>` narrow it, and work without `--search` |
 | `shipwick traffic [app]` | What the proxy saw. Without an application: requests per minute, 5xx, p95 and bytes of every application over the last hour. With one: its totals for `--since 1h\|24h\|7d`, and the slowest and failing paths among its recent requests. `--requests` lists the most recent requests (`-n 50`, at most 200), `-f` follows them |
@@ -40,10 +42,11 @@ for a machine with an Arm processor, from the
 | `shipwick import <file>` | Take an export in on the server of the current context: store what it holds, restore each application's volumes before it first starts, and deploy the applications in the export's order, waiting for each. Leaves what exists alone unless `--overwrite` (asks; `--yes`); `--stopped` deploys without starting; `--status` shows the import that is running or ran last. Exits non-zero when an application failed |
 | `shipwick standby` | What a standby server holds: the applications that were imported stopped, and how its scheduled import from the bucket is doing. `standby pull` imports the newest export now; `standby promote` starts the applications in order, follows the promotion across a lost connection or a restart of the agent, and prints the DNS records to change (asks; `--yes`) |
 | `shipwick server status` | Is the agent reachable, what does it run on, how full is its disk, which token and role am I using, which alerts are active, and whether a newer release exists (the agent asks GitHub once a day) |
-| `shipwick server install <user@host>` | Install or upgrade the server over SSH, from here: Docker when it is missing, then the installer with `--agent-domain` and `--dashboard-domain`; saves the token as a context (`--context` names it) and prints the DNS records to create. `--version` picks a release |
+| `shipwick server install <user@host>` | Install or upgrade the server over SSH, from here: Docker when it is missing, then the installer with `--agent-domain` and `--dashboard-domain`; saves the token as a context (`--context` names it), probes ports 80 and 443 from here and names the provider's firewall when they are silent, prints the DNS records to create and how to sign in to the dashboard. `--version` picks a release. When ssh fails, says what the failure means: a key the server does not know (and which key was offered), a host key that changed, a refused or silent port |
+| `shipwick server configure <user@host> KEY=value…` | Change the agent's settings in `/opt/shipwick/.env` over SSH: each `KEY=value` sets or replaces its line, `KEY=` or `--unset KEY` removes it; then `docker compose up -d` runs there and the agent is waited for. Names must be the agent's settings and values pass the installer's checks; values travel as data on the script's standard input, are never printed, and the file keeps its mode. Ends with what changed, by name |
 | `shipwick server bundle` | Make one file that installs or upgrades a server with no connection: the release's compose file, installer and checksums, the `shipwick` binary and the three images for `--arch amd64` or `arm64`. `--version` picks a release, `-o` the file. The archive of images is checked against the digests the release published (0.7.0 and later) before the bundle is written, and the release's signature is verified when `cosign` is on this machine (a release from 0.8.0 on without one is refused) and carried in the bundle; `--no-pull` takes the images this machine has, unchecked. Needs Docker here; on the server, unpack it and run its `install.sh` |
 | `shipwick server rotate-key` | Replace the key the server encrypts env values, secrets and registry passwords with; the running agent re-encrypts everything and nothing restarts. With the key in `SHIPWICK_ENCRYPTION_KEY`, prints the new key once for you to put there |
-| `shipwick doctor` | One screen: CLI and agent versions against the latest release, token, Docker and the limits it does not enforce, the proxy and whether it is Shipwick's image, whether application containers can reach the API, the running applications without a memory limit, a server without swap, ports 80 and 443, the server's active alerts, and for every domain whether DNS points at the server — or at Cloudflare's proxy, which is in order when the agent has a Cloudflare token — and `https://` answers. Exits non-zero when something is broken |
+| `shipwick doctor` | One screen: CLI and agent versions against the latest release, token, Docker and the limits it does not enforce, the proxy, whether it is Shipwick's image and whether it is on all of its networks, whether application containers can reach the API, the running applications without a memory limit, a server without swap or near the kernel's table of neighbours, ports 80 and 443, the server's active alerts, and for every domain whether DNS points at the server — or at Cloudflare's proxy, which is in order when the agent has a Cloudflare token — and `https://` answers, without sending visitors round in a redirect loop; then why a certificate did not come, in the proxy's words, and what the agent found out about its Cloudflare token (checked again with an `admin` token, at most once a minute). Exits non-zero when something is broken |
 | `shipwick open [app]` | Open `https://<domain>` in the browser; `--dashboard`, or no application and no `deploy.yaml` here, opens the server's dashboard |
 | `shipwick login` | Save the agent URL and token; `--context <name>` saves them under that name and makes it current; `--no-check` saves without asking the agent |
 | `shipwick context ls\|use\|rm\|current` | List the saved servers (`*` marks the current one), switch, forget one (`--yes` skips the question), print the current name |
@@ -57,16 +60,16 @@ for a machine with an Arm processor, from the
 | `shipwick access revoke <who>` | Remove a rule; sessions that rested on it end with their next request |
 | `shipwick access sessions` | Who is signed in right now, as what, and until when |
 | `shipwick access signout <address | name>` | End every session of a person, named as `access sessions` lists them. They can sign in again while a rule covers them |
-| `shipwick secret set <NAME>` | Store a value on the server for `${NAME}` in `env` and in `proxy.basic_auth` passwords. Asked without echo in a terminal, else read from stdin; `--from-file` reads a file. Never an argument |
-| `shipwick secret ls` | The secrets on the server: names and dates, never values |
-| `shipwick secret rm <NAME>` | Remove a secret; `--yes` skips the question |
+| `shipwick secret set <NAME> [--app name]` | Store a value on the server for `${NAME}` in `env` and in `proxy.basic_auth` passwords: with `--app` for that application alone, which its `${NAME}` resolves to before a server-wide one; without, for every application. Asked without echo in a terminal, else read from stdin; `--from-file` reads a file. Never an argument. Warns when the value has characters a URL cannot carry unescaped |
+| `shipwick secret ls` | The secrets on the server: names, scopes (`server` or the application) and dates, never values |
+| `shipwick secret rm <NAME> [--app name]` | Remove the server-wide secret, or with `--app` the application's own; the other stays. `--yes` skips the question |
 | `shipwick registry login <registry> --username <name>` | Store the credential the server pulls private images with. The password or token is asked without echo in a terminal, else read from stdin (`--password-stdin` forces that); never an argument. The agent checks it against the registry first |
 | `shipwick registry ls` | The registries the server has a credential for: registry, username, last change; never passwords |
 | `shipwick registry logout <registry>` | Remove a registry's credential |
 | `shipwick cert set <hostname> --cert <file> --key <file>` | Serve the hostnames a certificate covers with that certificate instead of one the server obtains: the PEM chain (the hostname's certificate first) and its key. A wildcard is stored under `'*.example.com'`. The server checks them and says why it refuses |
 | `shipwick cert ls` | The certificates you supplied: hostname, issuer, expiry, and the names each covers. Never a key |
 | `shipwick cert rm <hostname>` | Remove a certificate; the server obtains its own for those hostnames again. `--yes` skips the question |
-| `shipwick upgrade` | Replace this binary with the latest release, verified against its checksums (and those against the release's signature, where cosign is installed), and report whether the server is behind. `--check` only reports |
+| `shipwick upgrade` | Replace this binary with the latest release, verified against its checksums (and those against the release's signature, where cosign is installed), and report whether the server is behind. `--check` only reports. `--version <tag>` installs exactly that release, a pre-release included, in place of whatever runs now |
 
 Commands taking `[app]` default to the application named in `./deploy.yaml`
 (`-f`/`--file` selects another file; for `logs`, where `-f` means `--follow`,
@@ -204,9 +207,13 @@ anything other than this machine.
 - **Piped output is plain:** no colors, no progress line (`NO_COLOR` is honored
   too). Warnings go to stderr, so stdout stays parseable.
 - **`logs -f` ends by itself** when the containers are replaced by a new
-  deployment; run it again to follow the new ones. In a terminal, when nothing
-  has arrived after two seconds, it says once on stderr that it is following
-  and that Ctrl-C stops it.
+  deployment; run it again to follow the new ones. When the connection is lost
+  instead — a network change, the agent restarting — it reconnects after a
+  second (then two, four, eight, sixteen) and takes the stream up where it
+  left off, saying so once on stderr; nothing is printed twice, and five
+  losses in a row with nothing in between end it with the error. In a terminal, when
+  nothing has arrived after two seconds, it says once on stderr that it is
+  following and that Ctrl-C stops it.
 - **`upgrade` replaces only itself.** The new binary is written next to the
   old one and renamed over it once its SHA-256 matches the release's
   `checksums.txt`. With cosign on the machine, `checksums.txt` is first
@@ -226,7 +233,18 @@ anything other than this machine.
   validated first and go in as environment assignments of the installer. The
   token is read from the installer's summary. When the installer prints none —
   an upgrade — nothing is fetched from the server: the context keeps the token
-  it had, or is saved without one and the command says how to log in.
+  it had, or is saved without one and the command says how to log in. When
+  the login is refused, ssh is run once more with `-v`, on that path only,
+  to learn which keys it offered; of its output only each key's name and
+  fingerprint — the public half — is shown.
+- **`server configure` is one fixed script** over the same `ssh`, with the
+  `KEY=value` lines on its standard input: a value is data the script reads
+  with `awk`, never a word of a command, so quotes, `$(…)` and backticks in
+  it reach `.env` as they are. Names are checked against the list of
+  settings the installer writes (a test keeps the two lists equal), values
+  as the installer checks them. The file is rewritten through a temporary
+  file created under `umask 077` and moved into place, so it is never
+  readable to others, not even for a moment.
 - **`doctor` asks public resolvers** (1.1.1.1, 8.8.8.8, 9.9.9.9) before this
   machine's, the same view of DNS the agent takes; the server's address is
   learned by resolving the agent's own hostname, so through a tunnel

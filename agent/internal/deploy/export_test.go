@@ -104,7 +104,10 @@ func seeded(t *testing.T) *harness {
 			t.Fatal(err)
 		}
 	}
-	if err := h.store.SetSecret(ctx, "DB_PASSWORD", "s3cret-value", time.Now()); err != nil {
+	if err := h.store.SetSecret(ctx, "", "DB_PASSWORD", "s3cret-value", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.SetSecret(ctx, "web", "DB_PASSWORD", "web-s-own", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.store.SetRegistry(ctx, "ghcr.io", "acme", "registry-token", time.Now()); err != nil {
@@ -127,8 +130,8 @@ func TestAnExportImportedOnAnotherServerBringsApplicationsDataAndSecrets(t *test
 	if result.Status != api.ImportSucceeded || result.Error != "" {
 		t.Fatalf("import = %+v", result)
 	}
-	if result.Secrets != 1 || result.Registries != 1 || result.Certificates != 1 {
-		t.Errorf("secrets, registries, certificates = %d, %d, %d; want 1 each", result.Secrets, result.Registries, result.Certificates)
+	if result.Secrets != 2 || result.Registries != 1 || result.Certificates != 1 {
+		t.Errorf("secrets, registries, certificates = %d, %d, %d; want 2 (the server's and web's), 1, 1", result.Secrets, result.Registries, result.Certificates)
 	}
 	// The database has no hostname and goes first.
 	if got := []string{result.Applications[0].Name, result.Applications[1].Name}; got[0] != "db" || got[1] != "web" {
@@ -163,10 +166,14 @@ func TestAnExportImportedOnAnotherServerBringsApplicationsDataAndSecrets(t *test
 		t.Errorf("web's deployment = kind %s, status %s, env %v", d.Kind, d.Status, d.Spec.Env)
 	}
 
-	// Sealed under the importing server's key: its store opens them.
-	values, err := b.store.GetSecrets(ctx, []string{"DB_PASSWORD"})
-	if err != nil || values["DB_PASSWORD"] != "s3cret-value" {
+	// Sealed under the importing server's key: its store opens them, each in
+	// the scope it had.
+	values, err := b.store.GetSecrets(ctx, "", []string{"DB_PASSWORD"})
+	if err != nil || values["DB_PASSWORD"].Value != "s3cret-value" {
 		t.Errorf("secret = %v, %v", values, err)
+	}
+	if own, err := b.store.GetSecrets(ctx, "web", []string{"DB_PASSWORD"}); err != nil || own["DB_PASSWORD"].Value != "web-s-own" || own["DB_PASSWORD"].Application != "web" {
+		t.Errorf("web's secret = %v, %v", own, err)
 	}
 	username, password, found, err := b.store.RegistryCredential(ctx, "ghcr.io")
 	if err != nil || !found || username != "acme" || password != "registry-token" {
@@ -198,7 +205,7 @@ func TestAnImportLeavesWhatExistsAloneUnlessToldToOverwrite(t *testing.T) {
 	// The new server has a database of the same name with its own data, and
 	// a secret of the same name.
 	b.deployWithFiles(map[string]string{"PG_VERSION": "16"})
-	if err := b.store.SetSecret(ctx, "DB_PASSWORD", "its-own", time.Now()); err != nil {
+	if err := b.store.SetSecret(ctx, "", "DB_PASSWORD", "its-own", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	mine := b.replica("db")
@@ -213,8 +220,8 @@ func TestAnImportLeavesWhatExistsAloneUnlessToldToOverwrite(t *testing.T) {
 	if c := b.replica("db"); c.ID != mine.ID || string(b.rt.Files(c.ID)["/var/lib/data/PG_VERSION"]) != "16" {
 		t.Error("the existing database was touched by an import without --overwrite")
 	}
-	if values, _ := b.store.GetSecrets(ctx, []string{"DB_PASSWORD"}); values["DB_PASSWORD"] != "its-own" {
-		t.Errorf("secret = %q, want the server's own kept", values["DB_PASSWORD"])
+	if values, _ := b.store.GetSecrets(ctx, "", []string{"DB_PASSWORD"}); values["DB_PASSWORD"].Value != "its-own" {
+		t.Errorf("secret = %q, want the server's own kept", values["DB_PASSWORD"].Value)
 	}
 	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "DB_PASSWORD") {
 		t.Errorf("warnings = %v, want the kept secret named", result.Warnings)
@@ -228,8 +235,8 @@ func TestAnImportLeavesWhatExistsAloneUnlessToldToOverwrite(t *testing.T) {
 	if string(files["/var/lib/data/PG_VERSION"]) != "17" {
 		t.Errorf("volume after overwrite = %v, want the export's", files)
 	}
-	if values, _ := b.store.GetSecrets(ctx, []string{"DB_PASSWORD"}); values["DB_PASSWORD"] != "s3cret-value" {
-		t.Errorf("secret after overwrite = %q", values["DB_PASSWORD"])
+	if values, _ := b.store.GetSecrets(ctx, "", []string{"DB_PASSWORD"}); values["DB_PASSWORD"].Value != "s3cret-value" {
+		t.Errorf("secret after overwrite = %q", values["DB_PASSWORD"].Value)
 	}
 }
 
@@ -341,12 +348,12 @@ func TestAStoppedImportDeploysWithoutStartingAndAPromotionStartsInOrder(t *testi
 		t.Error("a standby import touched an application that runs")
 	}
 	// Nor does it put the old server's secrets over what the promoted one has.
-	if err := b.store.SetSecret(ctx, "DB_PASSWORD", "changed-after-promotion", time.Now()); err != nil {
+	if err := b.store.SetSecret(ctx, "", "DB_PASSWORD", "changed-after-promotion", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	result = b.importExport(archive, ImportOptions{Stopped: true, Overwrite: true})
-	if values, _ := b.store.GetSecrets(ctx, []string{"DB_PASSWORD"}); values["DB_PASSWORD"] != "changed-after-promotion" || result.Secrets != 0 {
-		t.Errorf("secret after an import into a promoted server = %q, %d stored", values["DB_PASSWORD"], result.Secrets)
+	if values, _ := b.store.GetSecrets(ctx, "", []string{"DB_PASSWORD"}); values["DB_PASSWORD"].Value != "changed-after-promotion" || result.Secrets != 0 {
+		t.Errorf("secret after an import into a promoted server = %q, %d stored", values["DB_PASSWORD"].Value, result.Secrets)
 	}
 }
 

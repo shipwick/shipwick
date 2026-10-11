@@ -40,6 +40,8 @@ func newProxiedFixture(t *testing.T) *fixture {
 	engine := deploy.New(st, rt, deploy.Options{StabilizeWindow: 20 * time.Millisecond, NameSettle: time.Millisecond, Logger: quiet,
 		Proxy:      quietProxy{},
 		LookupHost: func(context.Context, string) ([]string, error) { return []string{"203.0.113.10"}, nil },
+		// No proxy to ask through here: the application answers at once.
+		RedirectProbe: func(context.Context, string, string, string) (int, string, error) { return http.StatusOK, "", nil },
 	})
 	apiServer := New(engine, st, sha256.Sum256([]byte(testToken)), quiet)
 	srv := httptest.NewServer(apiServer.Handler())

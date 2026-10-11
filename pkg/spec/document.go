@@ -34,6 +34,12 @@ type References struct {
 	// It is a statement about the document, kept with the references because
 	// it travels the same way; the values stay in the spec.
 	Plain []string `json:"plain,omitempty"`
+	// Scoped names the secrets among the references that the application's
+	// own secrets answered rather than the server's: which ${NAME} the
+	// deployment ran with, for the record. Absent when every reference was
+	// the server's, and from deployments made before applications had
+	// secrets of their own.
+	Scoped []string `json:"scoped,omitempty"`
 }
 
 // Empty reports whether nothing was referred to and nothing said to be plain.
@@ -101,7 +107,36 @@ func (r References) For(a App) References {
 		}
 	}
 	sort.Strings(out.Plain)
+	// A secret named scoped stays so as long as a kept reference names it.
+	referred := map[string]bool{}
+	for _, text := range out.Env {
+		for _, name := range placeholderNames(text) {
+			referred[name] = true
+		}
+	}
+	for _, text := range out.BasicAuth {
+		for _, name := range placeholderNames(text) {
+			referred[name] = true
+		}
+	}
+	for _, name := range r.Scoped {
+		if referred[name] && !slices.Contains(out.Scoped, name) {
+			out.Scoped = append(out.Scoped, name)
+		}
+	}
+	sort.Strings(out.Scoped)
 	return out
+}
+
+// placeholderNames are the secrets a text refers to; $${NAME} refers to none.
+func placeholderNames(text string) []string {
+	var names []string
+	for _, m := range Placeholder.FindAllStringSubmatch(text, -1) {
+		if m[1] == "" {
+			names = append(names, m[2])
+		}
+	}
+	return names
 }
 
 // PlainFields names the values of a that Document writes as they are, as

@@ -3,7 +3,9 @@ package deploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -27,24 +29,48 @@ type fakeResolver struct {
 	block     chan struct{} // when set, every lookup waits on it
 	entered   chan struct{} // closed by the first lookup that waits
 	enterOnce *sync.Once
+	// gates hold the lookups of single hostnames until released; a lookup
+	// that waits on one says so on waiting, when that is set. inFlight and
+	// peak count the lookups under way, and the most there were at once.
+	gates          map[string]chan struct{}
+	waiting        chan string
+	inFlight, peak int
 }
 
 func newFakeResolver() *fakeResolver {
-	return &fakeResolver{addresses: map[string][]string{}, errs: map[string]error{}, calls: map[string]int{}}
+	return &fakeResolver{addresses: map[string][]string{}, errs: map[string]error{}, calls: map[string]int{}, gates: map[string]chan struct{}{}}
 }
 
 func (f *fakeResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
 	f.mu.Lock()
 	f.calls[host]++
+	f.inFlight++
+	f.peak = max(f.peak, f.inFlight)
 	addrs, elsewhere := f.addresses[host]
 	err := f.errs[host]
 	block, entered, once := f.block, f.entered, f.enterOnce
+	gate, waiting := f.gates[host], f.waiting
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+	}()
 
 	if block != nil {
 		once.Do(func() { close(entered) })
 		select {
 		case <-block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if gate != nil {
+		if waiting != nil {
+			waiting <- host
+		}
+		select {
+		case <-gate:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -102,6 +128,52 @@ func (f *fakeResolver) blockLookups() (entered <-chan struct{}, release func()) 
 			f.block = nil
 			close(block)
 		}
+	}
+}
+
+// gate makes the lookups of one hostname wait until release is called.
+func (f *fakeResolver) gate(host string) (release func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gate := make(chan struct{})
+	f.gates[host] = gate
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.gates[host] == gate {
+			delete(f.gates, host)
+			close(gate)
+		}
+	}
+}
+
+// announceWaits makes every lookup that comes to wait at a gate say which
+// hostname it is for, on the channel returned; room for n of them.
+func (f *fakeResolver) announceWaits(n int) <-chan string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waiting = make(chan string, n)
+	return f.waiting
+}
+
+// peakInFlight is the most lookups that were under way at the same time.
+func (f *fakeResolver) peakInFlight() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.peak
+}
+
+// nextWaiting is the hostname of the next lookup that came to wait at its
+// gate; the test fails if none does in reasonable time.
+func nextWaiting(t *testing.T, waiting <-chan string) string {
+	t.Helper()
+	select {
+	case host := <-waiting:
+		return host
+	case <-time.After(2 * time.Second):
+		// Shorter than lookupTimeout: lookups made one after the other must not pass for side by side.
+		t.Fatal("no further lookup began: hostnames are looked up one after the other")
+		return ""
 	}
 }
 
@@ -416,5 +488,102 @@ func TestLookupsDoNotHoldTheRoutingLock(t *testing.T) {
 	release()
 	if err := <-synced; err != nil {
 		t.Errorf("SyncProxy: %v", err)
+	}
+}
+
+// atOnce is how many hostnames the tests expect to be looked up side by side:
+// the promise, written out, so that a change to lookupsAtOnce has to be made
+// here too.
+const atOnce = 8
+
+func TestStaleHostnamesAreLookedUpSideBySideAndTheRefreshEndsWithTheSlowest(t *testing.T) {
+	h := newHarness(t)
+	hosts := make([]string, atOnce)
+	releases := make([]func(), len(hosts))
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("h%d.example.com", i+1)
+		releases[i] = h.dns.gate(hosts[i])
+	}
+	waiting := h.dns.announceWaits(len(hosts))
+	done := make(chan struct{})
+	go func() {
+		h.engine.refreshHostnames(context.Background(), hosts)
+		close(done)
+	}()
+
+	// Every hostname is asked at once: one after the other, only the first
+	// would be waiting, and the refresh would take the sum of the answers.
+	var asked []string
+	for range hosts {
+		asked = append(asked, nextWaiting(t, waiting))
+	}
+	sort.Strings(asked)
+	if strings.Join(asked, " ") != strings.Join(hosts, " ") {
+		t.Fatalf("in flight: %v, want every hostname", asked)
+	}
+
+	// All but the slowest answer: the refresh waits for the slowest.
+	for _, release := range releases[:len(releases)-1] {
+		release()
+	}
+	select {
+	case <-done:
+		t.Fatal("the refresh ended while a lookup was still unanswered")
+	default:
+	}
+	releases[len(releases)-1]()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh did not end once the last lookup answered")
+	}
+	for _, host := range hosts {
+		if ready, why := h.engine.hostnameReady(host); !ready {
+			t.Errorf("%s: %s; want ready, as the resolver said", host, why)
+		}
+	}
+}
+
+func TestNoMoreThanEightHostnamesAreLookedUpAtOnce(t *testing.T) {
+	h := newHarness(t)
+	hosts := make([]string, atOnce+4)
+	releases := map[string]func(){}
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("h%d.example.com", i+1)
+		releases[hosts[i]] = h.dns.gate(hosts[i])
+	}
+	waiting := h.dns.announceWaits(len(hosts))
+	done := make(chan struct{})
+	go func() {
+		h.engine.refreshHostnames(context.Background(), hosts)
+		close(done)
+	}()
+
+	// Eight are under way; the ninth waits for one of them to answer.
+	for range atOnce {
+		nextWaiting(t, waiting)
+	}
+	select {
+	case host := <-waiting:
+		t.Fatalf("%s is a %dth lookup in flight; a resolver is asked %d questions at a time", host, atOnce+1, atOnce)
+	default:
+	}
+	releases[hosts[0]]()
+	ninth := nextWaiting(t, waiting)
+	for host, release := range releases {
+		if host != hosts[0] {
+			release()
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh did not end once every lookup answered")
+	}
+	if n := h.dns.peakInFlight(); n != atOnce {
+		t.Errorf("%d lookups were in flight at once, want %d", n, atOnce)
+	}
+	if ready, _ := h.engine.hostnameReady(ninth); !ready {
+		t.Errorf("%s, looked up once a slot was free, has no verdict", ninth)
 	}
 }

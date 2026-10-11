@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { keptPlain } from '../app/utils/deployDocument'
+import { keptPlain, maskedByEdit } from '../app/utils/deployDocument'
 
 const { documentOf, plainOf } = await import('../mock/document.mjs' as string) as {
   documentOf: (spec: Record<string, unknown>, references?: { env?: Record<string, string>, plain?: Record<string, string> }) => { document: string, masked: string[], plain: string[] }
@@ -94,5 +94,22 @@ describe('the mock agent and plain values', () => {
     expect(plainOf(body, ['LOG_LEVEL']).refused).toBe('LOG_LEVEL')
     expect(plainOf({ name: 'x' }, ['env.LOG_LEVEL']).refused).toBe('env.LOG_LEVEL')
     expect(plainOf(body, [])).toEqual({ plain: {}, refused: '' })
+  })
+})
+
+describe('what the editor says it masks', () => {
+  it('names the handed-out values that were changed here, which the agent masks from the next deployment on', () => {
+    expect(maskedByEdit(DOCUMENT, DOCUMENT, PLAIN)).toEqual([])
+    expect(maskedByEdit(DOCUMENT.replace('LOG_LEVEL: info', 'LOG_LEVEL: debug'), DOCUMENT, PLAIN)).toEqual(['LOG_LEVEL'])
+    expect(maskedByEdit(DOCUMENT.replace('LOG_LEVEL: info', 'LOG_LEVEL: debug').replace('    two', '    three'), DOCUMENT, PLAIN)).toEqual(['LOG_LEVEL', 'MOTD'])
+  })
+
+  it('leaves out a variable the text dropped, since nothing is left to mask, and one that is not a variable', () => {
+    expect(maskedByEdit(DOCUMENT.replace('  REGION: eu-central\n', ''), DOCUMENT, PLAIN)).toEqual([])
+    expect(maskedByEdit(DOCUMENT.replace('LOG_LEVEL: info', 'LOG_LEVEL: debug'), DOCUMENT, [...PLAIN, 'proxy.basic_auth[0].password'])).toEqual(['LOG_LEVEL'])
+  })
+
+  it('says nothing for a document the agent handed out no plain values of', () => {
+    expect(maskedByEdit(DOCUMENT.replace('LOG_LEVEL: info', 'LOG_LEVEL: debug'), DOCUMENT, [])).toEqual([])
   })
 })

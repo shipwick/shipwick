@@ -16,6 +16,7 @@ import (
 	"github.com/shipwick/shipwick/agent/internal/store"
 	"github.com/shipwick/shipwick/pkg/api"
 	"github.com/shipwick/shipwick/pkg/spec"
+	"github.com/shipwick/shipwick/pkg/version"
 )
 
 // An import reads an export from its first byte to its last and does what it
@@ -234,6 +235,23 @@ func (im *importRun) read(ctx context.Context, xr *exportReader) error {
 	if m.Format != exportFormat {
 		return &InvalidExportError{Reason: fmt.Sprintf("the export is of format %d, written by Shipwick %s; this agent reads format %d. Upgrade the agent, or export with a matching version", m.Format, m.Shipwick, exportFormat)}
 	}
+	// Refused before anything of it is taken in: a key this agent's decoder
+	// would skip is one an application would be deployed without.
+	if unknown := unknownKeys(m.Requires); len(unknown) > 0 {
+		noun := "the key"
+		if len(unknown) > 1 {
+			noun = "the keys"
+		}
+		for i := range unknown {
+			unknown[i] = printable(unknown[i])
+		}
+		named := strings.Join(unknown, ", ")
+		if len(unknown) > 5 {
+			named = fmt.Sprintf("%s and %d more", strings.Join(unknown[:5], ", "), len(unknown)-5)
+		}
+		return &InvalidExportError{Reason: fmt.Sprintf("the export was written by Shipwick %s and uses %s %s, which this agent (Shipwick %s) does not know and would drop. Import it with an agent of that version or newer, or export without the applications that use it",
+			printable(m.Shipwick), noun, named, version.Version)}
+	}
 	im.update(func(rec *api.Import) {
 		created := m.CreatedAt
 		rec.ExportedAt = &created
@@ -301,22 +319,26 @@ func (im *importRun) serverSecrets(ctx context.Context, m exportManifest) error 
 	}
 	have := map[string]bool{}
 	for _, s := range existing {
-		have[s.Name] = true
+		have[s.Application+"/"+s.Name] = true
 	}
 	var kept []string
 	n := 0
 	for _, s := range m.Secrets {
-		if api.ValidateSecretName(s.Name) != nil || api.ValidateSecretValue(s.Value) != nil {
-			im.warn("secret %s was not imported: its name or value is not one this agent accepts", printable(s.Name))
+		if api.ValidateSecretName(s.Name) != nil || api.ValidateSecretValue(s.Value) != nil || (s.Application != "" && spec.ValidateName(s.Application) != nil) {
+			im.warn("secret %s was not imported: its name, application or value is not one this agent accepts", printable(s.Name))
 			continue
 		}
-		if have[s.Name] && !overwrite {
-			kept = append(kept, s.Name)
+		shown := s.Name
+		if s.Application != "" {
+			shown += " of " + s.Application
+		}
+		if have[s.Application+"/"+s.Name] && !overwrite {
+			kept = append(kept, shown)
 			continue
 		}
-		if err := e.store.SetSecret(ctx, s.Name, s.Value, now); err != nil {
+		if err := e.store.SetSecret(ctx, s.Application, s.Name, s.Value, now); err != nil {
 			if errors.Is(err, store.ErrTooManySecrets) {
-				im.warn("secret %s was not imported: %v", s.Name, err)
+				im.warn("secret %s was not imported: %v", shown, err)
 				continue
 			}
 			return err

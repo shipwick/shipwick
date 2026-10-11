@@ -61,6 +61,7 @@ type fakeAgent struct {
 	terminal     bool              // the CLI writes as to a terminal: the progress line is on
 	after        fakeTimer         // replaces the CLI's timers
 	archive      fakeArchive       // the log archive, see logs_archive_test.go
+	follow       fakeFollow        // a followed log that is cut, see logs_follow_test.go
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
@@ -137,6 +138,10 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 	})
 	mux.HandleFunc("GET /api/v1/applications/{name}/logs", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("follow") == "true" {
+			if f.follow.serve != nil {
+				f.follow.serve(w, r)
+				return
+			}
 			// The stream is one JSON object per line, and ends when the
 			// containers do.
 			for _, line := range f.logs {
@@ -193,6 +198,12 @@ var fixedNow = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 // run executes shipwick with args inside dir and returns stdout, stderr and the error.
 func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 	f.t.Helper()
+	return f.runCtx(context.Background(), dir, args...)
+}
+
+// runCtx is run under a context of the test's: Ctrl-C is its cancellation.
+func (f *fakeAgent) runCtx(ctx context.Context, dir string, args ...string) (string, string, error) {
+	f.t.Helper()
 	f.t.Chdir(dir)
 
 	var out, errOut bytes.Buffer
@@ -225,7 +236,7 @@ func (f *fakeAgent) run(dir string, args ...string) (string, string, error) {
 		c.ui = ui.Terminal(&out, &errOut)
 	}
 	root.SetArgs(args)
-	err := root.ExecuteContext(context.Background())
+	err := root.ExecuteContext(ctx)
 	return out.String(), errOut.String(), err
 }
 

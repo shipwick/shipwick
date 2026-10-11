@@ -28,9 +28,11 @@ You need:
 curl -fsSL https://get.shipwick.com | sh -s -- --cli
 ```
 
-Or `brew install shipwick/tap/shipwick`. On Windows, download
-`shipwick_windows_amd64.exe` (`shipwick_windows_arm64.exe` on Arm) from the
-[latest release](https://github.com/shipwick/shipwick/releases/latest).
+Or `brew install shipwick/tap/shipwick`. On Windows, in PowerShell:
+
+```powershell
+irm https://get.shipwick.com/windows | iex
+```
 
 **2. Install the server**, from your laptop:
 

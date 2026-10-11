@@ -51,11 +51,14 @@ func (o *dockerOutage) lasted(now time.Time) time.Duration {
 // "another operation is in progress" by the one component that knows better.
 // Instead the tick is skipped, the outage is said once in the log and, when
 // it lasts, raised as an alert; the first answer clears it.
-func (e *Engine) dockerAnswers(ctx context.Context, now time.Time) bool {
+//
+// The question is the list of the managed containers, and the answer is the
+// tick's: everything the tick does works from it (see snapshot.go).
+func (e *Engine) dockerAnswers(ctx context.Context, now time.Time) ([]docker.Container, bool) {
 	asked := time.Now()
-	_, err := e.rt.ListContainers(ctx, "")
+	containers, err := e.rt.ListContainers(ctx, "")
 	if ctx.Err() != nil {
-		return false // shutting down: the silence is the agent's own
+		return nil, false // shutting down: the silence is the agent's own
 	}
 	key := alertKey{kind: api.AlertDocker}
 
@@ -76,7 +79,7 @@ func (e *Engine) dockerAnswers(ctx context.Context, now time.Time) bool {
 			e.log.Info("Docker answers again; applications are supervised again", "after", shortDuration(lasted))
 			e.clearAlert(ctx, nil, key, fmt.Sprintf("Docker answers again after %s; applications are supervised again", shortDuration(lasted)), now, false)
 		}
-		return true
+		return containers, true
 	}
 	if began {
 		e.log.Error("Docker does not answer; applications are not supervised until it does", "error", err)
@@ -85,7 +88,7 @@ func (e *Engine) dockerAnswers(ctx context.Context, now time.Time) bool {
 		e.raiseAlert(ctx, nil, key, api.SeverityCritical,
 			"Docker does not answer. Applications that are running keep running, but nothing is restarted, deployed or routed until it does. On the server: systemctl status docker", now)
 	}
-	return false
+	return nil, false
 }
 
 // IsRuntimeUnavailable reports whether err is the Docker daemon not

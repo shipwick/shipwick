@@ -112,6 +112,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request, name string)
 		s.streamLogs(w, r, name)
 		return
 	}
+	if r.URL.Query().Has("since") {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "since goes with follow=true; lines of a time are searched with GET /applications/{name}/logs/search?since=", nil)
+		return
+	}
 
 	tail, ok := intParam(w, r, "tail", defaultLogTail, 1, maxLogTail)
 	if !ok {
@@ -127,10 +131,17 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request, name string)
 
 // streamLogs answers logs?follow=true with newline-delimited JSON: one
 // api.LogLine object per line, no envelope, until the client disconnects, the
-// containers go away, or the agent shuts down.
+// containers go away, or the agent shuts down. While the application prints
+// nothing the stream carries a heartbeat line instead: see heartbeat.go.
 func (s *Server) streamLogs(w http.ResponseWriter, r *http.Request, name string) {
 	// tail=0 is meaningful here: "only what is logged from now on".
 	tail, ok := intParam(w, r, "tail", defaultLogTail, 0, maxLogTail)
+	if !ok {
+		return
+	}
+	// since replaces tail: everything from that time on, for a client that
+	// lost the stream and knows the time of the last line it has.
+	since, ok := timeParam(w, r, "since")
 	if !ok {
 		return
 	}
@@ -146,7 +157,7 @@ func (s *Server) streamLogs(w http.ResponseWriter, r *http.Request, name string)
 	}()
 
 	// Errors up to this point are still reported as regular JSON errors.
-	lines, err := s.engine.LogStream(ctx, name, tail)
+	lines, err := s.engine.LogStream(ctx, name, tail, since)
 	if err != nil {
 		s.writeEngineError(w, r, err)
 		return
@@ -158,19 +169,15 @@ func (s *Server) streamLogs(w http.ResponseWriter, r *http.Request, name string)
 		s.log.Warn("could not lift the write deadline for a log stream", "error", err)
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
+	if !since.IsZero() {
+		// Says that since was understood: an older agent ignores it, and a
+		// client that resumed a stream wants to know which it got.
+		w.Header().Set(api.LogSinceHeader, since.Format(time.RFC3339Nano))
+	}
 	w.WriteHeader(http.StatusOK)
 	rc.Flush() // deliver the headers now, even if the app is quiet
 
-	enc := json.NewEncoder(w)
-	for line := range lines {
-		if err := enc.Encode(line); err != nil {
-			return // client went away; cancel() stops the producers
-		}
-		// Flush per line while the stream is idle, per batch while it is busy.
-		if len(lines) == 0 {
-			rc.Flush()
-		}
-	}
+	s.streamLines(w, rc, lines) // returns when the client is gone; cancel() stops the producers
 }
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {

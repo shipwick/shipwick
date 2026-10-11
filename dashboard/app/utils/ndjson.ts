@@ -39,8 +39,22 @@ export class NdjsonSplitter {
   }
 }
 
-/** Parses one NDJSON record into a LogLine; returns null for anything that is not one. */
-export function parseLogLine(raw: string): LogLine | null {
+/**
+ * One record of a followed log. Besides its lines, an agent from 0.9 on writes
+ * a heartbeat after 20 seconds without a line, and a last line that says why
+ * it ended the stream; neither has a `message`, which is how they are told
+ * from a line. Older agents write lines only.
+ */
+export type LogRecord
+  = | { kind: 'line', line: LogLine }
+    | { kind: 'heartbeat', time: string }
+    | { kind: 'end', reason: 'containers' | 'shutdown' | string }
+
+/** The response header of a followed log asked for `since`: the time the stream begins at, as the agent read it. Absent on agents before 0.9. */
+export const LOG_SINCE_HEADER = 'x-shipwick-log-since'
+
+/** Parses one NDJSON record; returns null for anything that is neither a line, a heartbeat nor an end. */
+export function parseLogRecord(raw: string): LogRecord | null {
   let value: unknown
   try {
     value = JSON.parse(raw)
@@ -50,21 +64,34 @@ export function parseLogLine(raw: string): LogLine | null {
   }
   if (typeof value !== 'object' || value === null) return null
   const record = value as Record<string, unknown>
-  if (typeof record.message !== 'string') return null
-  return {
-    replica: typeof record.replica === 'number' ? record.replica : 0,
-    container: typeof record.container === 'string' ? record.container : '',
-    stream: record.stream === 'stderr' ? 'stderr' : 'stdout',
-    time: typeof record.time === 'string' ? record.time : '',
-    message: record.message,
+  if (typeof record.message === 'string') {
+    return {
+      kind: 'line',
+      line: {
+        replica: typeof record.replica === 'number' ? record.replica : 0,
+        container: typeof record.container === 'string' ? record.container : '',
+        stream: record.stream === 'stderr' ? 'stderr' : 'stdout',
+        time: typeof record.time === 'string' ? record.time : '',
+        message: record.message,
+      },
+    }
   }
+  if (record.heartbeat === true) return { kind: 'heartbeat', time: typeof record.time === 'string' ? record.time : '' }
+  if (typeof record.end === 'string' && record.end !== '') return { kind: 'end', reason: record.end }
+  return null
+}
+
+/** Parses one NDJSON record into a LogLine; returns null for anything that is not one, the heartbeat and end lines included. */
+export function parseLogLine(raw: string): LogLine | null {
+  const record = parseLogRecord(raw)
+  return record?.kind === 'line' ? record.line : null
 }
 
 /**
- * Reads a byte stream to its end, yielding parsed log lines in batches (one
+ * Reads a byte stream to its end, yielding parsed records in batches (one
  * batch per network chunk, so consumers can update the UI once per chunk).
  */
-export async function* readLogStream(body: ReadableStream<Uint8Array>): AsyncGenerator<LogLine[], void, void> {
+export async function* readLogRecords(body: ReadableStream<Uint8Array>): AsyncGenerator<LogRecord[], void, void> {
   const reader = body.getReader()
   const splitter = new NdjsonSplitter()
   try {
@@ -72,10 +99,10 @@ export async function* readLogStream(body: ReadableStream<Uint8Array>): AsyncGen
       const { done, value } = await reader.read()
       if (done) break
       if (!value) continue
-      const batch = toLogLines(splitter.push(value))
+      const batch = toRecords(splitter.push(value))
       if (batch.length > 0) yield batch
     }
-    const tail = toLogLines(splitter.flush())
+    const tail = toRecords(splitter.flush())
     if (tail.length > 0) yield tail
   }
   finally {
@@ -83,10 +110,18 @@ export async function* readLogStream(body: ReadableStream<Uint8Array>): AsyncGen
   }
 }
 
-function toLogLines(raw: string[]): LogLine[] {
-  const out: LogLine[] = []
+/** Reads a byte stream to its end, yielding its log lines only, in batches. */
+export async function* readLogStream(body: ReadableStream<Uint8Array>): AsyncGenerator<LogLine[], void, void> {
+  for await (const batch of readLogRecords(body)) {
+    const lines = batch.flatMap(record => (record.kind === 'line' ? [record.line] : []))
+    if (lines.length > 0) yield lines
+  }
+}
+
+function toRecords(raw: string[]): LogRecord[] {
+  const out: LogRecord[] = []
   for (const line of raw) {
-    const parsed = parseLogLine(line)
+    const parsed = parseLogRecord(line)
     if (parsed) out.push(parsed)
   }
   return out

@@ -66,7 +66,7 @@ func TestTheServerSaysWhenANewerReleaseExists(t *testing.T) {
 }
 
 func TestAReleaseThatIsNotNewerIsNotAnUpdate(t *testing.T) {
-	for running, available := range map[string]bool{"v0.7.0": false, "v0.7.1": false, "v0.8.0-rc.1": false, "dev": false, "v0.6.0": true, "v0.7.0-rc.2": true} {
+	for running, available := range map[string]bool{"v0.7.0": false, "v0.7.1": false, "v0.8.0-rc.1": false, "dev": false, "v0.7.0-3-gabcdef": false, "v0.6.0": true, "v0.7.0-rc.2": true} {
 		t.Run(running, func(t *testing.T) {
 			runs(t, running)
 			h, _ := updateHarness(t, &asker{tag: "v0.7.0"})

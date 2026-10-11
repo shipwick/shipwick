@@ -177,7 +177,7 @@ verify_signature() {
         "$WORK_DIR/checksums.txt" >"$WORK_DIR/cosign.out" 2>&1; then
         die "The signature of the release's checksums.txt did not verify as one made by the release workflow of github.com/$REPO.
   cosign: $(tail -n 1 "$WORK_DIR/cosign.out")
-  cosign 2.4 or later reads this signature; an older one fails here whatever the file. Nothing was installed."
+  cosign 2.5 or later reads this signature; an older one fails here whatever the file. Nothing was installed."
     fi
     step "The release is signed by the release workflow of github.com/$REPO"
 }
@@ -656,6 +656,23 @@ prune_old_images() {
     [ "$removed" -eq 0 ] || step "Removed $removed image(s) of earlier Shipwick releases"
 }
 
+# cloudflare_findings says what the agent found out about the Cloudflare
+# token: whether Cloudflare accepts it from this server and which zones it can
+# edit, which the agent checks when it starts. The lines are `shipwick
+# doctor`'s, asked of the CLI that was just signed in here; an older CLI or
+# agent has none, and nothing is printed. Without a signed-in CLI the agent
+# cannot be asked from here, and its log has the same line.
+cloudflare_findings() {
+    case "${SIGNED_IN:-}" in
+        shipwick) set -- ;;
+        "shipwick --context "*) set -- --context "${SIGNED_IN#shipwick --context }" ;;
+        *) return 0 ;;
+    esac
+    findings="$(shipwick_here "$@" doctor 2>/dev/null | grep -F 'Cloudflare: ' || true)"
+    [ -n "$findings" ] || return 0
+    printf '%s\n' "$findings" | while IFS= read -r line; do info "$line"; done
+}
+
 print_summary() {
     agent_domain="$(sed -n 's/^SHIPWICK_AGENT_DOMAIN=//p' "$INSTALL_DIR/.env")"
     dashboard_domain="$(sed -n 's/^SHIPWICK_DASHBOARD_DOMAIN=//p' "$INSTALL_DIR/.env")"
@@ -685,7 +702,11 @@ print_summary() {
         info "     and run:   cd $INSTALL_DIR && docker compose up -d"
         info "  2. on your laptop:   ssh -N -L 9000:127.0.0.1:9000 root@<this-server> &   shipwick login"
     fi
-    [ -z "$dashboard_domain" ] || info "Dashboard:                https://$dashboard_domain"
+    if [ -n "$dashboard_domain" ]; then
+        info "Dashboard:                https://$dashboard_domain"
+        info "                          It asks for a token; make it one of its own:  shipwick token create dashboard --role admin"
+        info "                          (not the root token from $INSTALL_DIR/.env, which is root on this server and never leaves it)"
+    fi
     info "Open ports 80 and 443 (and 443/udp) — and nothing else — in your firewall."
     if grep -q '^SHIPWICK_ACME_DIRECTORY=.' "$INSTALL_DIR/.env"; then
         info "Certificates are obtained from the ACME server in SHIPWICK_ACME_DIRECTORY."
@@ -696,6 +717,7 @@ print_summary() {
     elif grep -q '^SHIPWICK_CLOUDFLARE_API_TOKEN=.' "$INSTALL_DIR/.env"; then
         info "Certificates are obtained through Cloudflare DNS: hostnames may be proxied by"
         info "Cloudflare. Set the zone's SSL/TLS mode to Full (strict)."
+        cloudflare_findings
     else
         info "DNS records must point straight at this server (at Cloudflare: DNS only). To keep"
         info "Cloudflare's proxy on, add SHIPWICK_CLOUDFLARE_API_TOKEN to $INSTALL_DIR/.env"

@@ -348,6 +348,56 @@ internet access and makes no request to any third party.
 - **`403 APPLICATION_CALLER`** is the agent refusing the dashboard server for
   the network it calls from. It reads "The agent refuses this dashboard…",
   on the login page too, and never as a rejected token.
+- **A secret's scope** (from 0.9). Every row of `GET /secrets` says whose the
+  secret is (`application`, `""` for the server's): a Scope column, and the
+  form offers the server or an application — the known names, or one typed
+  and checked as an application name, since it may not exist yet. "Already
+  stored" compares scope and name; removing the server's names the
+  applications that keep their own, removing an application's says the
+  server-wide one answers from the next deployment on. The value field warns
+  of `@ : / ? # %` and whitespace, which a URL cannot carry, naming the
+  characters and never the value. The missing-secret link of the deploy page
+  carries the application being deployed as the scope. Rows without
+  `application` are an agent before 0.9, which keeps one list: no column, no
+  choice; its `400 INVALID_REQUEST` to a body with a scope is read the same
+  way and said in words (`utils/secrets.ts`).
+- **The probe** (from 0.9). After a container deployment with a routed domain
+  is complete the agent asks `https://<domain><path>/` through the proxy and
+  records one `probe` event after `completed_at`. The deployment page, which
+  stops polling at completion, asks once more six seconds later and once
+  again after thirty, only for a deployment that was `Routed https://…`, has
+  no probe yet and completed within five minutes (`utils/probe.ts`); a `warn`
+  probe is a banner there and a finding on the application's page while that
+  deployment is active, with the agent's sentence verbatim; an `info` probe a
+  line. An agent before 0.9 never writes one, and nothing waits for it.
+- **The server's wiring** (from 0.9). `proxy.networks_missing` is a red line
+  under the proxy with the `--force-recreate caddy` command;
+  `kernel_limits.neighbour_table` stands next to the container count and
+  warns, as `doctor` does, from `(containers + 1) × 4 ≥ table` on
+  (`utils/wiring.ts`). `cloudflare` is a block of its own: ok or not, when it
+  was checked, the address Cloudflare saw, each zone with its DNS-edit mark,
+  each problem as a sentence; an admin's *Check again* is
+  `POST /server/cloudflare/verify`, a `429` keeps the last result and counts
+  the seconds down, a `409` or `404` hides the button (`utils/cloudflare.ts`).
+- **A certificate's failure** (from 0.9). `certificates[].failure` is the
+  reason under the hostname in red, the proxy's own words behind a toggle,
+  and when; a certificate that is `ok` with a failure reads *Renewal failing*.
+- **A followed log** (from 0.9) carries a heartbeat every 20 seconds while
+  quiet and ends with `{"end":"containers"}` or `{"end":"shutdown"}`.
+  `useLogStream` skips the heartbeat, takes its time, and when the stream is
+  lost — cut mid-way, or ended with `shutdown` — reconnects with `since=` set
+  to the latest time the agent told, waiting 1, 2, 4, 8 and 16 seconds
+  through the proxy's 502 while the agent restarts; `X-Shipwick-Log-Since` in
+  the answer (forwarded by the server-side proxy) means only the line at that
+  instant is sent again, and that one is dropped; without the header the
+  agent is older and sent its tail, which is skipped for a moment as before
+  (`utils/logResume.ts`). `containers` is today's clean end. Once a heartbeat
+  has been heard, 45 seconds without a line or a heartbeat marks the stream
+  stale in the status line; before one, a quiet stream is only quiet.
+- **The editor says what it masks.** A handed-out value changed in the
+  configuration editor is masked by the agent from that deployment on; the
+  page says so in one line next to the editor, before the deployment, naming
+  the variables (`maskedByEdit` in `utils/deployDocument.ts`).
 
 ## Keyboard, screen readers and touch
 
@@ -604,6 +654,12 @@ the real agent, so the log viewer's reconnect can be seen.
 | `MOCK_DOCKER=rootless\|nocgroups\|nomemory\|silent` | The Docker daemon: rootless with its limits enforced; rootless without cgroup controllers (`unenforced_limits` names `memory` and `cpu`, every replica reports the daemon's whole usage, a deployment with limits records the `warn` step, no `memory` alert); one that enforces no memory limit; or one that does not answer: what asks Docker is `503 RUNTIME_UNAVAILABLE`, what the agent reads from its database is answered. |
 | `MOCK_DISK=full` | What writes is `507 DISK_FULL`: a deployment, a redeploy, a rollback, a static folder, an image. Validation is answered. |
 | `MOCK_ALERTS=docker` | The warnings plus the critical `docker` alert. |
+| `MOCK_AGENT=0.8` | Answers like an agent before 0.9: secrets carry no `application` and a `PUT /secrets/:name` body with one is `400 INVALID_REQUEST` (`invalid JSON body: expected {"value": "..."}`), no `probe` event, no `networks_missing`, `kernel_limits` or `cloudflare` on `GET /server` (`POST /server/cloudflare/verify` is `404 ENDPOINT_NOT_FOUND`), no `failure` on a certificate, and a followed log without heartbeat, end line or `since`; the five switches below do nothing. |
+| `MOCK_PROBE=loop\|unreachable` | What the agent finds when it asks a freshly deployed application through the proxy, a few seconds after `completed_at`: a redirect loop (the `warn` probe with the agent's sentence), or a proxy that could not be asked. Without it, `answers HTTP 200 through the proxy`. |
+| `MOCK_NETWORKS_MISSING=1` | `proxy.networks_missing` names `shipwick-control`: the proxy's container is not on every network of the installation. |
+| `MOCK_NEIGHBOURS=1024` | `kernel_limits.neighbour_table` on `GET /server`; absent by default, as for an agent in a container. `40` makes the warning show for the mock's ten containers. |
+| `MOCK_CLOUDFLARE=ok\|problems` | `cloudflare` on `GET /server`: a token that works, or one that cannot edit the DNS records of `example.net`. `POST /server/cloudflare/verify` checks again, `429 CLOUDFLARE_CHECKED_RECENTLY` with `Retry-After` within a minute of the last; without the switch `409 CLOUDFLARE_NOT_CONFIGURED`. |
+| `MOCK_RENEWAL_FAILING=1` | `api.example.com`'s certificate is `ok` and carries a `failure`: it serves, and its renewal fails on the Cloudflare token. |
 | `MOCK_PORT`, `MOCK_HOST`, `MOCK_TOKEN` | `9100`, `127.0.0.1`, `mock-token-0123456789abcdef` |
 
 What 0.5 added is served with the agent's shapes and refusals: `path`, `proxy`
@@ -644,6 +700,23 @@ is accepted and fails after the pull with the agent's sentence, unless the
 image's tag contains `nonroot`. What the switches above answer is in
 `mock/faults.mjs`.
 
+What 0.9 added: a secret belongs to the server or to one application
+(`application` on every row of `GET /secrets`, in the body of `PUT` and the
+query of `DELETE`; `web` has a `SESSION_SECRET` of its own and `my-api` a
+`STRIPE_KEY` next to the server's; a deploy resolves `${NAME}` to the
+application's own first); the `probe` event after a routed deployment
+(`my-api`'s active deployment answered HTTP 200, `web`'s loops through
+`www.example.com`; a deployment started here gets its probe 2.5 seconds after
+`completed_at`); `app.example.com`'s certificate says why it cannot be
+obtained (`failure`, the proxy's words included); and the followed log:
+a heartbeat line after 20 seconds without output, `{"end":"containers"}` when
+the followed containers are gone, `{"end":"shutdown"}` when the `:restart`
+tag takes the agent away (and when the mock is stopped), and `since=` on
+`follow=true`, answered with `X-Shipwick-Log-Since` and every line from
+that time on (`400 INVALID_REQUEST` without `follow`, or for a time that is
+not one). The server-side proxy forwards that header to the browser, where
+the log viewer takes a lost stream up with it.
+
 Signing in: `GET /auth`, `POST /auth/exchange` and a stand-in for the
 provider at `/mock-idp/authorize`, a page of four accounts —
 `ada@example.com` (admin by a rule for her address), `grace@example.com`
@@ -671,7 +744,7 @@ SHIPWICK_AGENTS=production=http://127.0.0.1:9100,staging=http://127.0.0.1:9101 n
 |---|---|
 | `npm run dev` | Nuxt dev server with HMR on :3000 |
 | `npm run mock` | Mock agent on :9100 |
-| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, the titles of tabs, the security block and the mock's reading of it, limits Docker does not enforce, and a silent Docker, a full disk and a refused dashboard |
+| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, the titles of tabs, the security block and the mock's reading of it, limits Docker does not enforce, and a silent Docker, a full disk and a refused dashboard, the scope of a secret and the characters a URL cannot carry, the probe after a deployment, the proxy's networks and the kernel's table of neighbours, the Cloudflare token's check and its refusals, a certificate's failure, what the editor masks, and how a lost log stream is taken up |
 | `npm run typecheck` | `vue-tsc` over app, server and config, strict + `noUncheckedIndexedAccess` |
 | `npm run build` | Production build into `.output/` |
 | `npm start` | `node .output/server/index.mjs` |

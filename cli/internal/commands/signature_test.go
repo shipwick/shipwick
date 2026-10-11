@@ -99,7 +99,7 @@ func TestUpgradeChangesNothingWhenTheSignatureIsNotTheWorkflows(t *testing.T) {
 	if err == nil {
 		t.Fatal("an upgrade whose signature does not verify must fail")
 	}
-	for _, want := range []string{"did not verify", "release workflow of github.com/shipwick/shipwick for v0.8.1", "nothing was changed", "no matching CertificateIdentity", "cosign 2.4 or later"} {
+	for _, want := range []string{"did not verify", "release workflow of github.com/shipwick/shipwick for v0.8.1", "nothing was changed", "no matching CertificateIdentity", "cosign 2.5 or later"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error does not say %q:\n%v", want, err)
 		}

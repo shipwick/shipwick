@@ -22,10 +22,12 @@ export function formatDate(iso: string | null | undefined): string {
 /**
  * The badge next to a hostname, for anything that is not in order; null for
  * `ok`, which needs no badge. An expired certificate reads red, the rest amber.
+ * A certificate that is `ok` and has a failure is one the proxy could not
+ * renew: it still serves, and renewal is failing.
  */
-export function hostnameCertificateDisplay(certificate: Pick<HostnameCertificate, 'status' | 'message'>): StatusDisplay | null {
+export function hostnameCertificateDisplay(certificate: Pick<HostnameCertificate, 'status' | 'message' | 'failure'>): StatusDisplay | null {
   switch (certificate.status) {
-    case 'ok': return null
+    case 'ok': return certificate.failure ? { tone: 'warn', label: 'Renewal failing' } : null
     case 'expiring':
       return certificate.message.startsWith('expired')
         ? { tone: 'danger', label: 'Certificate expired' }
@@ -34,6 +36,24 @@ export function hostnameCertificateDisplay(certificate: Pick<HostnameCertificate
     case 'waiting_for_dns': return { tone: 'warn', label: 'Waiting for DNS' }
     case 'unknown': return { tone: 'muted', label: 'Certificate unknown' }
     default: return { tone: 'muted', label: certificate.status.replace(/_/g, ' ') }
+  }
+}
+
+/**
+ * What went wrong the last time the proxy tried to obtain or renew the
+ * hostname's certificate, from the failure the agent read in the proxy's log:
+ * the reason in the agent's words, the proxy's own words behind it, and when.
+ * Null without a failure, and for an agent before 0.9, which reads none.
+ */
+export function certificateFailureLine(certificate: Pick<HostnameCertificate, 'status' | 'failure'>): { reason: string, detail: string, at: string, renewal: boolean } | null {
+  const failure = certificate.failure
+  if (!failure || !failure.reason) return null
+  return {
+    reason: failure.reason,
+    // The proxy's words, when they say more than the reason already does.
+    detail: failure.detail && failure.detail !== failure.reason ? failure.detail : '',
+    at: failure.at,
+    renewal: certificate.status === 'ok' || certificate.status === 'expiring',
   }
 }
 

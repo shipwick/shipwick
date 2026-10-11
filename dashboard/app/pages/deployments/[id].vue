@@ -5,6 +5,7 @@ import { durationBetween, formatAbsoluteUtc, formatBytes, formatCores, formatDur
 import { describeBackupPlan } from '~/utils/backups'
 import { tidyDuration } from '~/utils/jobs'
 import { archiveSupported, logsPath } from '~/utils/logArchive'
+import { PROBE_RECHECKS_MS, probeExpected, probeOf } from '~/utils/probe'
 import { deniedRegistry } from '~/utils/registries'
 import { describeBuild, describeHealth, describeLogging, describeSecurity, describeStatic, formatArgv, formatHostname, formatPathRedirect, formatPublish, hostnamesOf } from '~/utils/spec'
 import { deploymentStatusDisplay } from '~/utils/status'
@@ -24,6 +25,33 @@ const deployment = usePolling<DeploymentDetail>(
 watch(id, () => void deployment.reset())
 
 const d = computed(() => deployment.data.value)
+
+// The agent's look through the proxy comes after completed_at, when polling
+// has stopped: for a deployment that was routed and has none yet, ask once
+// more a few seconds later, and once again, then leave it. An agent before 0.9
+// never writes one; the window keeps a page opened later from asking for it.
+const probe = computed(() => probeOf(d.value?.events))
+let probeRechecks = 0
+let probeTimer: ReturnType<typeof setTimeout> | null = null
+watch(d, (detail) => {
+  if (!detail) return
+  if (probeTimer !== null || !probeExpected(detail)) return
+  const delay = PROBE_RECHECKS_MS[probeRechecks]
+  if (delay === undefined) return
+  probeRechecks++
+  probeTimer = setTimeout(() => {
+    probeTimer = null
+    void deployment.refresh()
+  }, delay)
+})
+watch(id, () => {
+  probeRechecks = 0
+  if (probeTimer !== null) clearTimeout(probeTimer)
+  probeTimer = null
+})
+onScopeDispose(() => {
+  if (probeTimer !== null) clearTimeout(probeTimer)
+})
 useHead({ title: () => (d.value ? `${d.value.application} #${d.value.sequence}` : `Deployment ${id.value}`) })
 
 const status = computed(() => (d.value ? deploymentStatusDisplay(d.value.status) : null))
@@ -181,6 +209,15 @@ const crumbs = computed(() => [
           <p v-if="d.error" class="mt-3 flex items-start gap-2 rounded-sm border border-danger-line bg-danger-bg px-3 py-2 font-medium text-danger">
             <UiIcon name="x-circle" :size="14" class="mt-[3px]" />
             <span class="min-w-0 break-words">{{ d.error }}</span>
+          </p>
+          <!-- What the agent found when it asked the application through the proxy, after the deployment: a loop or an unanswered proxy is something to fix. -->
+          <p v-if="probe && probe.level === 'warn'" class="mt-3 flex items-start gap-2 rounded-sm border border-warn-line bg-warn-bg px-3 py-2 text-warn" role="status">
+            <UiIcon name="alert" :size="14" class="mt-[3px] shrink-0" />
+            <span class="min-w-0 break-words"><span class="font-medium">After the deployment, the agent asked the application through the proxy.</span> {{ probe.message }}</span>
+          </p>
+          <p v-else-if="probe" class="mt-1.5 flex items-start gap-2 text-fg-muted">
+            <UiIcon name="check" :size="14" class="mt-[3px] shrink-0 text-ok" />
+            <span class="min-w-0 break-words">{{ probe.message }}</span>
           </p>
           <p v-if="replicaOutput" class="mt-1.5 text-fg-muted">
             What its containers wrote before they were removed is kept:

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/shipwick/shipwick/agent/internal/docker"
 	"github.com/shipwick/shipwick/agent/internal/store"
@@ -300,30 +301,46 @@ func (e *Engine) Logs(ctx context.Context, name string, tail int) ([]api.LogLine
 	return lines, nil
 }
 
+// sinceFollower is a runtime that can follow a container's log from a time
+// instead of from its last lines; the Docker runtime is one. Without it a
+// stream asked for since begins with the last tail lines.
+type sinceFollower interface {
+	FollowLogsSince(ctx context.Context, id string, since time.Time, emit func(docker.LogEntry)) error
+}
+
 // LogStream follows the logs of every replica of the application's active
-// deployment, each starting with its last `tail` lines. Lines of one replica
-// arrive in order; replicas interleave as their output arrives.
+// deployment, each starting with its last `tail` lines — or, when since is
+// set, with every line logged at or after it, which is how a client that
+// lost the stream takes it up where it left off. Lines of one replica arrive
+// in order; replicas interleave as their output arrives.
 //
 // The channel is closed when ctx is cancelled or when every replica's log has
 // ended — which is what happens when a new deployment replaces the containers.
-func (e *Engine) LogStream(ctx context.Context, name string, tail int) (<-chan api.LogLine, error) {
+func (e *Engine) LogStream(ctx context.Context, name string, tail int, since time.Time) (<-chan api.LogLine, error) {
 	replicas, err := e.activeReplicas(ctx, name)
 	if err != nil {
 		return nil, err
 	}
 
+	fromTime, _ := e.rt.(sinceFollower)
 	lines := make(chan api.LogLine, 64)
 	var wg sync.WaitGroup
 	for _, r := range replicas {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := e.rt.FollowLogs(ctx, r.ContainerID, tail, func(entry docker.LogEntry) {
+			emit := func(entry docker.LogEntry) {
 				select {
 				case lines <- logLineView(r, entry):
 				case <-ctx.Done():
 				}
-			})
+			}
+			var err error
+			if !since.IsZero() && fromTime != nil {
+				err = fromTime.FollowLogsSince(ctx, r.ContainerID, since, emit)
+			} else {
+				err = e.rt.FollowLogs(ctx, r.ContainerID, tail, emit)
+			}
 			if err != nil {
 				e.log.Warn("log stream ended with an error", "container", r.ContainerName, "error", err)
 			}
@@ -442,5 +459,7 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		LogArchive:      e.logArchiveStatus(ctx),
 		Update:          e.updateStatus(),
 		Docker:          dockerStatus(info),
+		KernelLimits:    e.kernelLimits(),
+		Cloudflare:      e.cloudflareStatus(),
 	}, nil
 }

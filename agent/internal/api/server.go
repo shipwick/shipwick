@@ -48,6 +48,11 @@ type Server struct {
 	// reach is who can reach the API, and who is refused for where they call
 	// from: see reach.go.
 	reach *reach
+
+	// newTimer is how a long-lived stream waits out its idle interval before
+	// it sends a heartbeat: see heartbeat.go. time.NewTimer when nil; tests
+	// replace it so that nothing waits.
+	newTimer func(time.Duration) streamTimer
 }
 
 // New creates the API server. tokenHash is the SHA-256 of the root token;
@@ -107,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	s.auditRoutes(routes)
 	s.configRoutes(routes)
 	s.logRoutes(routes)
+	s.cloudflareRoutes(routes)
 	s.signInRoutes(mux, routes)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

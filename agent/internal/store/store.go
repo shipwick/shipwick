@@ -433,6 +433,27 @@ var migrations = []string{
 	// the email claim and has no tenant.
 	`ALTER TABLE sessions ADD COLUMN name_claim TEXT NOT NULL DEFAULT 'email';
 	ALTER TABLE sessions ADD COLUMN tenant TEXT NOT NULL DEFAULT '';`,
+	// 22: a secret may belong to one application. application is its name,
+	// '' for a secret of the whole server, and (application, name) is what
+	// makes a secret one. SQLite cannot widen a primary key, so the table is
+	// made again; the rows there are the server's and keep their value as it
+	// was sealed. label is what the value is sealed under (secretLabel): the
+	// name for a server-wide secret, as before, and a name that says the
+	// application for one of its own. It is a column so that a key rotation,
+	// which walks one key column per table, needs nothing more.
+	`CREATE TABLE secrets_scoped (
+		application TEXT NOT NULL DEFAULT '',
+		name        TEXT NOT NULL,
+		label       TEXT NOT NULL UNIQUE,
+		value       BLOB NOT NULL,
+		created_at  TEXT NOT NULL,
+		updated_at  TEXT NOT NULL,
+		PRIMARY KEY (application, name)
+	);
+	INSERT INTO secrets_scoped (application, name, label, value, created_at, updated_at)
+		SELECT '', name, name, value, created_at, updated_at FROM secrets;
+	DROP TABLE secrets;
+	ALTER TABLE secrets_scoped RENAME TO secrets;`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

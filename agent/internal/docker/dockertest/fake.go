@@ -60,6 +60,7 @@ type Fake struct {
 	peak       int               // most containers that ever existed at once
 
 	statsCalls, blockingStatsCalls int
+	listCalls                      int
 	nameChanges                    int
 	renaming                       map[string]bool
 	namedAt, stoppedAt             map[string]time.Time // by container name
@@ -98,6 +99,8 @@ type Fake struct {
 	FollowErr error
 	output    map[string]chan []byte
 	follows   []time.Time
+	// What containers print on standard error: see fake_proxy_errors.go.
+	errOutput map[string]chan []byte
 	// How containers stop: see fake_stop.go.
 	stop *stopControl
 	// SaveErr makes SaveImage fail: see fake_export.go.
@@ -113,6 +116,9 @@ type Fake struct {
 	// docker.Info.
 	Rootless   bool
 	Unenforced []string
+	// networks are the networks a container is on, where a test said so:
+	// see fake_networks.go.
+	networks map[string][]string
 }
 
 // NamelessRemovals is how often an image without a name was to be removed.
@@ -140,6 +146,7 @@ func New() *Fake {
 		JobExits:    map[string]int{},
 		stopped:     map[string]chan struct{}{},
 		proxyDirs:   map[string]bool{},
+		networks:    map[string][]string{},
 	}
 }
 
@@ -350,6 +357,9 @@ func (f *Fake) InspectContainer(_ context.Context, id string) (docker.Container,
 }
 
 func (f *Fake) ListContainers(_ context.Context, app string) ([]docker.Container, error) {
+	f.mu.Lock()
+	f.listCalls++
+	f.mu.Unlock()
 	var out []docker.Container
 	for _, c := range f.Containers() {
 		if app == "" || c.App == app {
@@ -415,6 +425,14 @@ func (f *Fake) ResetPeak() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.peak = len(f.containers)
+}
+
+// ListCalls reports how often ListContainers was called, for every
+// application or for one: what a supervision pass costs the daemon.
+func (f *Fake) ListCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
 }
 
 // Stats derives counters from the wall clock, the way real ones behave: they

@@ -253,6 +253,13 @@ func (e *Engine) clearRouteOverride(app string) {
 // the point: loading a proxy config resets connections that are being
 // established at that instant.
 func (e *Engine) SyncProxy(ctx context.Context) error {
+	return e.syncRoutes(ctx, nil)
+}
+
+// syncRoutes is SyncProxy working from the supervisor's list of containers
+// rather than one of its own; nil lists here, under the lock, which is what
+// every caller but the tick wants (see snapshot.go).
+func (e *Engine) syncRoutes(ctx context.Context, snap *containerSnapshot) error {
 	if e.opts.Proxy != nil {
 		// What a supplied certificate covers does not wait for DNS, so the
 		// certificates are read before the hostnames are judged. A failure is
@@ -279,7 +286,12 @@ func (e *Engine) SyncProxy(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("compute routes: %w", err)
 	}
-	containers, err := e.listContainers(ctx)
+	var containers map[string]docker.Container
+	if snap != nil {
+		containers, err = snap.complete(ctx, e.rt, plans)
+	} else {
+		containers, err = e.listContainers(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("compute routes: %w", err)
 	}
@@ -684,6 +696,7 @@ func (e *Engine) ProxyStatus() proxy.Status {
 	}
 	status := e.opts.Proxy.Status()
 	status.DNSChallenge = e.opts.DNSChallenge
+	status.NetworksMissing = e.missingProxyNetworks()
 	return status
 }
 

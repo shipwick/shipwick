@@ -63,7 +63,7 @@ type sealedColumn struct {
 // rotation takes them through openSpec and sealSpec, so a field those two
 // learn to seal is covered without an entry here.
 var sealedColumns = []sealedColumn{
-	{table: "secrets", key: "name", column: "value", name: func(name string) string { return name }},
+	{table: "secrets", key: "label", column: "value", name: func(label string) string { return label }},
 	{table: "registries", key: "registry", column: "password", name: registryPasswordName},
 	{table: "certificates", key: "hostname", column: "key", name: keyLabel},
 	{table: "deployment_references", key: "deployment_id", column: "value", name: referencesName},

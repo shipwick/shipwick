@@ -81,6 +81,18 @@
 // `log_archive` on GET /server, and an export that is streamed, with its
 // error trailer.
 //
+// And what 0.9 added: secrets with a scope (`application` on every row of GET
+// /secrets, in the body of PUT and the query of DELETE; an application's own
+// answers its ${NAME} before the server's), the `probe` event the agent
+// records after a routed deployment is complete (what https://<domain>
+// answered through the proxy: a redirect loop is a `warn`), `networks_missing`
+// under `proxy` and `kernel_limits` on GET /server, the Cloudflare token's
+// check (`cloudflare` on GET /server, POST /server/cloudflare/verify, once a
+// minute), `failure` on a hostname's certificate, and a followed log that
+// carries a heartbeat every 20 seconds while quiet, ends with a line that says
+// why ({"end":"containers"} or {"end":"shutdown"}), and takes `since=` to begin
+// at a time (answered with X-Shipwick-Log-Since).
+//
 // Magic image tags for POST /applications/:name/redeploy {"image": ...}:
 //   *:fail      replica 1 crashes: FAILED, nothing of the old version was touched
 //   *:rollback  replica 1 is replaced, replica 2 crashes: FAILED → ROLLBACK →
@@ -182,6 +194,22 @@
 //   MOCK_EXPORT=trailer|breaks   the export stops half-way: with the agent's
 //                    error trailer, or with the connection cut
 //   MOCK_IMPORT_MS=1500  how long an import takes per application
+//   MOCK_AGENT=0.8   answers like an agent before 0.9: secrets have no
+//                    `application` (a PUT body with it is 400 INVALID_REQUEST),
+//                    no `probe` event, no networks_missing, kernel_limits or
+//                    cloudflare on GET /server (POST /server/cloudflare/verify is
+//                    404), no `failure` on certificates, and a followed log
+//                    without heartbeat, end line or `since`
+//   MOCK_PROBE=loop|unreachable   what the agent finds when it asks a deployed
+//                    application through the proxy: a redirect loop, or a proxy
+//                    that could not be asked (default: HTTP 200)
+//   MOCK_NETWORKS_MISSING=1   the proxy is not on the shipwick-control network
+//   MOCK_NEIGHBOURS=1024   kernel_limits.neighbour_table (absent by default, as
+//                    for an agent in a container); 40 makes the warning show
+//   MOCK_CLOUDFLARE=ok|problems   `cloudflare` on GET /server: a token that
+//                    works, or one that cannot edit one of its zones
+//   MOCK_RENEWAL_FAILING=1   api.example.com's certificate is ok and its
+//                    renewal is failing (a `failure` on a certificate that serves)
 
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
@@ -211,7 +239,14 @@ const BEFORE_06 = OLD_AGENT || process.env.MOCK_AGENT === '0.5'
 const BEFORE_07 = BEFORE_06 || process.env.MOCK_AGENT === '0.6'
 // An agent before 0.8: says nothing about swap or about applications without a memory limit, and hands out no env value.
 const BEFORE_08 = BEFORE_07 || process.env.MOCK_AGENT === '0.7'
-const VERSION = OLD_AGENT ? 'v0.4.2' : BEFORE_06 ? 'v0.5.1' : BEFORE_07 ? 'v0.6.0' : BEFORE_08 ? 'v0.7.0' : 'v0.8.0'
+/** An agent before 0.9: no scope on secrets, no probe, nothing of the proxy's networks, the kernel or Cloudflare, no heartbeat in a followed log. */
+const BEFORE_09 = BEFORE_08 || process.env.MOCK_AGENT === '0.8'
+const VERSION = OLD_AGENT ? 'v0.4.2' : BEFORE_06 ? 'v0.5.1' : BEFORE_07 ? 'v0.6.0' : BEFORE_08 ? 'v0.7.0' : BEFORE_09 ? 'v0.8.1' : 'v0.9.0'
+const PROBE = ['loop', 'unreachable'].includes(process.env.MOCK_PROBE) ? process.env.MOCK_PROBE : ''
+const NETWORKS_MISSING = !BEFORE_09 && process.env.MOCK_NETWORKS_MISSING === '1' ? ['shipwick-control'] : []
+const NEIGHBOURS = !BEFORE_09 && Number(process.env.MOCK_NEIGHBOURS) > 0 ? Number(process.env.MOCK_NEIGHBOURS) : 0
+const CLOUDFLARE = !BEFORE_09 && ['ok', 'problems'].includes(process.env.MOCK_CLOUDFLARE) ? process.env.MOCK_CLOUDFLARE : ''
+const RENEWAL_FAILING = !BEFORE_09 && process.env.MOCK_RENEWAL_FAILING === '1'
 /** Application containers can reach the API: what an installation that was not arranged again reports. */
 const OPEN_API = !BEFORE_08 && process.env.MOCK_OPEN_API === '1'
 /** The agent refuses whoever calls from a network applications are on, which is where this dashboard would be. */
@@ -291,8 +326,18 @@ const tokens = new Map()
 const runs = new Map()
 /** `${app}/${job}` → the minute the schedule was last looked at */
 const scheduleSeen = new Map()
-/** secret name → {created_at, updated_at}; the value is not kept, the API never returns it */
+/** `${application}/${name}` → {created_at, updated_at}; "" is the server's scope. The value is not kept, the API never returns it */
 const secrets = new Map()
+const secretKey = (application, name) => `${application}/${name}`
+/** A row of GET /secrets: an agent before 0.9 keeps one list for the whole server and names no scope. */
+const secretView = ([key, s]) => {
+  const at = key.indexOf('/')
+  const application = key.slice(0, at)
+  const name = key.slice(at + 1)
+  return BEFORE_09 ? { name, ...s } : { name, application, ...s }
+}
+/** Whether ${name} resolves for an application: its own first, then the server's. */
+const secretResolves = (application, name) => secrets.has(secretKey(application, name)) || secrets.has(secretKey('', name))
 /** application name → the last static upload {digest, size_bytes, files}, one per application like the agent */
 const uploads = new Map()
 /** Volumes of deleted applications: kept on purpose, listed by GET /volumes with orphan: true */
@@ -625,6 +670,7 @@ function seed() {
     })
     const sp = base('1.4.2')
     const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 2 * HOUR, durationMs: 18100, events: successEvents(sp, '1.4.1'), by: 'ci' })
+    recordProbe(active, '', startedAt - 2 * HOUR + 18100 + 2300)
     app.active_deployment_id = active.id
     app.updated_at = active.completed_at
     app.containers = makeContainers(app, active)
@@ -734,6 +780,8 @@ function seed() {
     addDeployment(app, first, { status: 'SUPERSEDED', startedAtMs: startedAt - 30 * DAY, durationMs: 7400, events: successEvents(first, null) })
     const sp = base('2024.12.0')
     const active = addDeployment(app, sp, { status: 'ACTIVE', startedAtMs: startedAt - 3 * DAY, durationMs: 7900, events: successEvents(sp, '2024.11.3') })
+    // The application sends example.com to www.example.com, which `redirects` sends back: the loop the agent catches.
+    recordProbe(active, 'loop', startedAt - 3 * DAY + 7900 + 4100)
     app.active_deployment_id = active.id
     app.updated_at = active.completed_at
     app.containers = makeContainers(app, active, {
@@ -815,8 +863,13 @@ function seed() {
   }
 
   // Secrets: names and dates only. The database password was rotated once.
-  secrets.set('POSTGRES_PASSWORD', { created_at: ago(20 * DAY), updated_at: ago(6 * DAY) })
-  secrets.set('STRIPE_KEY', { created_at: ago(4 * HOUR), updated_at: ago(4 * HOUR) })
+  secrets.set(secretKey('', 'POSTGRES_PASSWORD'), { created_at: ago(20 * DAY), updated_at: ago(6 * DAY) })
+  secrets.set(secretKey('', 'STRIPE_KEY'), { created_at: ago(4 * HOUR), updated_at: ago(4 * HOUR) })
+  // From 0.9 a secret may belong to one application: web's session key, and a STRIPE_KEY of my-api's own next to the server's.
+  if (!BEFORE_09) {
+    secrets.set(secretKey('web', 'SESSION_SECRET'), { created_at: ago(30 * DAY), updated_at: ago(30 * DAY) })
+    secrets.set(secretKey('my-api', 'STRIPE_KEY'), { created_at: ago(2 * HOUR), updated_at: ago(2 * HOUR) })
+  }
 
   // A volume left behind by a deleted application, kept on purpose.
   orphanVolumes.push({ name: 'shipwick_pgtest_data', application: 'pgtest', volume: 'data', size_bytes: 13631488 })
@@ -1103,15 +1156,43 @@ function appDetail(app) {
 }
 
 // ---------------------------------------------------------------------------
+// The Cloudflare token, checked: what the agent found out, in its words
+// ---------------------------------------------------------------------------
+
+/** The result of one check at `atMs`: a token that works, or one that cannot edit the DNS records of one of its zones. */
+function cloudflareCheck(atMs) {
+  const zones = [{ name: 'example.com', dns_edit: true }, { name: 'example.net', dns_edit: CLOUDFLARE === 'ok' }]
+  const problems = CLOUDFLARE === 'ok' ? [] : ['the token cannot edit DNS records of example.net: it needs Zone → DNS → Edit (DNS Settings, DNS Firewall and DNS Views are other permissions)']
+  return { checked_at: iso(atMs), ok: problems.length === 0, address: '2001:db8:1c1b:5e07::1', zones, problems }
+}
+/** The last check's result, as GET /server carries it; the agent checks once when it starts. */
+let cloudflareStatus = CLOUDFLARE ? cloudflareCheck(startedAt - 11 * MINUTE) : null
+
+// ---------------------------------------------------------------------------
 // Certificate status: what the proxy presents for each hostname
 // ---------------------------------------------------------------------------
 
 const day = ms => iso(ms).slice(0, 10)
 
+/** What the proxy logged the last time it tried for app.example.com: Let's Encrypt could not reach port 443. */
+const CERTIFICATE_FAILURE = {
+  at: iso(startedAt - 7 * MINUTE),
+  challenge: 'tls-alpn-01',
+  reason: 'Let\'s Encrypt could not connect to the server on port 443 (tls-alpn-01): a firewall in front of it?',
+  detail: `${SERVER_ADDRESS}: Timeout during connect (likely firewall problem)`,
+}
+
 /** Hostnames that are not simply in order, so every status has one to be looked at. */
 const CERTIFICATE_STATES = {
   'example.net': () => ({ status: 'waiting_for_dns', issuer: '', not_after: null, message: `does not resolve yet; add an A record: example.net → ${SERVER_ADDRESS}${DNS_CHALLENGE ? '' : ' (DNS only, not proxied)'}` }),
-  'app.example.com': () => ({ status: 'obtaining', issuer: '', not_after: null, message: 'the proxy has no certificate for it yet; HTTPS connections to it fail until it does' }),
+  // From 0.9 the agent reads why in the proxy's log: the message ends with the reason, and `failure` carries it with the proxy's words.
+  'app.example.com': () => (BEFORE_09
+    ? { status: 'obtaining', issuer: '', not_after: null, message: 'the proxy has no certificate for it yet; HTTPS connections to it fail until it does' }
+    : { status: 'obtaining', issuer: '', not_after: null, message: `the proxy has no certificate for it yet: ${CERTIFICATE_FAILURE.reason}`, failure: CERTIFICATE_FAILURE }),
+  // A certificate that serves and cannot be renewed: the proxy's dns-01 challenge fails on the token.
+  ...(RENEWAL_FAILING
+    ? { 'api.example.com': () => ({ status: 'ok', issuer: 'Let\'s Encrypt E7', not_after: iso(startedAt + 23 * DAY), message: '', failure: { at: ago(3 * HOUR), challenge: 'dns-01', reason: 'the DNS record for the challenge could not be created: the token cannot edit DNS records of example.com: it needs Zone → DNS → Edit (DNS Settings, DNS Firewall and DNS Views are other permissions)', detail: 'could not get certificate from issuer: [api.example.com] solving challenges: presenting for challenge: adding temporary record for zone "example.com.": got error status: HTTP 403: [{Code:10000 Message:Authentication error}]' } }) }
+    : {}),
   'shop.example.com': () => ({ status: 'expiring', issuer: 'Let\'s Encrypt E7', not_after: iso(startedAt + 9 * DAY), message: `expires in 9 days, on ${day(startedAt + 9 * DAY)}` }),
 }
 
@@ -1143,8 +1224,28 @@ function hostCertificates(active) {
 // Deployment engine (simulated)
 // ---------------------------------------------------------------------------
 
-function pushDeploymentEvent(d, type, message, level = 'info') {
-  d.events.push({ id: nextEventId++, deployment_id: d.id, level, type, message, created_at: iso(Date.now()) })
+function pushDeploymentEvent(d, type, message, level = 'info', atMs = Date.now()) {
+  d.events.push({ id: nextEventId++, deployment_id: d.id, level, type, message, created_at: iso(atMs) })
+}
+
+// The agent's one look at a deployed application through the proxy, from 0.9
+// on: recorded after completed_at, the only event that comes then. The loop
+// message is the agent's (agent/internal/deploy/loop.go), the hostname and
+// the redirect the application's own.
+const probeMessage = (sp, outcome) => {
+  const address = `https://${sp.domain}${sp.path ?? ''}/`
+  if (outcome === 'loop') {
+    const back = sp.redirects?.[0] ?? `www.${sp.domain}`
+    return ['warn', `${address} sends its visitors to ${back}, which \`redirects\` sends back: every request loops. Make ${back} the \`domain\` and ${sp.domain} a redirect, or stop the application redirecting`]
+  }
+  if (outcome === 'unreachable') return ['warn', `${address} could not be asked through the proxy: dial tcp 172.18.0.2:443: connect: connection refused`]
+  return ['info', `${address} answers HTTP 200 through the proxy`]
+}
+/** Records the probe of a deployment that is complete; a few seconds after completed_at, as the real agent's comes. */
+function recordProbe(d, outcome, atMs) {
+  if (BEFORE_09 || !PROXY_ENABLED || !d.spec.domain || d.static) return
+  const [level, message] = probeMessage(d.spec, outcome)
+  pushDeploymentEvent(d, 'probe', message, level, atMs)
 }
 
 /**
@@ -1266,6 +1367,8 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null, refs = nul
     // the deployment as it is and picks it up again: nothing is started twice.
     if (tag === 'restart' && i === 1) {
       then(400, () => {
+        // An agent that stops ends every followed log with the word for it, then is away.
+        for (const name of [...followers.keys()]) endFollowers(name, 'shutdown')
         awayUntil = Date.now() + AWAY_MS
       })
       then(AWAY_MS + 200, () => pushDeploymentEvent(d, 'step', 'Resumed after the agent restarted'))
@@ -1347,6 +1450,10 @@ function startDeployment(app, sp, { kind, sourceId, by, files = null, refs = nul
   })
   then(700, () => {
     complete()
+    // The look through the proxy comes after completed_at, when a client that polls has stopped.
+    setTimeout(() => {
+      if (apps.get(app.name) === app) recordProbe(d, PROBE)
+    }, 2500).unref()
     // The deployment is over; the replica it replaced last is still on its way out.
     const grace = parseDuration(previous?.spec.deploy?.stop_timeout ?? '') ?? DEFAULT_STOP_TIMEOUT_MS
     const ignoresSigterm = tag === 'sigterm'
@@ -1461,12 +1568,16 @@ function generateLogLine(app, atMs = Date.now()) {
   for (const f of followers.get(app.name) ?? []) f.onLine(line)
 }
 
-function endFollowers(name) {
+/** Ends every stream that follows an application, with the reason the agent gives from 0.9 on: the containers are gone, or the agent is stopping. */
+function endFollowers(name, reason = 'containers') {
   const set = followers.get(name)
   if (!set) return
   followers.delete(name)
-  for (const f of set) f.onEnd()
+  for (const f of set) f.onEnd(reason)
 }
+
+/** How long a followed log stays quiet before the agent writes a heartbeat, so that nothing between the two takes it for dead. */
+const HEARTBEAT_MS = 20 * SECOND
 
 function tailLines(app, tail, perReplica) {
   // Only containers that still exist can be read, as with Docker.
@@ -2266,6 +2377,7 @@ const AUDITED = {
   'POST /applications': ['deploy'],
   'PUT /tokens/:p': ['token.update', 1],
   'GET /audit/export': ['audit.export'],
+  'POST /server/cloudflare/verify': ['cloudflare.verify'],
 }
 
 function addAudit(entry) {
@@ -2713,7 +2825,7 @@ function parseSpec(name, body, { validating = false } = {}) {
   if (!isStatic && !unbuilt && (typeof body.image !== 'string' || !IMAGE_PATTERN.test(body.image))) problem('image', 'is required', 'ghcr.io/org/app:1.0.0')
 
   // `${NAME}` in an env value or a basic-auth password is filled in from the secrets kept here; a name that is not stored refuses the whole document.
-  const missingSecrets = value => [...new Set([...String(value ?? '').matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(m => m[1]))].filter(n => !secrets.has(n)).sort()
+  const missingSecrets = value => [...new Set([...String(value ?? '').matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(m => m[1]))].filter(n => !secretResolves(name, n)).sort()
   for (const [variable, value] of Object.entries(body.env ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
     for (const secret of missingSecrets(value)) {
       problem(`env.${variable}`, `refers to \${${secret}}, which is not set where shipwick runs and not stored on the server`, `shipwick secret set ${secret}`)
@@ -3452,7 +3564,7 @@ function startImport({ source, stopped, overwrite }) {
     run.exported_at = iso(Date.now() - 12 * MINUTE)
     run.applications = names.map(name => ({ name, status: 'pending', version: deployments.get(apps.get(name).active_deployment_id).version, deployment_id: null, volumes: [], message: '' }))
     if (overwrite) Object.assign(run, { secrets: secrets.size, registries: registries.size, certificates: certificates.size })
-    else run.warnings = [...secrets.keys()].sort().map(name => `${name}: a secret by that name exists on this server and was kept; --overwrite replaces it`)
+    else run.warnings = [...secrets.keys()].map(key => key.slice(key.indexOf('/') + 1)).sort().map(name => `${name}: a secret by that name exists on this server and was kept; --overwrite replaces it`)
   })
   names.forEach((name, i) => {
     step(1200 + i * IMPORT_MS + 300, () => {
@@ -3666,6 +3778,13 @@ function managedVolumes() {
 
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 
+/** The scope of a secret as the body or the query names it: "" for the server's, else an application's name. */
+function requireSecretScope(raw) {
+  if (raw === undefined || raw === null || raw === '') return ''
+  if (typeof raw !== 'string' || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(raw)) throw new HttpError(400, 'INVALID_REQUEST', `application: ${JSON.stringify(raw)} is not an application name: lowercase letters, digits and dashes`)
+  return raw
+}
+
 function requireSecretName(name) {
   if (!SECRET_NAME.test(name ?? '')) {
     throw new HttpError(400, 'INVALID_REQUEST', `invalid secret name ${JSON.stringify(name)}: letters, digits and underscores, not starting with a digit, at most 64 characters`)
@@ -3716,7 +3835,7 @@ function updateStatus() {
   if (UPDATE === 'off') return { enabled: false, latest_version: '', checked_at: null, available: false }
   if (UPDATE === 'unknown') return { enabled: true, latest_version: '', checked_at: null, available: false }
   if (UPDATE === 'current') return { enabled: true, latest_version: VERSION, checked_at: checkedAt, available: false }
-  return { enabled: true, latest_version: BEFORE_08 ? 'v0.7.1' : 'v0.8.1', checked_at: checkedAt, available: true }
+  return { enabled: true, latest_version: BEFORE_08 ? 'v0.7.1' : BEFORE_09 ? 'v0.8.1' : 'v0.9.1', checked_at: checkedAt, available: true }
 }
 
 /** `?static=` of a deployment: the digest PUT …/static answered, or null. */
@@ -3873,6 +3992,11 @@ const ROUTES_05 = {
   'POST /standby/promote': 'admin',
 }
 
+// What 0.9 added.
+const ROUTES_09 = {
+  'POST /server/cloudflare/verify': 'admin',
+}
+
 // Every endpoint and the role it needs, the agent's own table (docs/api.md).
 // A route that is not here is ENDPOINT_NOT_FOUND, answered before the token is looked at.
 const ROUTES = {
@@ -3913,6 +4037,7 @@ const ROUTES = {
   ...(OLD_AGENT ? {} : ROUTES_05),
   ...(BEFORE_06 ? {} : ROUTES_06),
   ...(BEFORE_07 ? {} : ROUTES_07),
+  ...(BEFORE_09 ? {} : ROUTES_09),
 }
 
 /** The route a request is looked up under: names and ids replaced by :p, :x and :y. */
@@ -4034,7 +4159,7 @@ async function handle(req, res) {
         ...(BEFORE_08 ? {} : { swap_bytes: process.env.MOCK_NO_SWAP === '1' ? 0 : 2 * 1024 ** 3, ...unlimitedMemory() }),
         applications: apps.size,
         containers: [...apps.values()].reduce((n, a) => n + a.containers.filter(c => c.state === 'running').length, 0),
-        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }), ...(PLAIN_PROXY ? { plain_lookups: true } : {}) },
+        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }), ...(PLAIN_PROXY ? { plain_lookups: true } : {}), ...(PROXY_ENABLED && NETWORKS_MISSING.length > 0 ? { networks_missing: NETWORKS_MISSING } : {}) },
         token: who,
         notifications: { webhook: WEBHOOK },
         ...(OLD_AGENT ? {} : { dashboard_url: DASHBOARD_URL, alerts: activeAlerts(), disk: diskUsage(), backups: backupStatus() }),
@@ -4050,7 +4175,23 @@ async function handle(req, res) {
         // Present only when true, like proxy.plain_lookups; `docker` always, from 0.8.
         ...(OPEN_API ? { open_to_applications: true } : {}),
         ...(BEFORE_08 ? {} : { docker: { rootless: DOCKER === 'rootless' || DOCKER === 'nocgroups', unenforced_limits: UNENFORCED } }),
+        // From 0.9, and only where there is something to say: the kernel's table where the agent can read it, the token's check once it has finished.
+        ...(NEIGHBOURS > 0 ? { kernel_limits: { neighbour_table: NEIGHBOURS } } : {}),
+        ...(cloudflareStatus ? { cloudflare: cloudflareStatus } : {}),
       })
+    }
+
+    case 'POST /server/cloudflare/verify': {
+      if (!CLOUDFLARE) throw new HttpError(409, 'CLOUDFLARE_NOT_CONFIGURED', 'this agent has no Cloudflare token: set SHIPWICK_CLOUDFLARE_API_TOKEN on the agent')
+      // A check writes a DNS record in every zone: one a minute.
+      const since = Date.now() - Date.parse(cloudflareStatus.checked_at)
+      if (since < MINUTE) {
+        const retryAfter = Math.ceil((MINUTE - since) / SECOND)
+        res.setHeader('retry-after', String(retryAfter))
+        throw new HttpError(429, 'CLOUDFLARE_CHECKED_RECENTLY', `the token was checked ${Math.round(since / SECOND)}s ago; a check writes a DNS record in every zone, so the agent takes one a minute`, { checked_at: cloudflareStatus.checked_at, retry_after_seconds: retryAfter })
+      }
+      cloudflareStatus = cloudflareCheck(Date.now())
+      return sendJSON(res, 200, cloudflareStatus)
     }
 
     case 'GET /applications/:p/logs/archive': {
@@ -4891,24 +5032,29 @@ async function handle(req, res) {
     }
 
     case 'GET /secrets':
-      return sendJSON(res, 200, [...secrets.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, s]) => ({ name, ...s })))
+      // By name, the server's before the applications' of the same name, as the agent lists them.
+      return sendJSON(res, 200, [...secrets.entries()].map(secretView).sort((a, b) => a.name.localeCompare(b.name) || (a.application ?? '').localeCompare(b.application ?? '')))
 
     case 'PUT /secrets/:p': {
       requireSecretName(param)
-      const body = await readJSON(req, ['value'])
+      // An agent before 0.9 knows no scope: a body that names one is refused as unknown, which is how the CLI tells it.
+      const body = await readJSON(req, BEFORE_09 ? ['value'] : ['value', 'application'], 64 * 1024, '{"value": "..."}')
       if (typeof body.value !== 'string' || body.value === '') throw new HttpError(400, 'INVALID_REQUEST', 'value is required and must not be empty')
       if (body.value.includes('\0')) throw new HttpError(400, 'INVALID_REQUEST', 'value must not contain a NUL byte')
-      if (!secrets.has(param) && secrets.size >= 500) throw new HttpError(400, 'INVALID_REQUEST', 'at most 500 secrets can be stored; remove one first')
+      const application = requireSecretScope(body.application)
+      const key = secretKey(application, param)
+      if (!secrets.has(key) && secrets.size >= 500) throw new HttpError(400, 'INVALID_REQUEST', 'at most 500 secrets can be stored; remove one first')
       const now = iso(Date.now())
       // The value is neither kept nor echoed: only that it was set, and when.
-      secrets.set(param, { created_at: secrets.get(param)?.created_at ?? now, updated_at: now })
+      secrets.set(key, { created_at: secrets.get(key)?.created_at ?? now, updated_at: now })
       res.writeHead(204)
       return res.end()
     }
 
     case 'DELETE /secrets/:p': {
       requireSecretName(param)
-      if (!secrets.delete(param)) throw new HttpError(404, 'NOT_FOUND', 'not found')
+      const application = BEFORE_09 ? '' : requireSecretScope(url.searchParams.get('application') ?? '')
+      if (!secrets.delete(secretKey(application, param))) throw new HttpError(404, 'NOT_FOUND', 'not found')
       res.writeHead(204)
       return res.end()
     }
@@ -4984,22 +5130,53 @@ async function handle(req, res) {
       refuseStatic(app)
       const follow = boolParam(url, 'follow')
       if (app.containers.length === 0) throw new HttpError(409, 'NOT_DEPLOYED', `${app.name} has no containers`)
+      if (!follow && !BEFORE_09 && (url.searchParams.get('since') ?? '') !== '') {
+        throw new HttpError(400, 'INVALID_REQUEST', `since goes with follow=true; lines of a time are searched with GET /applications/${app.name}/logs/search?since=`)
+      }
       if (!follow) {
         return sendJSON(res, 200, tailLines(app, intParam(url, 'tail', 100, 1, 5000), false))
       }
       const tail = intParam(url, 'tail', 100, 0, 5000)
+      // `since`: every line from that time on instead of the tail, answered with the header that says it was understood. An agent before 0.9 ignores it.
+      const sinceRaw = BEFORE_09 ? '' : url.searchParams.get('since') ?? ''
+      let since = null
+      if (sinceRaw !== '') {
+        if (Number.isNaN(Date.parse(sinceRaw))) throw new HttpError(400, 'INVALID_REQUEST', 'since must be a time in RFC 3339, e.g. 2026-10-11T16:52:01Z')
+        since = new Date(sinceRaw)
+        res.setHeader('x-shipwick-log-since', since.toISOString())
+      }
       res.writeHead(200, { 'content-type': 'application/x-ndjson' })
       res.flushHeaders()
-      for (const line of tailLines(app, tail, true)) res.write(`${JSON.stringify(line)}\n`)
+      // A heartbeat after 20 s without a line; every line sent starts the interval over.
+      let heartbeat = null
+      const write = (text) => {
+        res.write(`${text}\n`)
+        if (BEFORE_09) return
+        if (heartbeat) clearTimeout(heartbeat)
+        heartbeat = setTimeout(beat, HEARTBEAT_MS)
+      }
+      const beat = () => write(JSON.stringify({ heartbeat: true, time: new Date().toISOString() }))
+      const end = (reason) => {
+        if (heartbeat) clearTimeout(heartbeat)
+        heartbeat = null
+        if (!BEFORE_09) res.write(`${JSON.stringify({ end: reason })}\n`)
+        res.end()
+      }
+      const opening = since ? tailLines(app, 5000, true).filter(line => Date.parse(line.time) >= since.getTime()) : tailLines(app, tail, true)
+      for (const line of opening) write(JSON.stringify(line))
       // Nothing is running (stopped application): there is nothing to follow.
-      if (!app.containers.some(c => c.state === 'running')) return res.end()
+      if (!app.containers.some(c => c.state === 'running')) return end('containers')
+      if (!BEFORE_09 && !heartbeat) heartbeat = setTimeout(beat, HEARTBEAT_MS)
       const follower = {
-        onLine: line => res.write(`${JSON.stringify(line)}\n`),
-        onEnd: () => res.end(),
+        onLine: line => write(JSON.stringify(line)),
+        onEnd: end,
       }
       if (!followers.has(app.name)) followers.set(app.name, new Set())
       followers.get(app.name).add(follower)
-      res.on('close', () => followers.get(app.name)?.delete(follower))
+      res.on('close', () => {
+        followers.get(app.name)?.delete(follower)
+        if (heartbeat) clearTimeout(heartbeat)
+      })
       return
     }
 
@@ -5053,7 +5230,7 @@ server.listen(PORT, HOST, () => {
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    for (const name of [...followers.keys()]) endFollowers(name)
+    for (const name of [...followers.keys()]) endFollowers(name, 'shutdown')
     server.close(() => process.exit(0))
     setTimeout(() => process.exit(0), 500).unref()
   })

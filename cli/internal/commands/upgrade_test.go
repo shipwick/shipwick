@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -129,7 +130,7 @@ func TestUpgradeReplacesTheBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade: %v\n%s", err, out)
 	}
-	assertInOrder(t, out, []string{"Upgraded shipwick v0.2.0 → v0.3.0", exe, "The server runs 1.2.3, the latest release"})
+	assertInOrder(t, out, []string{"Upgraded shipwick v0.2.0 → v0.3.0", exe, "The server runs 1.2.3, ahead of the latest release (v0.3.0)"})
 	if strings.Contains(out, "/releases/download/") {
 		t.Errorf("download URLs belong in failures only:\n%s", out)
 	}
@@ -337,5 +338,175 @@ func TestUpgradeSkipsAnUnreachableServerQuietly(t *testing.T) {
 	last := lines[len(lines)-1]
 	if !strings.Contains(last, "could not be reached") || !strings.Contains(last, "http://127.0.0.1:1") {
 		t.Errorf("expected one line about the server, got:\n%s", out)
+	}
+}
+
+func TestUpgradeVersionInstallsExactlyThatRelease(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.4.0-rc.1"
+	exe := installed(t)
+	f := upgradeAgent(t, g, exe, "v0.3.0")
+
+	out, _, err := f.run(t.TempDir(), "upgrade", "--version", "v0.4.0-rc.1")
+	if err != nil {
+		t.Fatalf("upgrade --version: %v\n%s", err, out)
+	}
+	assertInOrder(t, out, []string{"Upgraded shipwick v0.3.0 → v0.4.0-rc.1", exe, "The server runs 1.2.3."})
+	if strings.Contains(out, "latest release") {
+		t.Errorf("a pinned release is not compared with the latest:\n%s", out)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != string(g.binary) {
+		t.Errorf("the binary was not replaced, still holds %q", got)
+	}
+	if strings.Contains(strings.Join(g.requests, " "), "/releases/latest") {
+		t.Errorf("--version has no use for the latest release, asked: %v", g.requests)
+	}
+
+	// Without the "v", and going back: a choice, not a comparison.
+	exe = installed(t)
+	f = upgradeAgent(t, g, exe, "v0.5.0")
+	out, _, err = f.run(t.TempDir(), "upgrade", "--version", "0.4.0-rc.1")
+	if err != nil || !strings.Contains(out, "Installed shipwick v0.4.0-rc.1 in place of v0.5.0") {
+		t.Errorf("err = %v, out:\n%s", err, out)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != string(g.binary) {
+		t.Errorf("the binary was not replaced, still holds %q", got)
+	}
+}
+
+func TestUpgradeVersionTellsTheServerWhichReleaseToInstall(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.4.0-rc.1"
+	f := upgradeAgent(t, g, installed(t), "v0.3.0")
+	f.health = api.Health{Status: "ok", Version: "v0.3.0"}
+
+	out, _, err := f.run(t.TempDir(), "upgrade", "--version", "v0.4.0-rc.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInOrder(t, out, []string{"The server runs v0.3.0; v0.4.0-rc.1 is available. On the server run:", "curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.4.0-rc.1 sh"})
+}
+
+func TestUpgradeVersionLeavesTheSameReleaseAlone(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.4.0-rc.1"
+	f := upgradeAgent(t, g, "", "v0.4.0-rc.1")
+	f.upgrade.executable = func() (string, error) { t.Error("the release that runs need not be located"); return "", nil }
+
+	out, _, err := f.run(t.TempDir(), "upgrade", "--version", "v0.4.0-rc.1")
+	if err != nil || !strings.Contains(out, "shipwick v0.4.0-rc.1 is installed already") {
+		t.Errorf("err = %v, out:\n%s", err, out)
+	}
+	if g.downloads() != 0 {
+		t.Errorf("nothing to download, saw %v", g.requests)
+	}
+}
+
+func TestUpgradeVersionCheckOnlyReports(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.4.0-rc.1"
+	exe := installed(t)
+	f := upgradeAgent(t, g, exe, "v0.3.0")
+
+	out, _, err := f.run(t.TempDir(), "upgrade", "--version", "v0.4.0-rc.1", "--check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInOrder(t, out, []string{"shipwick v0.3.0 is installed.", "Install v0.4.0-rc.1 with: shipwick upgrade --version v0.4.0-rc.1"})
+	if g.downloads() != 0 || string(must(os.ReadFile(exe))) != "old binary v0.2.0\n" {
+		t.Errorf("--check must change nothing, saw %v", g.requests)
+	}
+}
+
+func must(b []byte, err error) []byte { return b }
+
+func TestUpgradeVersionRefusesWhatIsNotARelease(t *testing.T) {
+	g := newFakeGitHub(t)
+	for _, bad := range []string{"latest", "v0.4", "v0.4.0-rc.1/../x", "v0.8.1-3-gabcdef"} {
+		f := upgradeAgent(t, g, installed(t), "v0.3.0")
+		_, _, err := f.run(t.TempDir(), "upgrade", "--version", bad)
+		if err == nil || !strings.Contains(err.Error(), "is not a release version") {
+			t.Errorf("--version %q: err = %v", bad, err)
+		}
+	}
+	if len(g.requests) != 0 {
+		t.Errorf("nothing should be asked of GitHub for a tag that is not a version, saw %v", g.requests)
+	}
+
+	// A version that is not a release: GitHub has no files for it.
+	f := upgradeAgent(t, g, installed(t), "v0.3.0")
+	_, _, err := f.run(t.TempDir(), "upgrade", "--version", "v9.9.9")
+	if err == nil || !strings.Contains(err.Error(), "release v9.9.9 was not found") || !strings.Contains(err.Error(), "/releases") {
+		t.Errorf("err = %v, want a refusal naming the release", err)
+	}
+}
+
+func TestUpgradeVersionVerifiesThePrereleasesOwnSignature(t *testing.T) {
+	g, cosign := signedGitHub(t, "v0.9.0-rc.1"), &fakeCosign{}
+	exe := installed(t)
+	f := upgradeAgent(t, g, exe, "v0.8.1")
+	f.upgrade.cosign, f.upgrade.run = cosign.path, cosign.run
+
+	out, _, err := f.run(t.TempDir(), "upgrade", "--version", "v0.9.0-rc.1")
+	if err != nil {
+		t.Fatalf("upgrade --version: %v\n%s", err, out)
+	}
+	assertInOrder(t, out, []string{"Upgraded shipwick v0.8.1 → v0.9.0-rc.1", "Release v0.9.0-rc.1 is signed by the release workflow"})
+	if len(cosign.calls) != 1 || !slices.Contains(cosign.calls[0], signatureIdentity("v0.9.0-rc.1")) {
+		t.Errorf("cosign was run as %v, want the identity of the workflow at the pre-release's tag", cosign.calls)
+	}
+
+	// One whose signature was taken away is refused like a release.
+	g.extra = nil
+	exe = installed(t)
+	f = upgradeAgent(t, g, exe, "v0.8.1")
+	f.upgrade.cosign, f.upgrade.run = cosign.path, cosign.run
+	_, _, err = f.run(t.TempDir(), "upgrade", "--version", "v0.9.0-rc.1")
+	if err == nil || !strings.Contains(err.Error(), "release v0.9.0-rc.1 has no signature") {
+		t.Errorf("err = %v, want a refusal naming the missing signature", err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "old binary v0.2.0\n" {
+		t.Errorf("the binary must be untouched, holds %q", got)
+	}
+}
+
+func TestUpgradeVersionLeavesPackageManagersAlone(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.4.0-rc.1"
+	f := upgradeAgent(t, g, "/opt/homebrew/Cellar/shipwick/0.3.0/bin/shipwick", "v0.3.0")
+	out, _, err := f.run(t.TempDir(), "upgrade", "--version", "v0.4.0-rc.1")
+	if err != nil || !strings.Contains(out, "was installed with Homebrew and is left to it") || !strings.Contains(out, "/releases/tag/v0.4.0-rc.1") {
+		t.Errorf("err = %v, out:\n%s", err, out)
+	}
+	if g.downloads() != 0 {
+		t.Errorf("a package manager's binary must not be replaced, saw %v", g.requests)
+	}
+}
+
+func TestAPrereleaseAheadOfTheLatestReleaseIsCurrent(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.8.1"
+	f := upgradeAgent(t, g, installed(t), "v0.9.0-rc.1")
+	out, _, err := f.run(t.TempDir(), "upgrade")
+	if err != nil || !strings.Contains(out, "shipwick v0.9.0-rc.1 is up to date") || g.downloads() != 0 {
+		t.Errorf("err = %v, out:\n%s", err, out)
+	}
+	out, _, err = f.run(t.TempDir(), "upgrade", "--check")
+	if err != nil || strings.Contains(out, "is available") {
+		t.Errorf("--check must not offer the release a pre-release precedes; err = %v, out:\n%s", err, out)
+	}
+}
+
+func TestABuildPastATagIsADevelopmentBuild(t *testing.T) {
+	g := newFakeGitHub(t)
+	g.tag = "v0.8.1"
+	exe := installed(t)
+	f := upgradeAgent(t, g, exe, "v0.8.1-3-gabcdef")
+	out, _, err := f.run(t.TempDir(), "upgrade")
+	if err != nil || !strings.Contains(out, "This shipwick is a development build (v0.8.1-3-gabcdef); the latest release is v0.8.1") {
+		t.Errorf("err = %v, out:\n%s", err, out)
+	}
+	if g.downloads() != 0 || string(must(os.ReadFile(exe))) != "old binary v0.2.0\n" {
+		t.Errorf("a build made after the tag must not be replaced by the tag, saw %v", g.requests)
 	}
 }

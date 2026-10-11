@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ApplicationConfig, Deployment, Validation } from '~/types/api'
 import { AgentError, toAgentError } from '~/utils/agentError'
-import { EXAMPLE_DOCUMENT, cliOnlyReason, describesStatic, inspectDocument, keptPlain, keysNewerThanAgent, maskedLabel, maskedSecretName, maskedVariable, remainingMasks } from '~/utils/deployDocument'
+import { EXAMPLE_DOCUMENT, cliOnlyReason, describesStatic, inspectDocument, keptPlain, keysNewerThanAgent, maskedByEdit, maskedLabel, maskedSecretName, maskedVariable, remainingMasks } from '~/utils/deployDocument'
 import { pluralize } from '~/utils/format'
 import { missingSecrets } from '~/utils/secrets'
 import { wantedServer } from '~/utils/servers'
@@ -96,6 +96,14 @@ const body = computed(() => ({ content: text.value, type: 'application/yaml' }))
 const staticDigest = computed(() => (config.value?.static_digest && describesStatic(text.value) ? config.value.static_digest : undefined))
 /** The values the agent handed out as they are and the document still holds unchanged: the deployment says so, or the agent masks them from now on. */
 const plain = computed(() => (config.value ? keptPlain(text.value, config.value.document, config.value.plain ?? []).join(',') : '') || undefined)
+/** The handed-out values changed here, which the agent masks from this deployment on: said before it, next to the editor. */
+const masking = computed(() => (config.value ? maskedByEdit(text.value, config.value.document, config.value.plain ?? []) : []))
+/**
+ * The application a missing secret is for: the one the page was opened for,
+ * or the one the document names. The Secrets page then offers that scope, the
+ * one the handbook recommends for what an application owns.
+ */
+const secretScope = computed(() => target.value || inspection.value.name)
 
 /** Sends the document as it is; to an agent that has no such endpoint, under the name read out of it. */
 async function send<T>(nameless: string, named: string, query?: Record<string, string | undefined>): Promise<T> {
@@ -222,7 +230,7 @@ const crumbs = computed(() => (target.value
                 <span v-if="stillMasked.has(mask.field)" class="text-xs text-warn">still "********"</span>
                 <span v-else class="inline-flex items-center gap-1 text-xs text-ok"><UiIcon name="check" :size="12" />replaced</span>
                 <NuxtLink
-                  :to="{ path: '/settings/secrets', query: { name: mask.secret } }"
+                  :to="{ path: '/settings/secrets', query: { name: mask.secret, application: secretScope || undefined } }"
                   target="_blank"
                   class="link text-xs text-fg-muted"
                   :aria-label="`Store as a secret: ${mask.label} (opens in a new tab)`"
@@ -274,6 +282,19 @@ const crumbs = computed(() => (target.value
             <p v-else-if="legacy && !configLoading" class="text-fg-muted">
               This server's agent is older than 0.7: the document is sent under the name on its <span class="mono text-fg">name:</span> line<template v-if="inspection.name">, <span class="mono text-fg">{{ inspection.name }}</span></template>.
             </p>
+            <!-- Said before the deployment: a value changed here is a secret to the agent from then on. -->
+            <p v-if="masking.length > 0" class="flex items-start gap-2 text-fg-muted" role="status">
+              <UiIcon name="lock" :size="14" class="mt-px shrink-0" />
+              <span class="min-w-0 break-words">
+                <template v-for="(variable, index) in masking" :key="variable">
+                  <template v-if="index > 0">
+                    {{ index === masking.length - 1 ? ' and ' : ', ' }}
+                  </template>
+                  <span class="mono text-fg">{{ variable }}</span>
+                </template>
+                {{ masking.length === 1 ? 'was changed here and is' : 'were changed here and are' }} shown as <span class="mono text-fg">"********"</span> from this deployment on, until <span class="mono text-fg">shipwick deploy</span> sends the file from the project again.
+              </span>
+            </p>
           </div>
 
           <!-- The agent's verdict: every field it refused, each with what it expects. -->
@@ -305,7 +326,7 @@ const crumbs = computed(() => (target.value
                 <template v-if="index > 0">
                   {{ index === secrets.length - 1 ? ' and ' : ', ' }}
                 </template>
-                <NuxtLink :to="{ path: '/settings/secrets', query: { name } }" target="_blank" class="mono link font-medium">{{ name }}</NuxtLink>
+                <NuxtLink :to="{ path: '/settings/secrets', query: { name, application: secretScope || undefined } }" target="_blank" class="mono link font-medium">{{ name }}</NuxtLink>
               </template>
               on the Secrets page (it opens in a new tab, so this document stays), then deploy again. An admin token can add {{ secrets.length === 1 ? 'it' : 'them' }}.
             </p>

@@ -256,7 +256,7 @@ func TestTheProxyBlockSwitchesWhenTheNewVersionTakesTraffic(t *testing.T) {
 func TestDeployFillsABasicAuthPasswordFromTheStoredSecrets(t *testing.T) {
 	s, p := newRouted(t)
 	ctx := context.Background()
-	s.store.SetSecret(ctx, "ADMIN_PASSWORD", "correct horse", time.Now())
+	s.store.SetSecret(ctx, "", "ADMIN_PASSWORD", "correct horse", time.Now())
 
 	a := on(app("api", "api:1.0", 1), "example.com", "")
 	a.Proxy = &spec.Proxy{BasicAuth: []spec.BasicAuth{
@@ -313,14 +313,14 @@ func TestDeployRefusesABasicAuthPasswordNoSecretAnswers(t *testing.T) {
 
 	// A stored value that cannot be a password is refused too, without
 	// being repeated.
-	s.store.SetSecret(ctx, "API_KEY", "k-1", time.Now())
-	s.store.SetSecret(ctx, "ADMIN_PASSWORD", "tiny-pw", time.Now())
+	s.store.SetSecret(ctx, "", "API_KEY", "k-1", time.Now())
+	s.store.SetSecret(ctx, "", "ADMIN_PASSWORD", "tiny-pw", time.Now())
 	_, err = s.engine.Deploy(ctx, a)
 	var unusable *UnusableSecretError
 	if !errors.As(err, &unusable) {
 		t.Fatalf("err = %v, want UnusableSecretError", err)
 	}
-	if f := unusable.Fields(); len(f) != 1 || f[0].Field != "proxy.basic_auth[0].password" || !strings.Contains(f[0].Message, "${ADMIN_PASSWORD}") || !strings.Contains(f[0].Message, "too short") {
+	if f := unusable.Fields(); len(f) != 1 || f[0].Field != "proxy.basic_auth[0].password" || !strings.Contains(f[0].Message, "${ADMIN_PASSWORD}") || !strings.Contains(f[0].Message, "too short") || f[0].Expected != "shipwick secret set ADMIN_PASSWORD" {
 		t.Errorf("fields = %+v", f)
 	}
 	if strings.Contains(err.Error(), "tiny-pw") || strings.Contains(err.Error(), "k-1") {
@@ -330,7 +330,7 @@ func TestDeployRefusesABasicAuthPasswordNoSecretAnswers(t *testing.T) {
 		t.Errorf("a refused deployment must leave no record, got %d", len(list))
 	}
 
-	s.store.SetSecret(ctx, "ADMIN_PASSWORD", "long enough", time.Now())
+	s.store.SetSecret(ctx, "", "ADMIN_PASSWORD", "long enough", time.Now())
 	if d := s.deploy(a); d.Status != api.StatusActive {
 		t.Errorf("after storing a usable password: %s (%s)", d.Status, d.Error)
 	}
@@ -338,7 +338,7 @@ func TestDeployRefusesABasicAuthPasswordNoSecretAnswers(t *testing.T) {
 
 func TestAStaticApplicationsPasswordIsFilledInToo(t *testing.T) {
 	s, p := newStaticHarness(t)
-	s.store.SetSecret(context.Background(), "SITE_PASSWORD", "correct horse", time.Now())
+	s.store.SetSecret(context.Background(), "", "SITE_PASSWORD", "correct horse", time.Now())
 	a := site("web")
 	a.Proxy = &spec.Proxy{BasicAuth: []spec.BasicAuth{{Username: "preview", Password: "${SITE_PASSWORD}"}}}
 	if d := s.deployStatic(a, map[string]string{"index.html": "v1"}); d.Status != api.StatusActive {

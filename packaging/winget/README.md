@@ -8,13 +8,17 @@ winget install Shipwick.Shipwick
 
 `update-manifests.sh` writes the manifests for a release into
 `manifests/s/Shipwick/Shipwick/<version>/`, the layout of
-[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). The
-checksums come from the release's `checksums.txt`; nothing is typed by hand.
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs), in the
+schema version its pull request template asks for (1.12.0). The checksums
+come from the release's `checksums.txt` and the date from the release's
+publication; nothing is typed by hand. On Windows the script ends with
+`winget validate`, the check the repository's automation runs first;
+elsewhere it says so and leaves the check to a Windows machine.
 
 ```sh
 sh packaging/winget/update-manifests.sh            # the latest release
 sh packaging/winget/update-manifests.sh v0.2.0     # a specific one
-winget validate packaging/winget/manifests/s/Shipwick/Shipwick/0.2.0
+winget validate --manifest packaging/winget/manifests/s/Shipwick/Shipwick/0.2.0
 ```
 
 ## Publishing a version

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -159,15 +158,21 @@ func (r *report) finish() error {
 }
 
 // release reports where a version stands against the latest release. The
-// lookup may have failed; that is one word on the line, not an error.
+// lookup may have failed; that is one word on the line, not an error. A
+// development build — "dev", or a build past a tag — is not behind anything,
+// and a pre-release ahead of the latest release was installed on purpose.
 func (r *report) release(what, current, latest, upgrade string) {
 	switch {
 	case latest == "":
 		r.ok("%s %s (could not check for a newer release)", what, current)
+	case !parses(current) && what == "shipwick":
+		r.ok("This shipwick is a development build (%s); the latest release is %s", current, latest)
 	case !parses(current):
-		r.ok("%s %s, a development build; the latest release is %s", what, current, latest)
+		r.ok("%s a development build (%s); the latest release is %s", what, current, latest)
 	case version.Compare(current, latest) < 0:
 		r.hint("%s %s; %s is available. Upgrade with: %s", what, current, latest, upgrade)
+	case version.Compare(current, latest) > 0:
+		r.ok("%s %s, ahead of the latest release (%s)", what, current, latest)
 	default:
 		r.ok("%s %s, the latest release", what, current)
 	}
@@ -190,10 +195,11 @@ func (c *cli) doctor(ctx context.Context) error {
 		r.problem("%s", err)
 		return r.finish()
 	}
-	health, err := cl.Health(ctx)
+	healthCtx, cancelHealth := context.WithTimeout(ctx, healthTimeout)
+	health, err := cl.Health(healthCtx)
+	cancelHealth()
 	if err != nil {
-		r.problem("The agent at %s cannot be reached: %s. Is it running? A remote server is reached over HTTPS at its hostname, or through a tunnel: ssh -L 9000:127.0.0.1:9000 user@server",
-			c.describeServer(cl.URL()), cause(err))
+		r.problem("%s", unreachableAgent(c.describeServer(cl.URL()), cl.URL(), err, healthTimeout))
 		return r.finish()
 	}
 	r.release("Agent "+c.describeServer(cl.URL())+" runs", health.Version, latest, installerCommand+" (on the server)")
@@ -233,6 +239,7 @@ func (c *cli) doctor(ctx context.Context) error {
 	}
 	r.alerts(info.Alerts)
 	r.memory(info)
+	r.wiring(info)
 	r.reach(info)
 	r.limits(info)
 	r.dnsChallenge = info.Proxy.DNSChallenge
@@ -248,12 +255,7 @@ func (c *cli) doctor(ctx context.Context) error {
 		if len(serverAddrs) == 0 {
 			break
 		}
-		address := net.JoinHostPort(serverAddrs[0], strconv.Itoa(port))
-		if err := local.dial(ctx, address); err != nil {
-			r.problem("Port %d is not reachable on %s: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443", port, serverAddrs[0])
-			continue
-		}
-		r.ok("Port %d open on %s", port, serverAddrs[0])
+		probePort(ctx, local, r, serverAddrs[0], port)
 	}
 
 	apps, err := cl.Applications(ctx)
@@ -284,6 +286,7 @@ func (c *cli) doctor(ctx context.Context) error {
 			c.checkHTTPS(ctx, r, local, app)
 		}
 	}
+	c.cloudflareChecks(ctx, r, cl, info, apps)
 	return r.finish()
 }
 
@@ -314,7 +317,7 @@ func (c *cli) serverAddresses(ctx context.Context, r *report, local localOptions
 		// dialled or compared through them.
 		r.behindCloudflare(host, addrs)
 		if r.dnsChallenge {
-			r.hint("The server's own address is not known behind Cloudflare's proxy: ports 80 and 443 and the records' targets are not checked")
+			r.hint("Behind Cloudflare only: ports and record targets are not checked from outside")
 		}
 		return nil
 	}
@@ -376,6 +379,7 @@ func (c *cli) checkHTTPS(ctx context.Context, r *report, local localOptions, app
 		r.hint("%s answers HTTP %d: the proxy is up, but %s is not answering behind it. Look at: shipwick logs %s", address, resp.StatusCode, app.Name, app.Name)
 	case resp.StatusCode >= 500:
 		r.hint("%s answers HTTP %d. Look at: shipwick logs %s", address, resp.StatusCode, app.Name)
+	case r.redirectLoop(address, resp, app):
 	default:
 		r.ok("%s answers HTTP %d", address, resp.StatusCode)
 	}

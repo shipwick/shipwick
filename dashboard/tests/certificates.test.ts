@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  certificateFailureLine,
   certificateHostnameProblem,
   certificateRemovalConsequence,
   chainProblem,
@@ -125,5 +126,31 @@ describe('certificateRemovalConsequence', () => {
   it('warns that a wildcard is no longer served without a DNS challenge, and only then', () => {
     expect(certificateRemovalConsequence({ subjects: ['*.example.com'] }, false)).toContain('no longer served')
     expect(certificateRemovalConsequence({ subjects: ['*.example.com'] }, true)).not.toContain('no longer served')
+  })
+})
+
+describe('a certificate the proxy could not obtain or renew', () => {
+  const failure = {
+    at: '2026-10-11T14:00:12.5Z',
+    challenge: 'tls-alpn-01',
+    reason: 'Let\'s Encrypt could not connect to the server on port 443 (tls-alpn-01): a firewall in front of it?',
+    detail: '203.0.113.10: Timeout during connect (likely firewall problem)',
+  }
+
+  it('marks a certificate that is ok and has a failure as a renewal that is failing', () => {
+    expect(hostnameCertificateDisplay({ status: 'ok', message: '', failure })).toEqual({ tone: 'warn', label: 'Renewal failing' })
+    expect(hostnameCertificateDisplay({ status: 'ok', message: '' })).toBeNull()
+    expect(hostnameCertificateDisplay({ status: 'obtaining', message: 'the proxy has no certificate for it yet: …', failure })).toEqual({ tone: 'warn', label: 'Obtaining certificate' })
+  })
+
+  it('gives the reason, the proxy\'s words when they add something, and when', () => {
+    expect(certificateFailureLine({ status: 'obtaining', failure })).toEqual({ reason: failure.reason, detail: failure.detail, at: failure.at, renewal: false })
+    expect(certificateFailureLine({ status: 'ok', failure })?.renewal).toBe(true)
+    expect(certificateFailureLine({ status: 'expiring', failure: { ...failure, detail: failure.reason } })).toMatchObject({ detail: '', renewal: true })
+  })
+
+  it('is nothing without a failure: an agent before 0.9 reads none, and that is no claim', () => {
+    expect(certificateFailureLine({ status: 'obtaining' })).toBeNull()
+    expect(certificateFailureLine({ status: 'ok', failure: undefined })).toBeNull()
   })
 })

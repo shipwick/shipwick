@@ -44,3 +44,22 @@ func TestParseRejectsWhatIsNotAVersion(t *testing.T) {
 		t.Errorf("Parse = %+v, %v", v, ok)
 	}
 }
+
+func TestParseTellsABuildAfterATagFromARelease(t *testing.T) {
+	// What `git describe --tags --always --dirty` says of a working tree
+	// that is not exactly at a tag: not a version, like "dev".
+	for _, s := range []string{"v0.8.1-3-gabcdef", "v0.8.1-12-g1a2b3c4d", "v0.8.1-3-gabcdef-dirty", "v0.8.1-dirty", "v0.8.1-rc.1-2-gabcdef"} {
+		if v, ok := Parse(s); ok {
+			t.Errorf("Parse(%q) = %+v, want a development build", s, v)
+		}
+		if Compare(s, "v0.8.1") != -1 || Compare(s, "dev") != 0 {
+			t.Errorf("%q should sort as a build that is not a version", s)
+		}
+	}
+	// Pre-releases that merely look alike stay versions.
+	for _, s := range []string{"v0.9.0-rc.1", "v0.9.0-3", "v0.9.0-gabcdef", "v0.9.0-3-grc", "v0.9.0-beta-dirty.1"} {
+		if _, ok := Parse(s); !ok {
+			t.Errorf("Parse(%q) rejected a pre-release", s)
+		}
+	}
+}

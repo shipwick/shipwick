@@ -55,6 +55,36 @@ func (r *Runtime) ReadLogs(ctx context.Context, id string, w LogWindow, emit fun
 	return nil
 }
 
+// FollowLogsSince is FollowLogs from a time instead of from the last lines:
+// every line logged at or after `since`, the daemon's own comparison, then
+// everything that follows until the container's log ends or ctx is
+// cancelled. It is how a client that lost a followed stream takes it up
+// where it left off.
+func (r *Runtime) FollowLogsSince(ctx context.Context, id string, since time.Time, emit func(LogEntry)) error {
+	rc, err := r.cli.ContainerLogs(ctx, id, client.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: true,
+		Follow:     true,
+		Tail:       "all",
+		Since:      sinceParam(since),
+	})
+	if err != nil {
+		return fmt.Errorf("follow logs: %w", wrapNotFound(err))
+	}
+	defer rc.Close()
+
+	stdout := &lineWriter{stream: "stdout", emit: emit}
+	stderr := &lineWriter{stream: "stderr", emit: emit}
+	_, err = stdcopy.StdCopy(stdout, stderr, rc)
+	stdout.flush()
+	stderr.flush()
+	if err != nil && ctx.Err() == nil {
+		return fmt.Errorf("follow logs: %w", err)
+	}
+	return nil
+}
+
 // finishedAt parses State.FinishedAt, which is the zero time for a container
 // that never stopped.
 func finishedAt(s string) *time.Time {

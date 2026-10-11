@@ -8,6 +8,228 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **`shipwick server configure <user@host> KEY=value …`** changes the
+  agent's settings in `/opt/shipwick/.env` over SSH, from your machine: each
+  `KEY=value` sets or replaces its line, `KEY=` or `--unset KEY` removes it,
+  then `docker compose up -d` runs on the server and the agent is waited for
+  as the installer waits. Names must be settings the agent reads, values
+  pass the installer's checks in the installer's words, and they travel to
+  the server as data on a fixed script's standard input — never as part of
+  a command, never printed. The file keeps its mode; the token in it is not
+  touched. The command ends with what changed, by name, and is quiet about
+  a restart when nothing would change.
+- `shipwick server install` says what an ssh failure means and what to do:
+  a server that does not know the key ssh offered — the key's file and
+  fingerprint are named, from one more run of ssh with `-v`, with the three
+  ways to put a key on a server nothing of yours gets into (select it when
+  the server is created, the provider's console or rescue system, the
+  provider's key install), and `ssh-copy-id` where the server also takes a
+  password; a host key that changed, with the `ssh-keygen -R` line; a
+  connection refused (SSH still starting, or on another port); a connection
+  that times out (wrong address, another port, or a firewall that admits
+  SSH from certain addresses only); a name that does not resolve.
+- After the installer has finished, `shipwick server install` probes ports
+  80 and 443 at the server's address from where it runs and says what it
+  found: open, refused (nothing listens), or silent — which on a server
+  that was just created is the provider's firewall (Hetzner Cloud Firewall,
+  an AWS security group, …) and the ports to open there, 80 and 443 TCP and
+  443 UDP, before any certificate can be obtained.
+- The installer's summary and `shipwick server install` say how to sign in
+  to the dashboard: with a token of its own, `shipwick token create
+  dashboard --role admin`, and not the root token from `.env`.
+- The handbook's *Preparing a server* begins with what has to be right at
+  the provider before the first command: the SSH key selected when the
+  server is created, and a firewall in front of the server that admits 80
+  and 443 TCP and 443 UDP.
+- **Dashboard: secrets have a scope.** The Secrets page shows whether a
+  secret is the server's or one application's, stores one for either, and
+  says when a value holds a character a URL cannot carry as it is.
+- **Dashboard: the look through the proxy after a deployment** is shown on
+  the deployment's page and, while that deployment runs, on the
+  application's overview: a redirect loop as a warning, an answer as a line.
+- **Dashboard: the server's page says what the agent found.** The proxy's
+  missing networks with the command that puts it back, the kernel's table of
+  neighbours next to the count of containers, and the Cloudflare token's
+  check with *Check again*.
+- **Dashboard: a certificate that cannot be obtained or renewed says why**,
+  in the proxy's words, under its hostname.
+
+### Changed
+
+- `shipwick doctor` tells a port that times out from one that refuses, and
+  names the provider's firewall for the timeout. When the agent itself does
+  not answer, it tells a timeout (ten seconds, with the same firewall
+  sentence) from a refusal (nothing listens) from a TLS handshake that
+  failed (no certificate for the hostname yet, and where Caddy says why),
+  instead of "cannot be reached … Is it running?" for all three.
+- **A redirect loop is caught after the deployment.** An application that
+  sends its domain to `www` while `redirects` sends `www` back passed every
+  check and served nobody. Once a deployment is complete, the agent asks the
+  application its own hostname once through the proxy and records what it
+  found as a `probe` event; a redirect to a hostname of `redirects` is a
+  warning that says what to swap, printed by `shipwick deploy` under its
+  summary and shown by `shipwick status`. `shipwick doctor` makes the same
+  judgement from outside.
+- **The proxy's networks are checked.** A proxy container that came back on
+  some of its three networks after a refused start serves some applications
+  and not others; the agent now says which networks are missing — in its
+  log, in `GET /server` (`proxy.networks_missing`), in `shipwick server
+  status` and in `shipwick doctor`, with the command that makes the
+  container again.
+- **A server near the kernel's table of neighbours is said.** `GET /server`
+  carries `kernel_limits.neighbour_table` where the agent can read
+  `net.ipv4.neigh.default.gc_thresh3` (as a process of the host; a container
+  cannot see it), and `shipwick doctor` warns from a quarter of the table
+  on. The handbook's *Preparing a server* names the setting.
+- The handbook's *Who can reach the API* says what was measured: on Docker
+  before 28 no arrangement keeps a published API port off the application
+  network, so the installer publishes none and the development compose file
+  says that its port is open to applications there by design.
+- **Secrets of one application.** `shipwick secret set NAME --app api`
+  stores a secret that only `api`'s `${NAME}` resolves to, before a
+  server-wide secret of the same name; without `--app` the secret is the
+  server's, which every application without one of its own falls back to, as
+  every secret was before. Two applications can each have a
+  `DATABASE_PASSWORD`, and one registry token can serve them all. `secret ls`
+  shows the scope of each; `secret rm NAME` removes the server's and says
+  which applications keep their own, `secret rm NAME --app api` removes
+  `api`'s. The deployment's references record which scope answered, so a
+  rollback and `shipwick config` behave as they did. The API carries the
+  scope as `application` in the body of `PUT /secrets/:name`, as a query
+  parameter of `DELETE /secrets/:name` and in every entry of `GET /secrets`;
+  an older CLI keeps working against the new agent, and the new CLI says in
+  words when an agent before 0.9 keeps no secrets per application. The
+  database upgrade (migration 22) keeps every existing secret as the
+  server's.
+- `shipwick secret set` warns, and stores the value all the same, when it
+  holds `@`, `:`, `/`, `?`, `#`, `%` or whitespace — the characters a URL
+  cannot carry unescaped, which break a connection string the secret is
+  written into. The warning names the characters, never the value; the
+  handbook says which characters are safe and how to make a password that
+  is.
+- **Docker's authorization plugin as a boundary.** `configs/docker-authz.rego`
+  is a policy for opa-docker-authz that refuses, for every client of the
+  daemon, what the socket proxy lets through: a privileged container, a
+  directory of the server mounted, the server's namespaces, capabilities
+  beyond Docker's default set, devices, a privileged `exec`, a volume made of
+  a directory, Swarm and plugins — and a request whose body the plugin was
+  not given, which is how a privileged container got past the plugin alone.
+  `scripts/test-docker-authz.sh` installs the plugin in a daemon of its own,
+  runs everything an installation does through it and tries each refusal.
+  The handbook's *Less than the whole socket* says how to install it, what
+  it adds and what it costs.
+- `scripts/test-package.sh` installs the `.deb` and the `.rpm` built from the
+  checkout on Debian and Rocky Linux, in a Docker daemon of their own, starts
+  the agent with the unit's environment and the proxy from the package's
+  compose file, and runs everything an installation does through them. The
+  handbook's *Installation from a package* says what SELinux enforcing is
+  expected to deny and what to do about it, as reasoned and not run.
+- **An export names the keys it uses**, and an agent that does not know one
+  of them refuses the import before anything is taken in, naming the key and
+  the version that wrote the export, instead of deploying the application
+  without it. Every export written before 0.9 is still read. An agent older
+  than 0.9 keeps dropping what it does not know; the handbook says what each
+  loses.
+- **The Cloudflare token is checked.** With `SHIPWICK_CLOUDFLARE_API_TOKEN`
+  set, the agent verifies when it starts — and `shipwick doctor` on request —
+  that Cloudflare accepts the token from the address the server really calls
+  from, which zones it sees, and that it can create a DNS record in each
+  (a TXT record of its own, removed at once: the only sure test of *Zone →
+  DNS → Edit*). The result is one line in the agent's log, `cloudflare` in
+  `GET /server`, and lines in `doctor` that say what to change: the IP filter
+  that must name the server's IPv6 address, the *DNS → Edit* permission that
+  *DNS Settings*, *DNS Firewall* and *DNS Views* are not, the zone a hostname
+  is served from and the token does not see. The installer prints them once
+  the agent is up. API: `POST /server/cloudflare/verify` (admin, at most once
+  a minute, recorded as `cloudflare.verify`); two new codes,
+  `CLOUDFLARE_NOT_CONFIGURED` and `CLOUDFLARE_CHECKED_RECENTLY`.
+- **A certificate that cannot be obtained says why.** The agent reads the
+  proxy's own log, as it reads its access log, and the last failure for each
+  hostname — which challenge, what the authority answered — is in `shipwick
+  status` next to *being obtained*, in the application's events once per
+  reason, in `GET /applications/:name` (`certificates[].failure`) and in
+  `shipwick doctor` as a problem: *Let's Encrypt could not connect to the
+  server on port 443 (tls-alpn-01): a firewall in front of it?*, *the DNS
+  record for the challenge could not be created: the token cannot edit DNS
+  records of example.com: it needs Zone → DNS → Edit*. A renewal that fails
+  while the certificate still serves is said the same way.
+- Handbook §11, *Behind Cloudflare only*: a server whose firewall admits
+  Cloudflare's addresses alone — what it takes, what `doctor` can and cannot
+  see from outside, and what does not pass through Cloudflare's proxy.
+- `shipwick doctor` behind Cloudflare's proxy says `Behind Cloudflare only:
+  ports and record targets are not checked from outside` in place of `The
+  server's own address is not known behind Cloudflare's proxy: …`.
+- **Dashboard: a followed log that is cut, or ended by an agent restarting
+  for an upgrade, is taken up where it stopped**, without a line lost or
+  repeated; a stream with no line and no sign of life for 45 seconds is
+  marked stale.
+- **Dashboard: the configuration editor names the values it masks** from the
+  deployment on, next to the document, before the deployment is sent.
+
+### Fixed
+
+- **A supervision pass asks Docker for its containers once**, whatever the
+  number of applications; it asked three times a second and once more for
+  every application, which from about a hundred applications on two
+  processors no longer fit in its second. Measured at 2 CPUs and 4 GB
+  (`scripts/measure-limits.sh apps`), the server idled at 57% of one
+  processor with 50 applications of two replicas and at 103% with 100; it
+  idles at 14% and 29%. A replica the list predates is asked about by ID
+  before anything is concluded.
+- **Hostnames are looked up eight at a time**, each under its own three-second
+  bound, instead of one after the other in the path of every rollout and of
+  the supervisor's pass: with a resolver that took 180 ms and 200 hostnames, a
+  rolling deployment took 57 s. A hostname that is being served still stays
+  when the resolver is silent.
+- **The CLI installs on Windows with one line**, `irm
+  https://get.shipwick.com/windows | iex`, the counterpart of the Unix
+  installer: it downloads the release's build for the machine (x64 or
+  Arm64), verifies it against the release's `checksums.txt` — and the
+  checksums against the release's signature where cosign is installed — puts
+  it in `%LOCALAPPDATA%\Programs\shipwick` and adds that directory to your
+  `PATH`, once. `SHIPWICK_VERSION` picks a release; run from a file,
+  `-Version` and `-Destination` do. `scripts/install.ps1` is a file of every
+  release from now on. Downloading the `.exe` and putting it on the `PATH`
+  by hand was the way until now.
+- `shipwick upgrade --version <tag>` installs exactly that release, a
+  pre-release included, in place of whatever runs now, with the same checksum
+  and signature verification: the way to try a release candidate, and the
+  way back from one. The server is then compared with that release. A
+  pre-release ahead of the latest release counts as current afterwards:
+  `upgrade --check` and `doctor` no longer offer the release it precedes.
+- A `shipwick` built past a tag (`shipwick --version` reads
+  `v0.8.1-3-gabcdef`, as `git describe` names it) was taken for a pre-release
+  of that tag: `doctor` said that `v0.8.1` was available and `upgrade` would
+  have replaced the build with it. Such a build is a development build, and
+  `doctor` says so now, the way `upgrade` does; an agent built the same way
+  no longer reports the release it was built past as an update. `doctor` and
+  `upgrade` also say "ahead of the latest release" instead of "the latest
+  release" for a version newer than the one GitHub calls latest.
+- The handbook, the installer and `shipwick upgrade` said that cosign 2.4
+  reads the release's signature. It does not: cosign 2.4.1 answers "bundle
+  does not contain cert for verification" to the bundle the release workflow
+  writes; 2.5.0 and later read it. The texts say 2.5 now.
+- **A followed log survives a proxy's idle limit.** `shipwick logs -f`
+  through Cloudflare's proxy ended after a minute of a quiet application with
+  `log stream interrupted: stream error: INTERNAL_ERROR`: Cloudflare closes a
+  response that has carried no bytes for 100 seconds. The agent now writes a
+  heartbeat line, `{"heartbeat":true,"time":…}`, into a followed log every 20
+  seconds it carries nothing else (`GET …/logs?follow=true`; the dashboard
+  already ignores it, a CLI before 0.9 prints an empty line for it). And the
+  CLI takes a lost stream up where it left off: the follow endpoint accepts
+  `since=<RFC 3339>` and begins with every line from that time, its answer
+  says so with `X-Shipwick-Log-Since`, and `logs -f` reconnects after a
+  second with the time of the last line or heartbeat it saw, prints nothing
+  twice, says `Reconnected; nothing was missed.` on standard error (or which
+  minutes may be missing, against an older agent), gives up after five
+  losses in a row that brought nothing, and still ends at once on Ctrl-C. A
+  stream the agent ends now says why in a last line — `{"end":"containers"}`
+  after a deployment, `{"end":"shutdown"}` before a restart — so that
+  `logs -f` follows the agent through a restart or an upgrade instead of
+  stopping with "the containers were stopped or replaced".
+
 ## [0.8.1] - 2026-10-11
 
 ### Fixed

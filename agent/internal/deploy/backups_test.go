@@ -612,7 +612,8 @@ func TestVerifyRestoresIntoAScratchContainerAndHoldsItToTheHealthCheck(t *testin
 		scratch = h.rt.ScratchVolumes()
 		// The supervisor comes by while the verification runs.
 		app, _ := h.store.GetApplication(ctx, "db")
-		h.engine.sup.superviseApp(ctx, time.Now(), app)
+		containers, _ := h.rt.ListContainers(ctx, "")
+		h.engine.sup.superviseApp(ctx, time.Now(), app, newContainerSnapshot(containers))
 	})
 	a.Publish = []spec.Publish{{Port: 5432, Host: 15432, Protocol: "tcp"}}
 	h.deploy(a)

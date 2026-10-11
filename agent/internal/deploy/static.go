@@ -240,11 +240,13 @@ func (e *Engine) DeployStatic(ctx context.Context, app spec.App, digest string) 
 		}
 		// A static application has no env, but its proxy block may hold
 		// passwords left for the server to fill in.
-		resolved, err := e.resolveSecrets(ctx, app)
+		resolved, scoped, err := e.resolveSecrets(ctx, app)
 		if err != nil {
 			return origin{}, err
 		}
-		return origin{spec: resolved, kind: api.KindDeploy, static: &files, references: spec.ReferencesOf(app)}, nil
+		references := spec.ReferencesOf(app)
+		references.Scoped = scoped
+		return origin{spec: resolved, kind: api.KindDeploy, static: &files, references: references.For(app)}, nil
 	})
 }
 

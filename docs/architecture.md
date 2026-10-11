@@ -495,6 +495,30 @@ reconciliation completes the active version once it can record the replicas
 it creates. Running replicas are restarted throughout, because a restart
 needs no row.
 
+The case where that hurts is a rollout that fails half-way while the disk is
+full: a replica of the old version has been retired, the rollback cannot
+begin because its first step is a write, and the old version runs short of
+the replica until there is room
+(`TestARolloutThatFailsHalfWayWhileTheDatabaseRefusesWrites…` in
+`faults_rollback_test.go`). The missing replicas cannot be put back without a
+write, although the active record they would be created from is on disk and
+readable, because the replica row — not the container — is what everything
+reads. Routing gives names to the members of the plan, which `ListReplicas`
+lists: a container without a row serves nothing. The supervisor counts the
+same rows: it would find the replica missing on every tick and fail to
+create a container of the same name. The views, the sampler, the alerts and
+the next rollout's `loadPrevious` read them too: the container would be
+shown by nobody, counted by nobody, replaced by nobody, and swept away as a
+leftover at the end of the next deployment. Docker's labels carry enough to
+stand in for the row, but a second record disagrees with the first exactly
+while the disk is full — the removals that could not be recorded — and
+`createReplicas` removes a container whose row cannot be written for that
+reason. What happens instead: the new replicas go, the active record stays
+the old version's, and reconciliation recreates what is missing on its
+backoff — 1, 2, 5, 10 and 30 seconds, then every five minutes — so the old
+version is whole again at the latest five minutes after there is room, as
+the handbook's *When things break* says.
+
 **A full disk is one failure, whoever reports it** (`deploy.IsDiskFull`):
 SQLite's `SQLITE_FULL`, `ENOSPC` from a file in the data directory, or the
 daemon's error ending in the kernel's "no space left on device", which is
@@ -636,24 +660,33 @@ Design points:
   hand, pruned) is recreated from the active deployment's stored spec —
   desired 3, present 2 → create 1 — on the same backoff as restarts, and
   containers of any *other* deployment of the application are swept away.
-  Both rely on the container list being taken **under the application's
-  lock**: a snapshot from before the lock could predate a deployment that has
-  since finished, and would make its brand-new replicas look missing. Before
-  a replica is declared gone, Docker is asked once more, by ID.
-- **What a tick costs, measured.** A tick asks Docker for the list of all
-  managed containers three times — is the daemon there, what may be
-  forgotten, what the routes point at — and once more per application, under
-  its lock. That is simple and always current, and it is what limits how many
-  applications one server carries: on two processors Docker spent about 1.5%
-  of one on every application of two replicas, the full list took 24 ms with
-  23 containers, 251 ms with 203 and 470 ms with 403, and from about 100
-  applications on a tick no longer fits in its second, so that ticks become
-  rarer and a killed replica is noticed later (4 s at 100 applications, 9 s
-  at 200). One list per tick, shared by the three askers and cut up per
-  application, would move that point; it would also hand an application a
-  list taken before its lock was, which the reconciliation above forbids
-  without a second look. The numbers and how they were taken are in the
-  handbook, *What one server carries*.
+  Before a replica is declared gone, Docker is asked once more, by ID.
+- **One list per tick** (`deploy/snapshot.go`). A tick asks Docker for the
+  list of all managed containers once, as the question whether the daemon
+  answers, and hands the answer to everything it does: what may be
+  forgotten, each application's reconciliation, the routing at the end. Until
+  0.8 it asked three times and once more per application, under its lock,
+  which was simple and always current, and was what limited how many
+  applications a server carries: Docker spent about 1.5% of one processor
+  on every application of two replicas answering, and from about 100
+  applications on two processors a tick no longer fit in its second, so that
+  ticks became rarer and a killed replica was noticed later. The price of one
+  list is that it is a moment old by the time an application's lock is
+  taken: a deployment that finished in between has replicas the list does not
+  have, and retired ones it still has. Neither is acted on from the list
+  alone — a replica the list lacks is asked about by ID and found, a
+  container that looks like a leftover is asked about by ID before it is
+  retired, a replica the tick restarts is asked about again so that routing
+  sees it running — which is the rule the reconciliation above already had
+  for the one conclusion that cannot be taken back, and costs a question only
+  when the list is in fact stale. Measured with `scripts/measure-limits.sh
+  apps` on the same machine, 2 CPUs and 4 GB, before and after: the server
+  idled at 57% of one processor with 50 applications and 103% with 100, and
+  idles at 14% and 29%; `shipwick ps` with 100 applications took 149 ms and
+  takes 109. A killed replica was back in 3.7 s and 3.0 s at 50 and 100
+  applications before, and in 3.8 s and 3.2 s after: at those sizes the pass
+  fit in its second already, and what the change buys there is the
+  processor. The numbers are in the handbook, *What one server carries*.
 
 What the supervisor sees and does is recorded as application events
 (`GET /applications/:name/events`, shown by `shipwick status`), capped at the
@@ -813,12 +846,14 @@ key.
 | **Nothing existing is replaced without `overwrite`**, and a volume left by a deleted application counts as existing. | `delete` keeps volumes on purpose. An import that extracted over one would produce a mix of two states that nobody chose. |
 | **A configuration out of an export is validated as the document that says it.** `spec.Validate` writes the parsed value back into the form a deploy.yaml is decoded into and runs the one validator there is; the import deploys what comes out. | An export carries parsed configurations, and the rules are written for documents. A second set of rules for values would drift from the first with every key added — the first version of the import checked names, images and hostnames and took health paths, the `proxy` block, `publish` and logging options as the file had them. Going back through the document form costs a function that mirrors the parser field by field; a test fails when a field is added to one and not the other. The file is authenticated by its passphrase, so this is defence against a damaged or hand-made export rather than against a stranger. |
 | **An image the daemon cannot write out does not fail the export.** The image is opened, and its first byte waited for, before `app.json` says whether it follows. | See [Images without a registry](#images-without-a-registry): on the containerd store an image may lack blobs for layers it shares. The import then skips that application and says how to bring it over by hand. With Docker 29, images sent in reduced archives were written out whole in the cases tried; the refusal is there for the case that is not. |
+| **The manifest names the keys a reader must know** (`requires`): every key of the applications' configuration the export uses, as paths in `app.json` — `spec.security`, `spec.security.read_only`. The list is derived by walking the JSON of each configuration alongside its Go type; the reader walks the type of its own `app.json` the same way and refuses a path it does not have, before anything of the export is taken in, naming the key and the version that wrote it. | An export is decoded as JSON, which skips an unknown key in silence, and the format number is all or nothing: raising it makes every older export unreadable. A list of keys is finer. A 0.9 agent reads every older export, which carries no list; a newer export is refused only for a key an application in it uses; and a key added to `pkg/spec` is covered on both sides without being named anywhere — a test holds an application that sets every field against both walks, and fails when a field is added that it does not set. The keys of a map (`env`, `headers`) are values, not keys of the format, and are not listed. The manifest is written before the applications are locked, so each application is held to the deployment the list was made from; one redeployed meanwhile fails the export with "run it again", as a deleted one does. |
 
 **The file**, inside the encryption described under [Backups](#backups):
 
 ```text
-export.json                                  format, time, version; secrets, registry
-                                             credentials and certificates; application names in order
+export.json                                  format, time, version; the keys a reader must know;
+                                             secrets, registry credentials and certificates;
+                                             application names in order
 applications/<name>/app.json                 name, version, the spec in clear, its references,
                                              stopped?, what follows
 applications/<name>/image.tar.0000 …         `docker save` of a shipwick.local image
@@ -1071,6 +1106,49 @@ it the header arrives in 60 ms, and a client cannot tell an open stream
 from a request that hangs. Everything else on those routes is compressed:
 500 log lines as JSON went from 73,942 bytes to 5,197.
 
+**A followed log is kept alive, and taken up again.** Cloudflare's proxy
+closes a response that has carried no bytes for 100 seconds, and was seen to
+close one after 60: on 2026-10-11, `shipwick logs -f` against an API hostname
+behind it ended with `stream error: INTERNAL_ERROR` after a minute of a quiet
+application, while the same stream through Caddy alone ran on. Two things
+follow. The agent writes a heartbeat line, `{"heartbeat":true,"time":…}`,
+into a followed log whenever 20 seconds pass without a line, and only then —
+every line starts the interval over — so that a quiet stream carries three
+lines of 60 bytes a minute and a busy one carries nothing extra. A JSON
+object was chosen over a bare newline because of what the readers already
+did: the dashboard drops any record without a `message` and never saw it; a
+CLI before 0.9 prints an empty line for it, where a bare newline would have
+ended it with `malformed log stream`. The heartbeat carries the agent's
+clock, so that a reader has a time of the server's to resume from even when
+the application never printed; line times are the daemon's, on the same
+host. And a stream can begin at a time: `since` on the follow endpoint asks
+the daemon for every line at or after it (its own comparison, `tail` not
+applied), and the answer says `X-Shipwick-Log-Since`, so that a client can
+tell an agent that honoured it from an older one, which ignores the
+parameter and replays its tail. The CLI reconnects a lost stream with `since`
+set to the latest time the agent told it — the last line's or the last
+heartbeat's — and drops what it already printed at that instant, per replica
+and stream, because `since` includes its own instant and an older agent
+sends its tail again. It waits a second before the first try and twice as
+long before each next one, gives up after five losses in a row that brought
+nothing — 31 seconds, an agent restarting for an upgrade with its image pull
+— and ends at once on Ctrl-C. A stream the agent ends on purpose ends with
+a line that says why, because the two reasons want opposite things of the
+client and a clean end alone cannot tell them apart: `{"end":"containers"}`
+— a deployment replaced them; the old containers' last lines are in the
+archive and the new containers are a new stream, so the CLI stops and says
+so — and `{"end":"shutdown"}`, which the CLI treats as a lost connection and
+reconnects from, meeting the proxy's `502` until the agent is back. Measured
+on the development stack: the agent's restart ended the stream cleanly, and
+the CLI before this line stopped with "the containers were stopped or
+replaced", which was false. Cutting the connection on shutdown instead would
+have been the same signal to a 0.9 CLI, but an incomplete response is the
+wrong word for a deliberate end, and the dashboard would have shown an
+error where it reconnects today. The held answers — `POST /import`, `promote` without
+`wait=false` — cannot be kept alive this way: their status is not known
+until they are complete, and a byte sent before it would fix the status.
+Both have a record to poll instead, and the CLI polls it.
+
 **Routing is two things.** Who serves an application is decided by *names on
 the services network*; what Caddy is told is only which name stands behind
 which domain. The split exists because loading a Caddy config is not free:
@@ -1183,6 +1261,29 @@ routing = for every replica that should serve: give it its names
   cores): the three applications together took 7.3–7.8 s over six rollouts,
   where one alone took 5.7–6.6 s, and the experiment above still gave 0, of
   3,600.
+- **Where the remaining second and a half goes.** Read off Docker's own
+  event stream (`docker events`: a millisecond timestamp for every create,
+  start, kill, die, destroy and network connect) next to the deployments'
+  events, on the development stack, three applications of two replicas each
+  redeployed together against one alone — 5.0 s alone, 6.0–6.7 s together,
+  two runs each. Three things, in order of size. The rest itself, which does
+  not log its waits: each application's second replica starts within half a
+  second of the other two applications' first old replicas being stopped,
+  and waits for their addresses to have rested — 300 to 500 ms per
+  application — and a replica that started while another application's
+  container was stopping left the services network and joined it again after
+  the rest, 400 ms more. The routing lock: the three `SyncProxy` calls of one
+  switch queue behind each other at about 150 ms each (an inspect, the
+  disconnect, two listings with an inspect per stopped container for the
+  rest, the connect, the proxy's confirmation), so the last in line waits
+  300 ms at each of the two switches. And Docker under three times the work:
+  a create-and-start 100 ms slower, a stop-and-remove 50 to 130 ms slower,
+  the pull's manifest check 40 ms slower. Neither of the first two is a small
+  change: the rest's half second is the proxy's dial timeout, and a shorter
+  one lets a request reach the wrong application again; the lock is one
+  because the plan, the names and the proxy's configuration are one, and a
+  lock per application would still have to serialise the configuration. It
+  stays, and the handbook says so.
 - **A proxy without the source still serves.** Caddy rejects a configuration
   that names a module it lacks, and keeps the one it runs. The agent then
   renders the same routes with the `a` source, loads those, reports
@@ -1427,6 +1528,19 @@ does not spend two seconds per hostname on every round.
 `SHIPWICK_DNS_RESOLVERS` replaces the list, or with `system` skips it: see
 *Leaving the server*.
 
+Hostnames whose verdict is stale are looked up eight at a time
+(`lookupsAtOnce` in `dns.go`), each under its own three seconds and none of
+them under `e.routing`: a refresh takes as long as its slowest answer, not
+the sum of them. Until 0.8 they went one after the other, and `SyncProxy`
+refreshes every planned hostname before it takes the lock — so a resolver
+that took 180 ms, with 200 hostnames, put 36 s of lookups into a rolling
+deployment and into the supervisor's tick (the 57 s deployment in the
+handbook's *What one server carries*). Eight is a few questions in flight at
+one resolver, not a burst it would refuse; each lookup records its own
+verdict and the cache's lock is the only thing they share, so `keepServing`
+and the TTLs are unchanged. A hostname two applications share under
+different paths is asked about once.
+
 **Certificates through DNS** (`agent/internal/proxy/tls.go`). Behind
 Cloudflare's proxy no authority can reach the server, so neither of Caddy's
 default challenges works. With `SHIPWICK_CLOUDFLARE_API_TOKEN` the rendered
@@ -1557,6 +1671,62 @@ CPU over the 35 seconds (against 0.16 s per 30 s idle), about 27 µs per
 request, while Caddy used 14.7 s for the same requests; the agent's memory
 stayed at 12 MB.
 
+### One request through the proxy, after the deployment
+
+`deploy/loop.go`. On a real installation an application's `next.config`
+sent its bare domain to `www`, `redirects: [www…]` sent `www` back, every
+request looped, and the deployment was a success: the health check asks a
+replica at its address, and a replica that answers `301` to `/health` is
+one that answers. What a visitor gets is only visible from where a visitor
+stands — through the proxy, by hostname.
+
+| Decision | Why |
+|---|---|
+| **One request, after `completed_at`**, in the goroutine that ran the deployment, after the lock is released and the end is written. | Nothing waits for it: the CLI's poll sees `completed_at` as before, and the next operation on the application is not refused. It is still counted as an operation, so `Shutdown` waits for it, and its context is the engine's, so a shutdown cuts it. |
+| **Through the proxy, with the hostname as the server name, verifying nothing.** The URL names the application's hostname; the connection is dialled to `SHIPWICK_PROXY_TLS_ADDR`, where the certificate watch already looks. | A request to a replica's address would be answered by the application without the proxy's `redirects`, headers and paths in front of it, and would miss the loop. The certificate may be minutes away, and the question is what the application answers, not who the proxy is. |
+| **No redirect is followed; one answer is judged.** A `301`, `302`, `307` or `308` whose `Location` has a host among the application's `redirects` is a loop. Everything else is recorded at level `info` and left alone. | Following would land on the proxy's own `308` for the redirected hostname and prove nothing new. A redirect to a sign-in page, to the same hostname under another path, or to another site is the application's business; the agent does not know what the application means, only what the proxy will do with the answer. |
+| **Asked again every 10 s for three minutes while the proxy cannot answer**; then a `warn` that it could not be asked. | A first deployment of a new hostname races the certificate: the handshake fails until Caddy has it, seconds over HTTP or TLS-ALPN, a minute or two through a DNS record. One try would miss exactly the deployment the check is for. |
+| **The outcome is one `probe` event of the deployment**, not a column. | A deployment record is immutable and its events are its narrative; the dashboard and the CLI already read them. Nothing else stores anything. |
+| **The CLI waits for the event only from an agent that records one.** `deploy` reads the agent's version from `GET /health` and gives 0.9 or later up to twelve polls, six seconds; against an older agent it waits for nothing. | Six seconds for nothing on every routed deployment against an agent from before 0.9 would be a cost paid for a feature that is not there. When the event has not come in time — the certificate is on its way — `deploy` says where it will be, and `status` shows it. |
+| **`doctor` judges the same way from outside**, from the `Location` of the answer `https://<domain>/` gives it. | It already fetched the page; reading one header more turns "answers HTTP 301" into the problem it is. |
+| **Not asked**: folders, applications deployed stopped, hostnames waiting for DNS, wildcards. | A folder is served by the proxy itself and cannot redirect; a hostname that is not in the proxy cannot be asked through it; a wildcard is no name a client can send. |
+
+### The proxy's networks, and the kernel's neighbours
+
+`deploy/proxynet.go`, `docker/runtime_proxy_networks.go`,
+`agent/internal/kernel`. Two things that are not Shipwick's fault stop
+applications being served, and nothing said so before.
+
+A proxy container whose start was refused — rootless Docker refusing port
+80 — is left by Compose on some of its three networks, and `docker compose
+up -d` starts it that way. The supervisor's tick looks at the proxy
+container's networks every 30 seconds, in the list the daemon returns
+anyway (`ContainerList` carries `NetworkSettings.Networks`; no new call,
+nothing for the socket proxy's allow-list), and keeps the ones missing:
+`GET /server` carries them as `proxy.networks_missing`, present only when
+there are any, like `plain_lookups`; the log gets one line when the answer
+changes; `doctor` makes it a problem with the `--force-recreate` command. A
+runtime without the method, and a proxy that is not a container, have
+nothing to say.
+
+The kernel's table of neighbours (`net.ipv4.neigh.default.gc_thresh3`) is
+shared by every network namespace on the server and filled by every
+container's addresses and by the entries each container keeps of its
+peers; between 300 and 400 containers it was full on a stock kernel. The
+agent reads the file where it can and `GET /server` carries
+`kernel_limits.neighbour_table`. It can only as a process of the host: the
+kernel registers the `default` entry in the initial network namespace alone
+(`neigh_sysctl_register` from `arp_init`, with no device), so a container —
+the agent's included — has no `/proc/sys/net/ipv4/neigh/default` at all.
+Checked in a daemon of its own (`docker:dind`, kernel 6.18): the directory
+held `eth0`, `lo` and `docker0` and no `default`, in the daemon's container
+and in a container with the host's network namespace alike; under Docker
+Desktop the same. A number the agent cannot read is not reported, and
+`doctor` then names the stock size, says that the agent cannot see the
+server's, and warns from the same threshold — a quarter of the table,
+counting the managed containers and the proxy — so that it comes before the
+failures the handbook met between 300 and 400 containers of a stock table.
+
 ### Certificate status
 
 `deploy/certstatus.go`. Caddy's admin API does not say which certificates
@@ -1599,6 +1769,89 @@ operator), `expiring` (it works until somebody fails to act), `obtaining`
 (usually over in seconds). `unknown` is not a problem: nothing is known
 against the certificate, and an agent without a proxy would otherwise mark
 every application it runs.
+
+### Why a certificate did not come
+
+`deploy/certfailures.go`, `docker/runtime_proxy_errors.go`. The handshake
+above says that a certificate is missing and nothing about why; Caddy's admin
+API does not say either; its events (`cert_failed`) have no endpoint. The
+reason exists in one place, Caddy's log, and until 0.9 that is where it
+stayed: on the real server both failures — a provider firewall that kept Let's
+Encrypt from port 443, and a Cloudflare token that could not create the
+record — were in `docker logs shipwick-caddy-1` while `doctor` said the agent
+could not be reached. So the agent reads the log, the way it already reads
+the access log: Caddy's own messages go to its standard error (the access log
+has standard output to itself, see *What the proxy sees*), and
+`FollowErrors` is `FollowOutput` asked for the other stream — the same Engine
+API call, `GET /containers/{id}/logs`, so the socket proxy's allow-list does
+not change. The follower is an optional interface on the runtime, not a new
+`Runtime` method; the fake has one too.
+
+Four of CertMagic's and acmez's entries are read, by `logger` prefix `tls.`
+and `msg`: acmez's `challenge failed` and `validating authorization`, which
+carry the identifier, the challenge type and the authority's ACME problem as
+an object; CertMagic's `could not get certificate from issuer`, which carries
+the identifier, the issuer and the problem as text; and its `will retry`,
+whose error names the hostname in brackets. The problem type and detail are
+read out of the text where they are only text, and the order's and the
+authority's URLs are dropped. The last failure per hostname is kept in the
+certificate watch's state, in memory; a line older than the one kept is
+ignored, since Docker repeats the lines of the instant a stream was cut; and
+a summary without a challenge takes the challenge of the authority's answer
+logged a moment before, which is how "tls-alpn-01" reaches the sentence
+although CertMagic's own line never names it. A certificate's arrival — a
+hostname that had none gets one, or a later `NotAfter` — ends the failure.
+
+The sentence is composed when it is shown, not when it is stored, because
+one of its parts can change afterwards: a DNS record that could not be
+created is explained with the token check's findings when there are any (the
+sentence a person acts on), and only otherwise with Cloudflare's answer as
+the proxy quoted it. The sentence goes wherever the status goes — the
+detail's `certificates[].failure`, the `obtaining` message, and so
+`certificate_problem` and `shipwick status` — and once into the application's
+events per reason, not per attempt: CertMagic retries for a month. A
+real Caddy was not run against an authority to produce the test log; the
+lines in `testdata/caddy_tls_errors.log` were written from CertMagic 0.25.6's
+and acmez 3.1.7's log calls, which the test file names.
+
+### The Cloudflare token, checked
+
+`deploy/cloudflare.go`, `pkg/cloudflare/verify.go`. Two tokens in a row
+failed on the real server in ways the API could have told the moment they
+were set: one carried an IP filter that named the server's IPv4 address while
+the server called Cloudflare from its IPv6 one; one had *Zone → Zone → Read*
+and another "DNS …" permission than *Zone → DNS → Edit*, listed zones and
+could not create a record. Both produced one line in the proxy's log, weeks
+apart from the mistake: `Authentication error (code 10000)`. Cloudflare's
+answer is the same for an unknown token and for a known token from a
+filtered-out address, so the sentence says both and names the address.
+
+The check does what the proxy will do, and nothing it would not: it asks
+whether the token is valid and active (`GET /user/tokens/verify`), which
+zones it sees (`GET /zones`), and for each zone creates and at once deletes a
+TXT record of the agent's own, `_shipwick-check.<zone>` with a TTL of 60 and
+a value that names the server and the time. Listing a zone's records would
+test *DNS → Read*; only a write tests *DNS → Edit*, and the record it needs
+is the kind the proxy will need. The address comes from `cdn-cgi/trace` on
+the API's own host, over the same connection stack the API calls use, with
+no token on the request: it is the address Cloudflare saw, not the one the
+operator believes in. Because the check writes, it is bounded: once at
+start, in the background; once a minute at most on request, with the
+rate limit in the engine and two callers of one check sharing it; never in a
+loop. One page of zones is checked, fifty; a token that sees more has more
+power than one server needs, and the check says so rather than write
+fifty-one records. The result lives in memory and in nothing else — it is
+true of now, and an agent that restarts checks again. The token is a secret:
+the result quotes Cloudflare's status and codes, zone names and the address,
+never the token, and a network error is scrubbed of it as insurance against
+a client that would quote a header.
+
+The check is a `pkg` package because the CLI shares the zone arithmetic
+(`ZoneOf`) and the reading of Cloudflare's answers out of the proxy's words
+(`Said`), and a `CloudflareVerifier` interface in the engine because the
+tests need a Cloudflare that is not there: `pkg/cloudflare`'s tests run
+against an `httptest` server that answers in Cloudflare's documented shapes,
+the engine's against a fake that counts. No real token was used.
 
 ### Graceful shutdown
 
@@ -1688,18 +1941,22 @@ answers `unknown field "security"` and deploys nothing, so the block is
 never dropped in silence on that path. The CLI, which accepted the same
 document a moment earlier, recognises an "unknown field" from the agent as
 an agent older than the file, asks `GET /server` for its version and says
-so. An export is decoded as JSON, where an unknown key is skipped: an older
-agent importing a newer export loses the block. Raising the export's format
-number would close that, and would make every export written before 0.8
-unreadable to 0.8, because an agent reads exactly its own format; it was not
-raised, and the handbook says what an older agent does with such an export.
+so. An export is decoded as JSON, where an unknown key is skipped: an agent
+older than 0.8 importing a newer export loses the block, and one of 0.8
+loses whatever comes next. Raising the export's format number would have
+closed that at the price of every export written before, because an agent
+reads exactly its own format. Since 0.9 the manifest names the keys the
+export uses and a reader refuses what it does not know ([Moving a
+server](#moving-a-server-and-standing-by)); the agents that came before
+cannot be taught, and the handbook says what each loses.
 ## The Docker socket, and less of it
 
 The agent holds the socket of a daemon that runs as root, which is root on
-the server; the handbook says so in its first sentence on security. Two
-arrangements give it less, each an overlay on the production compose file
-(`configs/compose.socket-proxy.yml`, `configs/compose.rootless.yml`) and
-neither the default: both cost something, and the installation that takes
+the server; the handbook says so in its first sentence on security. Three
+arrangements give it less: two overlays on the production compose file
+(`configs/compose.socket-proxy.yml`, `configs/compose.rootless.yml`) and a
+policy for Docker's authorization plugin (`configs/docker-authz.rego`), none
+of them the default: each costs something, and the installation that takes
 one command stays the one most people run.
 
 | Decision | Why |
@@ -1713,6 +1970,7 @@ one command stays the one most people run.
 | **Rootless takes one line of compose and nothing in the agent** — the socket's path — **and the agent says what a daemon does not enforce.** `docker.Info` reads `MemoryLimit`, `CpuCfsQuota` and `CpuCfsPeriod` off `GET /info`. | A daemon without the cgroup controllers (rootless without systemd and delegation) takes `Memory` and `NanoCPUs` with a container, returns them from an inspect, warns of nothing, and applies neither: on Docker 29.8, `memory.max` read `max` in a container created with 32 MB. Its stats are then those of the cgroup the daemon itself is in, the same for every container. Only `GET /info` tells. |
 | **Said where a limit is shown, not enforced by refusing.** A warning event on a deployment that asks for a limit, `docker: {rootless, unenforced_limits}` in `GET /server`, `unenforced_limits` next to the limits in an application's metrics, a line of `shipwick doctor`, a line in the agent's log at start. The `memory` alert is not evaluated. | A `deploy.yaml` that works on one server should deploy on another; a limit is a protection, and its absence is the operator's to know and to fix on the server. Refusing the deployment would make rootless Docker without systemd unusable rather than weaker. The alert would compare a number that is not the replica's with a limit nothing applies. |
 | **The client's address is left as rootless Docker delivers it.** | RootlessKit's default port driver replaces it with the gateway of the proxy's network. The driver that keeps it is a setting of the daemon; the agent has nothing to choose. The handbook says which records carry the gateway's address. |
+| **The third arrangement is Docker's authorization plugin with a policy of ours, and the plugin is OPA's.** `configs/docker-authz.rego` for opa-docker-authz; nothing in the agent or the compose files changes, and `scripts/test-docker-authz.sh` runs the cycle through it and then tries each refusal. | The proxy cannot read the body of `containers/create`; an authorization plugin is handed the whole request, and is the daemon's own mechanism for exactly this. Writing a plugin is writing a security boundary; writing a policy for one that exists is listing what root on the server looks like in a request, in the same words the handbook uses. OPA's plugin has been maintained since 2016, is installed as a managed plugin with one command, and reads the policy file on every request. It is a policy of refusals rather than an allow-list because the operator's `docker` and `docker compose` go through it as well: what is not an escalation stays allowed. The plugin decodes a body only under a `Content-Type` of exactly `application/json`, while the daemon also takes one with a charset parameter — tried, and a privileged container went through — so the policy refuses the three requests it judges by their body when it is handed none. |
 
 ## Storage
 
@@ -1727,7 +1985,8 @@ a year), `access_rules` and `sessions` (who may sign in as what, and who is
 signed in: the SHA-256 of each session, never its value), `metric_samples`, `traffic_samples` (one row per application and
 minute with requests: counts and a latency histogram), `job_runs` (one row
 per run of a hook, job or one-off command, with the tail of its output; the
-last 50 per job are kept), `secrets` (name, sealed value, timestamps),
+last 50 per job are kept), `secrets` (application or `''` for the server's,
+name, the label the value is sealed under, sealed value, timestamps),
 `registries` (registry, username, sealed password), `certificates`
 (hostname, chain, sealed key), `deployment_references` (for a deployment
 whose document referred to stored secrets: those values as the document
@@ -1791,10 +2050,14 @@ the file remains debuggable; only the values are ciphertext.
   two functions. A store on disk refuses to open without a key; only the
   in-memory database of the tests may go without.
 - The `secrets` table — the values behind `shipwick secret set` — uses the
-  same seal, with the secret's name as the additional data, so the same key
-  covers both, and a row moved to another name fails to open the same way.
-  Values leave the store by name only, to the engine (`GetSecrets`); the
-  listing query never selects the column.
+  same seal, with the secret's name as the additional data for a server-wide
+  secret and `applications/<application>/secrets/<name>` for one stored with
+  `--app`, so the same key covers both, and a row moved to another name, or
+  to another application's row of the same name, fails to open the same way.
+  The label is a column of the row (`label`), because a key rotation walks one
+  key column per table; it is written once by `SetSecret` and read by nothing
+  but the rotation. Values leave the store by name only, to the engine
+  (`GetSecrets`); the listing query never selects the column.
 - The `registries` table — the credentials behind `shipwick registry login` —
   seals the password the same way, bound to `registry:<name>`. The prefix
   keeps a registry's password from opening as a secret or a variable that
@@ -1994,6 +2257,25 @@ Docker chose (`gatewayNetwork`, checked against a real daemon by an
 integration test), and when the port is published and lands elsewhere the
 agent listens as it used to, so that the port keeps working, and says that it
 is open.
+
+Whether anything keeps a published port closed on a daemon before 28 was
+measured on Docker 27.5.1 and 29.9.0, each in a container of its own
+(`docker:27-dind`, `docker:dind`), with a container started on a control
+network alone and `-p 127.0.0.1:19000:9000`, then connected to the
+application network as the agent connects itself. On 27.5.1 the daemon's
+forwarding rule (`iptables -t nat -S DOCKER`) pointed at the control
+address before the join and at the application network's address after it,
+and a listener bound to the control address alone was reset through the
+published port; on 29.9.0 with `--gw-priority -1` the rule stayed on the
+control address. An address of the container's own on the control network
+is no way out: Docker accepts `--ip` only on a network with a configured
+subnet, which the installation's networks do not have, and the rule follows
+the gateway endpoint, not the address. So there is no arrangement that
+keeps a published port off the application network on 27, and the answer
+is the one the files already give: the installer and the production compose
+file publish no port, and the development compose file, which publishes
+one for the laptop, says that it is open to applications on Docker before
+28 by design.
 
 **What is not arranged stays as it was, and says so.** A compose file without
 the control network, a `SHIPWICK_LISTEN_ADDR` of the operator's own, the
@@ -2428,6 +2710,37 @@ The two sides share one pattern (`spec.Placeholder`), and the CLI leaves
 neither side has is refused as `INVALID_CONFIG` with the variable as the
 field, so the CLI renders it like any other validation error.
 
+**A secret belongs to an application, or to the server.** One list for the
+whole server was the first version, and it fails the second application
+that has a `DATABASE_PASSWORD`: the only way out is a prefix in the name,
+which nothing suggests and every `deploy.yaml` has to carry. So a secret
+has a scope — the application named with `shipwick secret set NAME --app
+<name>`, or the server when none is — and a name is resolved as the
+application sees it: its own first, the server's otherwise (`GetSecrets`,
+one query per name, `ORDER BY application DESC LIMIT 1`). The application's
+own comes first because it is the more specific statement: whoever stored
+it meant this application, and a server-wide secret of the same name is
+what applications without one share. Both live in one table, told apart by
+an `application` column that is `''` for the server's, with `(application,
+name)` as the key (migration 22 remakes the table, since SQLite cannot widen
+a primary key; the rows of before become the server's with their ciphertext
+untouched). One table because they are one kind of thing asked for with one
+question, listed by one endpoint and rotated by one entry; two tables would
+have doubled every query and every test for a column's worth of difference.
+The deployment's references record which scope answered each name
+(`References.Scoped`), so the row says what ran without anything being
+resolved again; a rollback and `shipwick config` carry it like the rest of
+the references and behave as they did. The API extends the endpoints that
+exist instead of adding `/applications/{name}/secrets`: a client before 0.9
+goes on working against a new agent (no `application`: the server's, as
+before), and the new CLI learns what an old agent is in the one way that
+cannot store a secret wrongly — the application travels in the body of `PUT`,
+which an old agent refuses as an unknown field, where a query parameter
+would have been ignored and the secret stored for the whole server. `DELETE`
+has no body, so there the CLI reads the listing first and sends nothing when
+the application's secret is not in it; an old agent lists no scope, and so
+never has it.
+
 `POST /applications/:name/validate` is the same question without the
 deployment. What `deploy` checks before it records anything is one function
 on each side of the handler — `readConfig` (the body, `pkg/spec`, the name in
@@ -2491,6 +2804,69 @@ never read from `/opt/shipwick/.env`: the command has exactly the access of
 someone running the installer by hand. `shipwick doctor` resolves hostnames
 through the same public resolvers as the agent (see Routing); the CLI carries
 its own copy, since `agent/internal` cannot be imported.
+
+**What ssh's last line means.** When ssh fails before a command runs, its
+exit status is 255 and its last line on stderr is the one fact there is.
+The CLI reads that line and says what it means, because the line alone
+stopped a real installation: `Permission denied (publickey,password)` is a
+server that does not know the key, and the way out is at the provider (the
+key list at creation, the console or rescue system, the provider's key
+install), not on this machine. Which key ssh offered is known only to ssh,
+and only with `-v`; the CLI runs it a second time with `-v` on that path
+alone, and takes from the output the `Offering public key:` lines — the
+identity's name, type and fingerprint, which are the public half — and
+nothing else. A changed host key, a refused connection, a timeout and a name
+that does not resolve each get their own sentence; the port in the sentence
+is the one ssh named, since `~/.ssh/config` may have moved it. The refused
+key's sentence mentions `ssh-copy-id` only when the server also listed
+`password` among its methods: it is the one case where that command can do
+anything.
+
+**Ports probed from where the command runs.** After the installer has
+finished, `server install` connects once to 80 and to 443 at the server's
+address, sending nothing, and so does `doctor` every time. The point of the
+probe is to tell a refusal from silence, and the two are told apart from
+the error itself, not from its text: a `net.Error` whose `Timeout()` is
+true, or the context's deadline, is silence; `ECONNREFUSED` (on Windows,
+`WSAECONNREFUSED`, which `syscall` has no name for) is a refusal. A refusal
+comes from the server's kernel, so the server is reachable and nothing
+listens; silence is something between — on a server that was just created,
+the provider's firewall, since the firewall on the server does not drop
+packets to a port Docker published. That is why the timeout sentence names
+the provider's firewall and the ports to open, 80 and 443 TCP and 443 UDP,
+and says that certificates cannot be obtained until then: the failure the
+installation ran into was exactly that, and it was visible only in Caddy's
+log. `doctor` applies the same reading to the agent's health check, with a
+ten-second deadline of its own so that a dropped packet does not hold the
+screen for the transport's thirty, and tells a TLS handshake that failed —
+something answered, but not with a certificate for this hostname — from
+both. The honest test of silence is a dial to an address nothing routes
+(`10.255.255.1`) under a short context deadline; a listener that accepts and
+never answers is not silence.
+
+**Settings changed from the laptop.** `shipwick server configure` is the
+same `ssh`, one fixed script as the remote command, and the changes as data
+on its standard input: `KEY=value` lines, the file's own format. The script
+is a constant string of ours, like the installer's commands, so nothing from
+the command line is ever parsed by a shell; a value may hold quotes, `$(…)`
+or backticks and arrives in `.env` as it was given. The script reads the
+lines with `awk` and writes a new file through a temporary one created
+under `umask 077` in the same directory, so the token in `.env` is never
+readable to anyone else even for a moment, and moves it into place. A line
+given twice in the old file becomes one. It reports each name with one
+word — `changed`, `added`, `removed`, `unchanged`, `absent` — and restarts
+the agent with `docker compose up -d` only when a line changed, waiting for
+the health check the way the installer does; the CLI turns the words into
+the summary and never sees a value again. Names are validated against the
+list of settings the installer writes into a new `.env` (`write_env` in
+`scripts/install.sh`, mirrored in Go, with a test that reads the script and
+fails when the two lists differ), plus the two hostnames; values pass the
+installer's own checks in the installer's words, so that what the installer
+would refuse at installation is refused here before anything is sent.
+`SHIPWICK_AGENT_TOKEN` and `SHIPWICK_ENCRYPTION_KEY` are refused by name:
+they have commands of their own. The script's exit statuses — no `.env`,
+compose failed, the agent not healthy within a minute — are each a sentence
+in the CLI; 255 is ssh's own and gets the reading above.
 
 ## The CLI on the server
 
@@ -2715,6 +3091,26 @@ verified signature into a refusal, for installations that provision cosign
 first. On a server with no way out cosign cannot fetch Sigstore's keys, so
 a bundle's signature is checked where the bundle is made and only carried
 along.
+
+**The Windows installer is a script, and resolves the tag first.** The CLI
+installs on Windows from `install.ps1`, piped into PowerShell the way
+`install.sh` is piped into `sh`, rather than from a package: winget is
+pending its review, and an installer of its own would be one more signed
+artifact to build and verify. The script does only what the Unix one does
+for `--cli` — download, checksum, signature, put in place — plus the one
+thing Windows has no convention for: putting the directory on the user's
+`PATH`, which is a registry value under `HKCU\Environment` and a broadcast
+that tells Explorer. It differs from `install.sh` in resolving `latest` to a
+tag before it downloads anything — GitHub's redirect says which release that
+is — so that, like `shipwick upgrade`, it can demand the signature of
+exactly that tag instead of accepting the workflow at any version tag. Both
+installers are files of the release, listed in `checksums.txt`, so the one
+that installed a release can be found and checked with it. `shipwick
+upgrade --version` exists for the same reason the installer has
+`SHIPWICK_VERSION`: a release candidate has to be tried, and left, without a
+download by hand. It installs the release named whatever runs now — a choice,
+not a comparison — and a pre-release ahead of the latest release counts as
+current afterwards, so that trying one does not come with a nag to go back.
 
 **A package of the agent, and what it cannot be.** The agent is one static
 binary and packages as one: binary, unit, settings file, data directory. The

@@ -201,6 +201,19 @@ type Options struct {
 	// Updates is the agent's daily question about a newer release: see
 	// updates.go.
 	Updates UpdateOptions
+
+	// RedirectProbe asks a deployed application's hostname once through the
+	// proxy, after the deployment: see loop.go. The default asks the proxy
+	// at ProxyTLSAddr; tests substitute their own. RedirectRetry is how long
+	// it waits before asking again while the proxy has no certificate yet.
+	RedirectProbe RedirectProbe
+	RedirectRetry time.Duration
+	// NeighbourTable is the kernel's limit on neighbours, for GET /server;
+	// nil, or not ok, means it cannot be read from here: see kernel.go.
+	NeighbourTable func() (entries int, ok bool)
+	// Cloudflare checks what the Cloudflare API token can do, at start and
+	// on request: see cloudflare.go. Nil: the agent has no token.
+	Cloudflare CloudflareVerifier
 }
 
 // ProbeFunc checks one replica once. A nil error means healthy.
@@ -340,6 +353,11 @@ type Engine struct {
 	unsettled []unsettled
 	// outage is since when the Docker daemon has not answered: see outage.go.
 	outage dockerOutage
+	// proxyNets is the last look at which networks the proxy's container is
+	// on: see proxynet.go.
+	proxyNets proxyNetworkWatch
+	// cloudflare is what the last check of the token found: see cloudflare.go.
+	cloudflare cloudflareCheck
 }
 
 // appLock records who holds an application, because the two kinds of holder
@@ -483,7 +501,7 @@ func (e *Engine) admit(ctx context.Context, app spec.App, beforeBuild bool) erro
 // the question. It is asked before an image is built or a folder uploaded, so
 // neither has to exist yet.
 func (e *Engine) Validate(ctx context.Context, app spec.App) error {
-	app, err := e.resolveSecrets(ctx, app)
+	app, _, err := e.resolveSecrets(ctx, app)
 	if err != nil {
 		return err
 	}
@@ -568,6 +586,9 @@ func (e *Engine) launch(r *rollout) {
 			return
 		}
 		e.settle(r)
+		// Still an operation, so that Shutdown waits for it; no longer the
+		// application's, which is free for the next one.
+		e.checkRedirectLoop(e.baseCtx, r)
 	}()
 }
 

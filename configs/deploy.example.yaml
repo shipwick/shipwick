@@ -76,7 +76,8 @@ replicas: 2
 # Environment variables. Values are stored on the server, never logged, and
 # masked in API responses. ${NAME} is filled in when you deploy, so that secrets
 # never have to be in this file: by the CLI from its environment or --env-file,
-# else by the agent from the secrets stored with `shipwick secret set NAME`.
+# else by the agent from the secrets stored with `shipwick secret set NAME`:
+# this application's own (--app my-api) first, the server's otherwise.
 # $${NAME} is a literal ${NAME}.
 # Other applications on the server are reached by name: postgres:5432.
 env:

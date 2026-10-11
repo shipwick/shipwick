@@ -14,7 +14,7 @@ const props = withDefaults(defineProps<{
 const TONE_TEXT = { ok: 'text-ok', warn: 'text-warn', danger: 'text-danger', muted: 'text-fg' } as const
 
 // The agent's event types, in the words of the page. A state event's message is the status the deployment entered, with the cause of a failure after it.
-const TYPE_LABEL: Record<string, string> = { state: 'Phase', step: 'Step', log: 'Output', job: 'Job', app: 'Application', supervisor: 'Agent' }
+const TYPE_LABEL: Record<string, string> = { state: 'Phase', step: 'Step', log: 'Output', job: 'Job', app: 'Application', supervisor: 'Agent', probe: 'Probe' }
 </script>
 
 <template>

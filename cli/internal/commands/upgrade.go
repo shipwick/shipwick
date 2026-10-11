@@ -102,6 +102,7 @@ func (c *cli) upgradeCommands() []*cobra.Command {
 
 func (c *cli) upgradeCommand() *cobra.Command {
 	var check bool
+	var pinned string
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Replace this shipwick with the latest release",
@@ -112,9 +113,13 @@ checksums before the binary is swapped. A shipwick installed with Homebrew or
 winget is left to the package manager; the command tells you what to run.
 
 The checksums are signed by the workflow that published the release. With
-cosign installed (2.4 or later) the signature is verified first, and an
+cosign installed (2.5 or later) the signature is verified first, and an
 upgrade whose signature is not that workflow's changes nothing; without
 cosign the command says that it was not checked.
+
+--version installs exactly the release named, a pre-release included, in
+place of whatever runs now — the way to try a release candidate, or to go
+back to the release before. Without it, pre-releases are never picked.
 
 The server is not upgraded by this command: the installer does that, on the
 server, with access to Docker. If the server is behind, the command says so.`,
@@ -122,6 +127,18 @@ server, with access to Docker. If the server is behind, the command says so.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := c.upgrade.withDefaults()
 			ctx := cmd.Context()
+			if pinned != "" {
+				tag, err := pinnedRelease(pinned)
+				if err != nil {
+					return err
+				}
+				if err := c.installRelease(ctx, opts, tag, check); err != nil {
+					return err
+				}
+				c.ui.Println()
+				c.compareServer(ctx, tag, true)
+				return nil
+			}
 			latest, err := opts.latestRelease(ctx)
 			if err != nil {
 				return err
@@ -130,11 +147,12 @@ server, with access to Docker. If the server is behind, the command says so.`,
 				return err
 			}
 			c.ui.Println()
-			c.compareServer(ctx, latest)
+			c.compareServer(ctx, latest, false)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "report what is available and change nothing")
+	cmd.Flags().StringVar(&pinned, "version", "", "install exactly this release, a pre-release included (default: the latest release)")
 	return cmd
 }
 
@@ -165,17 +183,65 @@ func (c *cli) upgradeBinary(ctx context.Context, opts upgradeOptions, latest str
 		c.ui.Println(fmt.Sprintf("shipwick %s is installed; %s is available.\n\nUpgrade with: shipwick upgrade", opts.version, latest))
 		return nil
 	}
+	return c.swapBinary(ctx, opts, latest, exe)
+}
 
-	c.ui.Progress("Downloading shipwick %s…", latest)
-	signature, err := c.replaceBinary(ctx, opts, latest, exe)
+// installRelease puts release tag in place of the running binary, whatever
+// that is: --version is a choice, not a comparison, so a development build
+// and a newer release are replaced too. Only a binary that is that release
+// already is left alone.
+func (c *cli) installRelease(ctx context.Context, opts upgradeOptions, tag string, check bool) error {
+	if parses(opts.version) && version.Compare(opts.version, tag) == 0 {
+		c.ui.Println(fmt.Sprintf("shipwick %s is installed already.", tag))
+		return nil
+	}
+	exe, err := opts.executable()
+	if err != nil {
+		return fmt.Errorf("locate the running shipwick: %w", err)
+	}
+	// A package manager installs its latest and nothing else; a file put in
+	// its directory by hand would confuse it.
+	if method := installMethod(exe); method != "" {
+		manager := map[string]string{"brew": "Homebrew", "winget": "winget"}[method]
+		c.ui.Println(fmt.Sprintf("shipwick %s was installed with %s and is left to it. To run %s, download it from\n%s/%s/releases/tag/%s and put it on your PATH ahead of %s's.", opts.version, manager, tag, opts.web, releaseRepo, tag, manager))
+		return nil
+	}
+	if check {
+		c.ui.Println(fmt.Sprintf("shipwick %s is installed.\n\nInstall %s with: shipwick upgrade --version %s", opts.version, tag, tag))
+		return nil
+	}
+	return c.swapBinary(ctx, opts, tag, exe)
+}
+
+// swapBinary downloads release tag over exe and says what happened.
+func (c *cli) swapBinary(ctx context.Context, opts upgradeOptions, tag, exe string) error {
+	c.ui.Progress("Downloading shipwick %s…", tag)
+	signature, err := c.replaceBinary(ctx, opts, tag, exe)
 	c.ui.Done()
 	if err != nil {
 		return err
 	}
-	c.ui.Success("Upgraded shipwick %s → %s", opts.version, latest)
+	if parses(opts.version) && version.Compare(opts.version, tag) < 0 {
+		c.ui.Success("Upgraded shipwick %s → %s", opts.version, tag)
+	} else {
+		c.ui.Success("Installed shipwick %s in place of %s", tag, opts.version)
+	}
 	c.ui.Println(c.ui.Styled(ui.Dim, "  "+exe))
-	c.ui.Println(c.ui.Styled(ui.Dim, "  "+signature.describe(latest)))
+	c.ui.Println(c.ui.Styled(ui.Dim, "  "+signature.describe(tag)))
 	return nil
+}
+
+// pinnedRelease is the tag --version names: a version, with or without its
+// "v". It goes into URLs and into cosign's identity, so nothing else passes.
+func pinnedRelease(s string) (string, error) {
+	tag := strings.TrimSpace(s)
+	if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	if _, ok := version.Parse(tag); !ok || strings.ContainsAny(tag, " '\"/") {
+		return "", fmt.Errorf("--version %q is not a release version; releases look like v0.9.0 or v0.9.0-rc.1", s)
+	}
+	return tag, nil
 }
 
 // replaceBinary downloads the release asset for this platform next to the
@@ -208,6 +274,12 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	base := opts.web + "/" + releaseRepo + "/releases/download/" + tag + "/"
 	sums, err := opts.fetch(ctx, base+"checksums.txt", "", 1<<20)
 	if err != nil {
+		// A release that is not there has no files at all; said as such,
+		// rather than as a file that is missing.
+		var status httpStatus
+		if errors.As(err, &status) && status == http.StatusNotFound {
+			return 0, fmt.Errorf("release %s was not found at %s; the releases are listed at %s/%s/releases", tag, base+"checksums.txt", opts.web, releaseRepo)
+		}
 		return 0, fmt.Errorf("download the release checksums: %w", err)
 	}
 	signature, _, err := opts.checkSignature(ctx, base, tag, sums)
@@ -253,10 +325,15 @@ func (c *cli) replaceBinary(ctx context.Context, opts upgradeOptions, tag, exe s
 	return signature, nil
 }
 
-// compareServer tells whether the server is behind the latest release, and
-// how to upgrade it. It never fails the command: not being able to reach the
-// server is one line, not an error.
-func (c *cli) compareServer(ctx context.Context, latest string) {
+// compareServer tells whether the server is behind the latest release — or,
+// pinned, behind the release --version named — and how to upgrade it. It
+// never fails the command: not being able to reach the server is one line,
+// not an error.
+func (c *cli) compareServer(ctx context.Context, latest string, pinned bool) {
+	installer, standing := installerCommand, ", the latest release"
+	if pinned {
+		installer, standing = strings.Replace(installerCommand, "| sh", "| SHIPWICK_VERSION="+latest+" sh", 1), ""
+	}
 	target, err := c.resolve()
 	if err != nil {
 		c.ui.Println(c.ui.Styled(ui.Dim, "The server was not checked: "+strings.SplitN(err.Error(), "\n", 2)[0]))
@@ -282,9 +359,11 @@ func (c *cli) compareServer(ctx context.Context, latest string) {
 	case !parses(health.Version):
 		c.ui.Println(fmt.Sprintf("The server runs a development build (%s).", health.Version))
 	case version.Compare(health.Version, latest) < 0:
-		c.ui.Println(fmt.Sprintf("The server runs %s; %s is available. On the server run:\n  %s", health.Version, latest, installerCommand))
+		c.ui.Println(fmt.Sprintf("The server runs %s; %s is available. On the server run:\n  %s", health.Version, latest, installer))
+	case version.Compare(health.Version, latest) > 0 && !pinned:
+		c.ui.Println(fmt.Sprintf("The server runs %s, ahead of the latest release (%s).", health.Version, latest))
 	default:
-		c.ui.Println(fmt.Sprintf("The server runs %s, the latest release.", health.Version))
+		c.ui.Println(fmt.Sprintf("The server runs %s%s.", health.Version, standing))
 	}
 }
 
@@ -371,10 +450,16 @@ func (o upgradeOptions) get(ctx context.Context, url, accept string) (*http.Resp
 	}
 	if accept == "" && resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, httpStatus(resp.StatusCode)
 	}
 	return resp, nil
 }
+
+// httpStatus is an answer that was not 200, for a caller that tells a 404
+// from the rest.
+type httpStatus int
+
+func (s httpStatus) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
 
 // fetch reads a small text asset whole.
 func (o upgradeOptions) fetch(ctx context.Context, url, accept string, limit int64) ([]byte, error) {

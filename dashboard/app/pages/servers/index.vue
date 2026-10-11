@@ -7,11 +7,13 @@ import { describeLogArchive } from '~/utils/logArchive'
 import { describeNetwork } from '~/utils/network'
 import type { Tone } from '~/utils/status'
 import { updateLine, updateNotice } from '~/utils/updates'
+import { describeNeighbourTable, proxyNetworksProblem } from '~/utils/wiring'
 
 /** Whether the server is healthy: what needs attention first, then what it has and what it runs. */
 const polling = useServerInfo()
 const waiting = useStandbyWaiting()
 const now = useNow()
+const access = useAccess()
 
 const server = computed(() => polling.data.value as Server)
 
@@ -30,6 +32,14 @@ const upToDate = computed(() => updateLine(server.value.update, now.value))
 const newer = computed(() => updateNotice(server.value))
 /** The daemon's version, whether it is rootless, and which limits it takes and does not apply. An agent before 0.8 says the version only. */
 const docker = computed(() => describeDocker(server.value))
+/** The proxy's container is not on every network of the installation: said in red, with the command. An agent before 0.9 does not look. */
+const proxyNetworks = computed(() => proxyNetworksProblem(server.value.proxy))
+/** The kernel's table of neighbours, when the agent could read it: an agent that runs as a process of the host, from 0.9 on. */
+const neighbours = computed(() => describeNeighbourTable(server.value))
+/** A check asked from the Cloudflare block answers with the result; the shared polling is told so that every page has it. */
+function cloudflareChecked() {
+  void polling.refresh()
+}
 </script>
 
 <template>
@@ -91,12 +101,18 @@ const docker = computed(() => describeDocker(server.value))
             <NuxtLink to="/applications" class="mono link">{{ server.applications }}</NuxtLink>
           </dd>
         </div>
-        <div>
+        <div :class="neighbours?.warning ? 'sm:col-span-2 lg:col-span-4' : ''">
           <dt class="label">
             Running containers
           </dt>
-          <dd class="mono mt-0.5">
-            {{ server.containers }}
+          <dd class="mt-0.5">
+            <span class="mono">{{ server.containers }}</span>
+            <!-- Each container takes several entries of the kernel's table, so the two are not drawn as a fraction. -->
+            <span v-if="neighbours" class="ml-3 text-fg-muted">Kernel neighbour table: <span class="mono text-fg">{{ neighbours.size }}</span></span>
+            <span v-if="neighbours?.warning" class="mt-1 flex items-start gap-2 text-warn" role="status">
+              <UiIcon name="alert" :size="14" class="mt-[3px]" />
+              <span class="min-w-0 break-words">{{ neighbours.warning }}</span>
+            </span>
           </dd>
         </div>
       </dl>
@@ -128,6 +144,10 @@ const docker = computed(() => describeDocker(server.value))
             </span>
             <span v-if="server.proxy.plain_lookups" class="basis-full text-fg-muted">
               Not Shipwick's image of this version: a name lookup Docker leaves unanswered holds every request for seconds. On the server, run the installer again; an image of your own is built from <span class="mono text-fg">Dockerfile.caddy</span>.
+            </span>
+            <span v-if="proxyNetworks" class="flex basis-full items-start gap-2 text-danger" role="status">
+              <UiIcon name="x-circle" :size="14" class="mt-[3px] shrink-0" />
+              <span class="min-w-0 break-words">{{ proxyNetworks }}</span>
             </span>
           </dd>
         </div>
@@ -197,6 +217,9 @@ const docker = computed(() => describeDocker(server.value))
         </div>
       </dl>
     </UiPanel>
+
+    <!-- Present only with a token, once the agent's first check has finished, and from an agent of 0.9 or later. -->
+    <CloudflarePanel v-if="server.cloudflare" :status="server.cloudflare" :may-admin="access.can('admin')" @checked="cloudflareChecked" />
 
     <UiPanel title="System">
       <dl class="facts sm:grid-cols-2 lg:grid-cols-4">

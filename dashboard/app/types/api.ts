@@ -97,6 +97,10 @@ export type ApiErrorCode =
   | 'DISK_FULL'
   /** The request came from a network applications are on; answered 403 without looking at the token, from 0.8. */
   | 'APPLICATION_CALLER'
+  /** A check of the Cloudflare token was asked of an agent that has none. Answered 409, from 0.9. */
+  | 'CLOUDFLARE_NOT_CONFIGURED'
+  /** The Cloudflare token was checked less than a minute ago; details: {checked_at, retry_after_seconds}. Answered 429 with Retry-After, from 0.9. */
+  | 'CLOUDFLARE_CHECKED_RECENTLY'
   | 'INTERNAL_ERROR'
   // Added by the dashboard's server-side proxy, never by the agent:
   | 'AGENT_UNREACHABLE'
@@ -445,8 +449,11 @@ export type EventLevel = 'info' | 'warn' | 'error'
  * `job`: a scheduled job or one-off command that failed or timed out (level warn); successful runs record nothing.
  * `alert`: an alert about the application raised (warn, or error when critical) or cleared (info).
  * `backup`: a scheduled backup that failed, a verification, a restore.
+ * `probe`: the agent's one look at a deployed application through the proxy, recorded after
+ * `completed_at` — at most one per deployment; `warn` is something to fix (a redirect loop, a proxy that
+ * could not be asked), `info` what the hostname answered. Only from 0.9, and only with a routed domain.
  */
-export type EventType = 'step' | 'state' | 'log' | 'app' | 'supervisor' | 'job' | 'alert' | 'backup'
+export type EventType = 'step' | 'state' | 'log' | 'app' | 'supervisor' | 'job' | 'alert' | 'backup' | 'probe'
 
 export interface AgentEvent {
   id: number
@@ -486,6 +493,24 @@ export interface HostnameCertificate {
   not_after: string | null
   /** Says what is going on for every status but ok, where it is "". */
   message: string
+  /**
+   * The last failure the proxy logged while obtaining or renewing the
+   * certificate; with status `ok` or `expiring` it means the renewal is
+   * failing. Absent while the proxy logged nothing since the certificate last
+   * arrived, and on agents before 0.9.
+   */
+  failure?: CertificateFailure
+}
+
+/** Why the proxy could not obtain or renew a hostname's certificate, from the last failure it logged. */
+export interface CertificateFailure {
+  at: string
+  /** The ACME challenge that failed: tls-alpn-01, http-01, dns-01; "" when the failure came before one was tried. */
+  challenge: string
+  /** A sentence: the cause, and what to look at. */
+  reason: string
+  /** What the proxy logged, as it logged it, trimmed. */
+  detail: string
 }
 
 export interface LogLine {
@@ -505,6 +530,29 @@ export interface ProxyStatus {
   dns_challenge?: boolean
   /** The proxy is not Shipwick's image of this version: a name lookup that goes unanswered holds every request. Absent unless true, and on agents before 0.8. */
   plain_lookups?: boolean
+  /**
+   * The installation's networks the proxy's container is not attached to
+   * (`shipwick`, `shipwick-services`, `shipwick-control`), looked at every 30
+   * seconds. Present only when there are any, and never on agents before 0.9.
+   */
+  networks_missing?: string[]
+}
+
+/** A line of a followed log that is not a log line: the agent's clock, sent after 20 seconds without a line. From 0.9. */
+export interface LogHeartbeat {
+  heartbeat: true
+  /** RFC 3339, the agent's clock when it was sent: where to take the stream up from. */
+  time: string
+}
+
+/**
+ * The last line of a followed log the agent ends on purpose. `containers`:
+ * every followed container is gone, which is what a deployment does.
+ * `shutdown`: the agent is stopping for a restart or an upgrade and is back
+ * in a moment. Agents before 0.9 end a stream without one.
+ */
+export interface LogEnd {
+  end: 'containers' | 'shutdown' | string
 }
 
 /** Who a request was made as: the token's name and role, and what narrows it. */
@@ -567,6 +615,37 @@ export interface Server {
   open_to_applications?: boolean
   /** What the Docker daemon says of itself. Absent on agents before 0.8: nothing is known then, least of all that limits are enforced. */
   docker?: DockerStatus
+  /** The kernel's limits the agent could read. Present only where it can read them — an agent installed as a process of the host — and never on agents before 0.9. */
+  kernel_limits?: KernelLimits
+  /** What the agent found out about its Cloudflare token when it last checked. Absent without a token, before the first check has finished, and on agents before 0.9. */
+  cloudflare?: CloudflareStatus
+}
+
+/** The `kernel_limits` object of GET /server. */
+export interface KernelLimits {
+  /** net.ipv4.neigh.default.gc_thresh3: how many neighbours — every container's addresses among them — the kernel keeps before containers stop reaching each other. */
+  neighbour_table: number
+}
+
+/**
+ * The `cloudflare` object of GET /server, and the answer of
+ * POST /server/cloudflare/verify. Nothing of the token itself is in it.
+ */
+export interface CloudflareStatus {
+  checked_at: string
+  /** The token is valid, active, sees at least one zone and can edit the DNS records of every zone it sees. */
+  ok: boolean
+  /** The address Cloudflare saw the check come from — the one an IP filter on the token has to name — or "" when it could not be learned. */
+  address: string
+  zones: CloudflareZone[]
+  /** Sentences a person acts on, one per thing that is wrong; [] when ok. */
+  problems: string[]
+}
+
+export interface CloudflareZone {
+  name: string
+  /** The token may edit the zone's DNS records: the agent created and removed a TXT record of its own. */
+  dns_edit: boolean
 }
 
 /** A limit of `resources` in deploy.yaml, as the agent names the ones Docker does not apply. */
@@ -773,11 +852,20 @@ export interface Secret {
   name: string
   created_at: string
   updated_at: string
+  /**
+   * The application the secret belongs to, whose `${NAME}` alone it answers;
+   * "" for a secret of the whole server, which every application without one
+   * of its own falls back to. Absent on agents before 0.9, which keep one list
+   * for the whole server.
+   */
+  application?: string
 }
 
 /** Body of PUT /secrets/:name, for creating and replacing alike. */
 export interface SetSecretRequest {
   value: string
+  /** Stores the secret for one application; absent or "" for the whole server. An agent before 0.9 refuses a body that has it as an unknown field. */
+  application?: string
 }
 
 /** A stored API token as GET /tokens lists it: never its value or hash. */

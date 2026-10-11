@@ -138,6 +138,9 @@ func newRouted(t *testing.T) (*supervised, *fakeProxy) {
 	s := newSupervised(t)
 	p := &fakeProxy{rt: s.rt}
 	s.engine.opts.Proxy = p
+	// Every application answers its own hostname with 200 unless a test
+	// says otherwise: see loop_test.go.
+	s.engine.opts.RedirectProbe = answerWith(200, "")
 	return s, p
 }
 

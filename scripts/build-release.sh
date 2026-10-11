@@ -8,6 +8,7 @@
 #                                 the agent in the packages (scripts/build-sbom.sh)
 #   compose.production.yml        with the three images pinned to this version
 #   install.sh                    the installer as it was when the release was cut
+#   install.ps1                   the Windows installer of the CLI, likewise
 #   checksums.txt                 SHA-256 of all of the above
 #
 #   sh scripts/build-release.sh v0.1.0
@@ -63,8 +64,11 @@ done
 echo "pinned images to $IMAGE_TAG in dist/compose.production.yml"
 
 # `shipwick server bundle` puts the installer in the bundle it makes for a
-# server with no connection, and verifies it like every other file here.
+# server with no connection, and verifies it like every other file here. The
+# Windows installer is a file of the release for the same reason: the one
+# that installed a release can be found, and checked, with it.
 cp scripts/install.sh dist/install.sh
+cp scripts/install.ps1 dist/install.ps1
 
 sh scripts/build-packages.sh "$VERSION"
 

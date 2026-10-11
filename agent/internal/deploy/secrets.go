@@ -18,6 +18,12 @@ import (
 // secret therefore takes effect on the next deployment, not on running
 // containers, and a redeploy or rollback re-uses stored values as they were.
 //
+// A name is looked up as the application sees it: a secret stored for the
+// application (`shipwick secret set NAME --app <name>`) first, the server's
+// otherwise. Which one answered is recorded with the deployment's references
+// (spec.References.Scoped), so that the record says what ran and nothing has
+// to be resolved again afterwards.
+//
 // Only env values and the passwords of proxy.basic_auth are looked at: the
 // values that are secrets. A placeholder anywhere else — an image tag, a
 // command — is the CLI's to fill in, and is stored as it is.
@@ -63,8 +69,11 @@ func (e *MissingSecretsError) Fields() []spec.FieldError {
 	fields := make([]spec.FieldError, 0, len(e.Missing))
 	for _, m := range e.Missing {
 		fields = append(fields, spec.FieldError{
-			Field:    m.field(),
-			Message:  fmt.Sprintf("refers to ${%s}, which is not set where shipwick runs and not stored on the server", m.Name),
+			Field:   m.field(),
+			Message: fmt.Sprintf("refers to ${%s}, which is not set where shipwick runs and not stored on the server", m.Name),
+			// The server-wide form: it works whichever scope the
+			// application's other secrets have, and the dashboard reads the
+			// name out of it. The handbook says when --app is the better one.
 			Expected: "shipwick secret set " + m.Name,
 		})
 	}
@@ -90,14 +99,15 @@ func (e *UnusableSecretError) Error() string {
 func (e *UnusableSecretError) Fields() []spec.FieldError { return e.Problems }
 
 // resolveSecrets returns app with the placeholders in its env values and its
-// basic-auth passwords filled in from the stored secrets. What the caller
-// holds is left alone. $${NAME}, which the CLI leaves untouched in these
-// values, becomes the literal ${NAME}.
-func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (spec.App, error) {
+// basic-auth passwords filled in from the stored secrets, and the names among
+// them that the application's own secrets answered rather than the server's.
+// What the caller holds is left alone. $${NAME}, which the CLI leaves
+// untouched in these values, becomes the literal ${NAME}.
+func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (resolved spec.App, scoped []string, err error) {
 	// Before anything is filled in: a mask is judged as the document wrote
 	// it, not as a secret happens to read.
 	if masked := spec.MaskedFields(app); len(masked) > 0 {
-		return spec.App{}, &MaskedValuesError{Masked: masked}
+		return spec.App{}, nil, &MaskedValuesError{Masked: masked}
 	}
 	var accounts []spec.BasicAuth
 	if app.Proxy != nil {
@@ -125,13 +135,19 @@ func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (spec.App, er
 		}
 	}
 	if len(names) == 0 && !escaped {
-		return app, nil
+		return app, nil, nil
 	}
 
-	secrets, err := e.store.GetSecrets(ctx, names)
+	secrets, err := e.store.GetSecrets(ctx, app.Name, names)
 	if err != nil {
-		return spec.App{}, fmt.Errorf("read secrets: %w", err)
+		return spec.App{}, nil, fmt.Errorf("read secrets: %w", err)
 	}
+	for _, name := range names {
+		if secret, ok := secrets[name]; ok && secret.Application != "" {
+			scoped = append(scoped, name)
+		}
+	}
+	sort.Strings(scoped)
 
 	var missing []MissingSecret
 	// fill resolves one value; at says where it stands, for the error.
@@ -148,7 +164,7 @@ func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (spec.App, er
 				missing = append(missing, at)
 				return match
 			}
-			return secret
+			return secret.Value
 		})
 		return filled, referred
 	}
@@ -193,12 +209,12 @@ func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (spec.App, er
 			}
 			return missing[i].Name < missing[j].Name
 		})
-		return spec.App{}, &MissingSecretsError{Missing: missing}
+		return spec.App{}, nil, &MissingSecretsError{Missing: missing}
 	}
 	if len(unusable) > 0 {
-		return spec.App{}, &UnusableSecretError{Problems: unusable}
+		return spec.App{}, nil, &UnusableSecretError{Problems: unusable}
 	}
-	return app, nil
+	return app, scoped, nil
 }
 
 func pluralIs(n int) string {

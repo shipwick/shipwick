@@ -40,6 +40,9 @@ type Status struct {
 	// finds replicas the way every Caddy does, without keeping the last
 	// answer while Docker's DNS is silent.
 	PlainLookups bool
+	// NetworksMissing names the installation's networks the proxy's
+	// container is not on: see deploy/proxynet.go.
+	NetworksMissing []string
 }
 
 // Caddy applies routes through Caddy's admin API.

@@ -19,6 +19,7 @@ type logState struct {
 	lines   map[string][]docker.LogEntry // by container ID
 	last    time.Time                    // the latest time handed out by stamp
 	reads   []LogRead
+	follows []LogFollow
 	onStart map[string][]string // by image: see PrintOnStart
 	err     error
 }

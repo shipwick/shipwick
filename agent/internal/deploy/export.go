@@ -128,7 +128,7 @@ func (e *Engine) Export(ctx context.Context, w io.Writer, only []string) error {
 	}
 	defer e.opDone()
 
-	apps, _, err := e.deployedApplications(ctx)
+	apps, active, err := e.deployedApplications(ctx)
 	if err != nil {
 		return err
 	}
@@ -165,8 +165,15 @@ func (e *Engine) Export(ctx context.Context, w io.Writer, only []string) error {
 	now := time.Now().UTC()
 	manifest := exportManifest{Format: exportFormat, CreatedAt: now, Shipwick: version.Version,
 		Secrets: []exportSecret{}, Registries: []exportRegistry{}, Certificates: []exportCertificate{}, Applications: []string{}}
+	configurations := make([]spec.App, 0, len(apps))
 	for _, a := range apps {
 		manifest.Applications = append(manifest.Applications, a.Name)
+		configurations = append(configurations, active[a.ID].Spec)
+	}
+	// The manifest is written before the applications are locked, so each is
+	// held to the deployment the list was made from (exportApplication).
+	if manifest.Requires, err = requiredKeys(configurations); err != nil {
+		return err
 	}
 	if err := e.exportServerSecrets(ctx, &manifest); err != nil {
 		return err
@@ -178,7 +185,7 @@ func (e *Engine) Export(ctx context.Context, w io.Writer, only []string) error {
 	}
 	var total int64
 	for _, a := range apps {
-		n, err := e.exportApplication(ctx, xw, a.Name)
+		n, err := e.exportApplication(ctx, xw, a.Name, active[a.ID].ID)
 		if err != nil {
 			return fmt.Errorf("%s: %w", a.Name, err)
 		}
@@ -198,17 +205,15 @@ func (e *Engine) exportServerSecrets(ctx context.Context, m *exportManifest) err
 	if err != nil {
 		return err
 	}
-	names := make([]string, 0, len(secrets))
 	for _, s := range secrets {
-		names = append(names, s.Name)
-	}
-	values, err := e.store.GetSecrets(ctx, names)
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		if value, ok := values[name]; ok {
-			m.Secrets = append(m.Secrets, exportSecret{Name: name, Value: value})
+		// Asked for as its own application sees it, so each row gives its
+		// own value: an application's secret, not the server's it shadows.
+		values, err := e.store.GetSecrets(ctx, s.Application, []string{s.Name})
+		if err != nil {
+			return err
+		}
+		if value, ok := values[s.Name]; ok {
+			m.Secrets = append(m.Secrets, exportSecret{Name: s.Name, Value: value.Value, Application: s.Application})
 		}
 	}
 
@@ -237,8 +242,10 @@ func (e *Engine) exportServerSecrets(ctx context.Context, m *exportManifest) err
 }
 
 // exportApplication writes one application and everything that belongs to
-// it, and returns the bytes its members held.
-func (e *Engine) exportApplication(ctx context.Context, xw *exportWriter, name string) (int64, error) {
+// it, and returns the bytes its members held. listed is the deployment the
+// manifest described it by: another one has a configuration the manifest's
+// `requires` may not cover.
+func (e *Engine) exportApplication(ctx context.Context, xw *exportWriter, name string, listed int64) (int64, error) {
 	if err := e.lock(ctx, name); err != nil {
 		return 0, err
 	}
@@ -247,6 +254,9 @@ func (e *Engine) exportApplication(ctx context.Context, xw *exportWriter, name s
 	app, d, err := e.activeDeployment(ctx, name)
 	if err != nil {
 		return 0, fmt.Errorf("it was deleted or replaced while the export was being written; run the export again: %w", err)
+	}
+	if d.ID != listed {
+		return 0, errors.New("it was deleted or replaced while the export was being written; run the export again")
 	}
 	entry := exportApp{Name: name, Version: d.Version, Spec: d.Spec, Stopped: app.DesiredState == api.DesiredStopped,
 		Static: d.StaticDigest != "", Volumes: []string{}}

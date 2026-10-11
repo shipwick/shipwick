@@ -162,7 +162,7 @@ func (c *cli) serverInstall(ctx context.Context, target string, opts installOpti
 	err = ssh(remoteUname, &uname, &sshErr)
 	c.ui.Done()
 	if err != nil {
-		return describeSSHError(err, t, sshErr.String())
+		return c.explainSSHFailure(ctx, local, t, err, sshErr.String())
 	}
 	system := strings.Fields(uname.String())
 	if len(system) != 2 || system[0] != "Linux" {
@@ -195,7 +195,7 @@ func (c *cli) serverInstall(ctx context.Context, target string, opts installOpti
 		}
 		c.ui.Success("Docker %s", strings.TrimSpace(v.String()))
 	case sshExitCode(err) == sshConnectionFailed:
-		return describeSSHError(err, t, "")
+		return describeSSHError(err, t, "", nil)
 	default:
 		c.ui.Println("Docker is not installed. Installing it with get.docker.com; this takes a minute.")
 		if err := ssh(remoteInstallDocker, dim, dim); err != nil {
@@ -218,6 +218,7 @@ func (c *cli) serverInstall(ctx context.Context, target string, opts installOpti
 	if err := c.saveInstalledContext(t, opts, installerToken(installer.lines)); err != nil {
 		return err
 	}
+	c.probeInstalledPorts(ctx, local, t)
 	c.printDNSRecords(ctx, local, t, opts)
 	return nil
 }
@@ -314,12 +315,25 @@ func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarg
 		c.ui.Println("No API hostname was given, so the API is reachable only through an SSH tunnel; the installer's output above says how to set one up.")
 		c.ui.Println()
 	}
+	if opts.dashboardDomain != "" {
+		c.printDashboardSignIn("https://" + opts.dashboardDomain)
+		c.ui.Println()
+	}
 	c.ui.Println("Next: in your project, run: shipwick init")
 	if recordsMissing {
 		c.ui.Println("      once the records exist, check the setup with: shipwick doctor")
 	} else {
 		c.ui.Println("      check the setup with: shipwick doctor")
 	}
+}
+
+// printDashboardSignIn says how to get into the dashboard, which asks for a
+// token the installer never shows: one made for it, not the root token,
+// which is in .env and is root on the server.
+func (c *cli) printDashboardSignIn(url string) {
+	c.ui.Println("Dashboard: " + url)
+	c.ui.Println("  It asks for a token; make it one of its own: shipwick token create dashboard --role admin")
+	c.ui.Println("  (not the root token from /opt/shipwick/.env, which is root on the server and never leaves it)")
 }
 
 // sshConnectionFailed is ssh's own exit status; a remote command's status
@@ -332,35 +346,6 @@ func sshExitCode(err error) int {
 		return exit.ExitCode()
 	}
 	return -1
-}
-
-func describeSSHError(err error, t sshTarget, stderr string) error {
-	if errors.Is(err, exec.ErrNotFound) {
-		return errors.New("ssh was not found on this machine\n\nInstall the OpenSSH client (Debian/Ubuntu: apt install openssh-client; Windows: Settings → System → Optional features → OpenSSH Client) and run this again")
-	}
-	detail := strings.TrimSpace(stderr)
-	if detail == "" {
-		detail = err.Error()
-	}
-	// A key that changed is what ssh refuses on purpose: a reinstalled
-	// server, or someone in the middle. Only the person who reinstalled it
-	// can tell which.
-	if strings.Contains(detail, "REMOTE HOST IDENTIFICATION HAS CHANGED") || strings.Contains(detail, "Host key verification failed") {
-		return fmt.Errorf("the SSH host key of %s is not the one this machine knows:\n  %s\n\nIf the server was reinstalled, forget the old key with: ssh-keygen -R %s\nand run this again. If it was not, do not connect until you know why the key changed", t, firstLine(detail), t.host)
-	}
-	return fmt.Errorf("could not log in to %s over SSH:\n  %s\n\nThe login must work without a password: add your key with ssh-copy-id %s, or check the host in ~/.ssh/config, then run this again", t, detail, t)
-}
-
-// firstLine is the line of ssh's output that says what happened, without
-// the banner of asterisks it prints around a changed key.
-func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "@") {
-			return line
-		}
-	}
-	return s
 }
 
 // installerToken finds the token in the installer's summary: the one line

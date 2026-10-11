@@ -29,6 +29,11 @@ const (
 	// lookupTimeout bounds one lookup. A resolver that does not answer must
 	// not hold up a rollout for long, or the supervisor's tick at all.
 	lookupTimeout = 3 * time.Second
+	// lookupsAtOnce is how many hostnames are looked up at the same time. One
+	// after the other, two hundred hostnames at a resolver that takes 180 ms
+	// put 36 s into every rollout; eight at a time is a few questions in
+	// flight at a resolver, not a burst it would refuse.
+	lookupsAtOnce = 8
 )
 
 // cloudflareTokenVariable is the agent's setting that lets a hostname stay
@@ -103,31 +108,61 @@ func (e *Engine) hostnameReady(host string) (ready bool, why string) {
 	return v.ready, v.why
 }
 
-// refreshHostnames looks up every host whose verdict is stale, one at a time,
-// each bounded by lookupTimeout. It is called without e.routing held: a
+// refreshHostnames looks up every host whose verdict is stale, several at a
+// time, each bounded by lookupTimeout. It is called without e.routing held: a
 // resolver that does not answer must not stop replicas from being renamed.
 func (e *Engine) refreshHostnames(ctx context.Context, hosts []string) {
+	var due []string
+	seen := map[string]bool{}
 	for _, h := range hosts {
+		if seen[h] {
+			continue // two applications share it under different paths: one question
+		}
+		seen[h] = true
 		if ready, why, decided := e.decidedWithoutLookup(h); decided {
 			e.dns.decide(h, ready, why)
 			continue
 		}
-		if !e.dns.stale(h) {
-			continue
+		if e.dns.stale(h) {
+			due = append(due, h)
 		}
-		lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
-		addrs, err := e.opts.LookupHost(lctx, h)
-		cancel()
-		if ctx.Err() != nil {
-			// Shutting down: a lookup cut short says nothing about the hostname.
-			return
-		}
-		if unanswered(err) && e.dns.keepServing(h) {
-			continue
-		}
-		ready, why := e.verdict(h, addrs, err)
-		e.dns.record(h, ready, why)
 	}
+
+	// Side by side, lookupsAtOnce at a time: a refresh takes as long as its
+	// slowest answer, not the sum of them. Each lookup records its own
+	// verdict; the cache has a lock of its own, and nothing else is shared.
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, lookupsAtOnce)
+	for _, h := range due {
+		if ctx.Err() != nil {
+			break // shutting down: the lookups left would only be cut short
+		}
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			e.lookupHostname(ctx, h)
+		}()
+	}
+	wg.Wait()
+}
+
+// lookupHostname looks one hostname up, bounded by lookupTimeout, and records
+// the verdict.
+func (e *Engine) lookupHostname(ctx context.Context, h string) {
+	lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	addrs, err := e.opts.LookupHost(lctx, h)
+	cancel()
+	if ctx.Err() != nil {
+		// Shutting down: a lookup cut short says nothing about the hostname.
+		return
+	}
+	if unanswered(err) && e.dns.keepServing(h) {
+		return
+	}
+	ready, why := e.verdict(h, addrs, err)
+	e.dns.record(h, ready, why)
 }
 
 // unanswered says that a lookup ended without an answer: a resolver that

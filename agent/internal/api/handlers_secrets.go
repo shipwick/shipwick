@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/shipwick/shipwick/pkg/api"
+	"github.com/shipwick/shipwick/pkg/spec"
 )
 
 // maxSecretBody bounds a PUT /secrets body: the value at its largest, JSON
@@ -21,9 +22,23 @@ func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]api.Secret, 0, len(secrets))
 	for _, sec := range secrets {
-		out = append(out, api.Secret{Name: sec.Name, CreatedAt: sec.CreatedAt, UpdatedAt: sec.UpdatedAt})
+		out = append(out, api.Secret{Name: sec.Name, CreatedAt: sec.CreatedAt, UpdatedAt: sec.UpdatedAt, Application: sec.Application})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// secretApplication checks the application a secret request names, if any.
+// The application need not exist: its secrets come before its first
+// deployment. ok is false once the refusal is written.
+func secretApplication(w http.ResponseWriter, application string) (ok bool) {
+	if application == "" {
+		return true
+	}
+	if err := spec.ValidateName(application); err != nil {
+		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "application: "+err.Error(), nil)
+		return false
+	}
+	return true
 }
 
 // handleSetSecret creates or replaces a secret. The value is in the body and
@@ -51,11 +66,17 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return
 	}
-	if err := s.store.SetSecret(r.Context(), name, req.Value, s.now()); err != nil {
+	if !secretApplication(w, req.Application) {
+		return
+	}
+	if err := s.store.SetSecret(r.Context(), req.Application, name, req.Value, s.now()); err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
-	s.log.Info("secret set", "secret", name, "by", principalFrom(r.Context()).Name)
+	if req.Application != "" {
+		auditDetail(r, "application "+req.Application)
+	}
+	s.log.Info("secret set", "secret", name, "application", req.Application, "by", principalFrom(r.Context()).Name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -65,10 +86,17 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return
 	}
-	if err := s.store.DeleteSecret(r.Context(), name); err != nil {
+	application := r.URL.Query().Get("application")
+	if !secretApplication(w, application) {
+		return
+	}
+	if err := s.store.DeleteSecret(r.Context(), application, name); err != nil {
 		s.writeEngineError(w, r, err)
 		return
 	}
-	s.log.Info("secret removed", "secret", name, "by", principalFrom(r.Context()).Name)
+	if application != "" {
+		auditDetail(r, "application "+application)
+	}
+	s.log.Info("secret removed", "secret", name, "application", application, "by", principalFrom(r.Context()).Name)
 	w.WriteHeader(http.StatusNoContent)
 }

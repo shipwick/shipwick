@@ -29,11 +29,17 @@ version="${tag#v}"
 
 # SHIPWICK_CHECKSUMS names a checksums.txt on disk instead, such as the one
 # scripts/build-release.sh wrote to ./dist: the manifests of a release can be
-# looked at before it is published.
+# looked at before it is published. Its date is then today's, as the
+# release's will be.
 if [ -n "${SHIPWICK_CHECKSUMS:-}" ]; then
     sums="$(cat "$SHIPWICK_CHECKSUMS")"
+    released="$(date -u +%Y-%m-%d)"
 else
     sums="$(curl -fsSL "https://github.com/$REPO/releases/download/$tag/checksums.txt")"
+    # The day the release was published, not the day this is run.
+    released="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/tags/$tag" \
+        | sed -n 's/.*"published_at": *"\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)T.*/\1/p' | head -n 1)"
+    [ -n "$released" ] || { echo "could not read from GitHub when $tag was published" >&2; exit 1; }
 fi
 
 # installer WINGET_ARCH GO_ARCH — the entry for one build of the release;
@@ -59,31 +65,35 @@ esac
 dir="manifests/s/Shipwick/Shipwick/$version"
 mkdir -p "$dir"
 
+# The manifest schema microsoft/winget-pkgs asks for in its pull request
+# template. A newer one exists before the client that reads all of it does.
+schema=1.12.0
+
 cat > "$dir/Shipwick.Shipwick.yaml" <<YAML
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.10.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.$schema.schema.json
 PackageIdentifier: Shipwick.Shipwick
 PackageVersion: $version
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.10.0
+ManifestVersion: $schema
 YAML
 
 cat > "$dir/Shipwick.Shipwick.installer.yaml" <<YAML
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.$schema.schema.json
 PackageIdentifier: Shipwick.Shipwick
 PackageVersion: $version
 InstallerType: portable
 Commands:
 - shipwick
-ReleaseDate: $(date -u +%Y-%m-%d)
+ReleaseDate: $released
 Installers:
 $installers
 ManifestType: installer
-ManifestVersion: 1.10.0
+ManifestVersion: $schema
 YAML
 
 cat > "$dir/Shipwick.Shipwick.locale.en-US.yaml" <<YAML
-# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+# yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.$schema.schema.json
 PackageIdentifier: Shipwick.Shipwick
 PackageVersion: $version
 PackageLocale: en-US
@@ -105,7 +115,16 @@ Tags:
 - self-hosted
 ReleaseNotesUrl: https://github.com/$REPO/releases/tag/$tag
 ManifestType: defaultLocale
-ManifestVersion: 1.10.0
+ManifestVersion: $schema
 YAML
 
 echo "wrote $dir"
+
+# The check the pull request's automation runs first. winget exists on
+# Windows only; elsewhere the manifests are written and the check is left to
+# the machine that has it.
+if command -v winget >/dev/null 2>&1; then
+    winget validate --manifest "$dir"
+else
+    echo "winget is not here; on Windows: winget validate --manifest packaging/winget/$dir"
+fi

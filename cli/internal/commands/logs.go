@@ -86,7 +86,7 @@ first, the newest -n of them.`,
 				print, stop = c.noteSilence(name, print)
 				defer stop()
 			}
-			err = cl.FollowLogs(cmd.Context(), name, tail, print)
+			err = c.followLogs(cmd.Context(), cl, name, tail, print)
 			if err != nil || cmd.Context().Err() != nil {
 				return err // Ctrl+C is the normal way out: no message
 			}
@@ -113,16 +113,9 @@ const quietAfter = 2 * time.Second
 // line has arrived after quietAfter, the terminal is told once that the
 // command is waiting. The returned stop calls that off.
 func (c *cli) noteSilence(name string, print func(api.LogLine)) (wrapped func(api.LogLine), stop func()) {
-	after := c.after
-	if after == nil {
-		after = func(d time.Duration, f func()) func() {
-			t := time.AfterFunc(d, f)
-			return func() { t.Stop() }
-		}
-	}
 	var mu sync.Mutex
 	seen := false
-	stop = after(quietAfter, func() {
+	stop = c.schedule(quietAfter, func() {
 		mu.Lock()
 		defer mu.Unlock()
 		if !seen {

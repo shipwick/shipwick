@@ -416,6 +416,10 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 			return "Error: " + apiErr.Message + ".\n\nSee how full the disk is with: shipwick server status"
 		case api.CodeApplicationCaller:
 			return renderApplicationCaller()
+		case api.CodeCloudflareNotConfigured:
+			return "This agent has no Cloudflare API token to check.\n\nSet SHIPWICK_CLOUDFLARE_API_TOKEN in /opt/shipwick/.env on the server, then: cd /opt/shipwick && docker compose up -d"
+		case api.CodeCloudflareCheckedRecently:
+			return "The Cloudflare token was checked less than a minute ago; a check writes a DNS record in every zone, so the agent does not repeat it sooner.\n\nIts result is in: shipwick doctor"
 		}
 		return "Error: " + apiErr.Message
 	}
@@ -423,6 +427,11 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 	var older *olderAgentError
 	if errors.As(err, &older) {
 		return older.Error()
+	}
+
+	var lost *streamLostError
+	if errors.As(err, &lost) {
+		return fmt.Sprintf("Error: %s\n\nThe stream was lost %d times in a row and nothing came through in between. See whether the agent is reachable with: shipwick doctor", lost.err, lost.times)
 	}
 
 	return "Error: " + strings.TrimSpace(err.Error())

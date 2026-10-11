@@ -321,7 +321,7 @@ func TestStaticApplicationHasNoContainersToAsk(t *testing.T) {
 	if _, err := s.engine.Logs(ctx, "web", 10); !errors.Is(err, ErrStaticApplication) {
 		t.Errorf("Logs: %v", err)
 	}
-	if _, err := s.engine.LogStream(ctx, "web", 10); !errors.Is(err, ErrStaticApplication) {
+	if _, err := s.engine.LogStream(ctx, "web", 10, time.Time{}); !errors.Is(err, ErrStaticApplication) {
 		t.Errorf("LogStream: %v", err)
 	}
 	if _, err := s.engine.Metrics(ctx, "web"); !errors.Is(err, ErrStaticApplication) {

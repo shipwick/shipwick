@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NdjsonSplitter, parseLogLine, readLogStream } from '../app/utils/ndjson'
+import { NdjsonSplitter, parseLogLine, parseLogRecord, readLogRecords, readLogStream } from '../app/utils/ndjson'
 
 const encoder = new TextEncoder()
 const bytes = (text: string) => encoder.encode(text)
@@ -114,5 +114,34 @@ describe('readLogStream', () => {
     const messages: string[] = []
     for await (const batch of readLogStream(stream)) messages.push(...batch.map(l => l.message))
     expect(messages).toEqual(['ok', 'still ok'])
+  })
+})
+
+describe('parseLogRecord', () => {
+  it('tells a line, a heartbeat and an end apart', () => {
+    expect(parseLogRecord(line('listening on :8080'))).toMatchObject({ kind: 'line', line: { message: 'listening on :8080' } })
+    expect(parseLogRecord('{"heartbeat":true,"time":"2026-10-11T16:36:35.972656777Z"}')).toEqual({ kind: 'heartbeat', time: '2026-10-11T16:36:35.972656777Z' })
+    expect(parseLogRecord('{"end":"containers"}')).toEqual({ kind: 'end', reason: 'containers' })
+    expect(parseLogRecord('{"end":"shutdown"}')).toEqual({ kind: 'end', reason: 'shutdown' })
+  })
+
+  it('is null for anything else, and parseLogLine stays null for the heartbeat and the end', () => {
+    expect(parseLogRecord('{"heartbeat":false}')).toBeNull()
+    expect(parseLogRecord('{"end":""}')).toBeNull()
+    expect(parseLogRecord('{"error":{"code":"NOT_FOUND"}}')).toBeNull()
+    expect(parseLogLine('{"heartbeat":true,"time":"2026-10-11T16:36:35Z"}')).toBeNull()
+    expect(parseLogLine('{"end":"shutdown"}')).toBeNull()
+  })
+})
+
+describe('readLogRecords', () => {
+  it('yields the heartbeat and the end line among the lines, where readLogStream yields the lines only', async () => {
+    const text = `${line('one')}\n{"heartbeat":true,"time":"2026-10-11T16:36:35Z"}\n${line('two')}\n{"end":"shutdown"}\n`
+    const kinds: string[] = []
+    for await (const batch of readLogRecords(streamOf([bytes(text)]))) kinds.push(...batch.map(r => r.kind))
+    expect(kinds).toEqual(['line', 'heartbeat', 'line', 'end'])
+    const messages: string[] = []
+    for await (const batch of readLogStream(streamOf([bytes(text)]))) messages.push(...batch.map(l => l.message))
+    expect(messages).toEqual(['one', 'two'])
   })
 })

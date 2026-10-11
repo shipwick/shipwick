@@ -17,7 +17,7 @@ const props = withDefaults(defineProps<{
 const TAIL_OPTIONS = [50, 100, 500, 1000, 5000]
 
 const stream = useLogStream()
-const { lines, status, error, dropped, reconnecting } = stream
+const { lines, status, error, dropped, reconnecting, stale } = stream
 
 const tail = ref(props.initialTail)
 const follow = ref(true)
@@ -127,22 +127,25 @@ const statusText = computed(() => {
   if (reconnecting.value) return 'Stream ended. Reconnecting in 2s'
   switch (status.value) {
     case 'connecting': return 'Connecting'
-    case 'streaming': return pinned.value ? 'Following' : 'Following, autoscroll paused'
+    case 'streaming':
+      if (stale.value) return 'Following, but nothing has come from the agent for 45 seconds'
+      return pinned.value ? 'Following' : 'Following, autoscroll paused'
     case 'loaded': return `Last ${tail.value} lines, not following`
     case 'ended': return 'Stream ended'
+    case 'resuming': return 'Taking the stream up where it stopped'
     case 'error': return 'Disconnected'
     default: return 'Idle'
   }
 })
 
 const statusTone = computed(() => {
-  if (status.value === 'streaming') return 'bg-ok-dot'
+  if (status.value === 'streaming') return stale.value ? 'bg-warn-dot' : 'bg-ok-dot'
   if (status.value === 'error') return 'bg-danger-dot'
-  if (status.value === 'connecting' || reconnecting.value) return 'bg-warn-dot'
+  if (status.value === 'connecting' || status.value === 'resuming' || reconnecting.value) return 'bg-warn-dot'
   return 'bg-muted-dot'
 })
 
-const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.value) || status.value === 'error')
+const canReconnect = computed(() => (status.value === 'ended' && !reconnecting.value) || status.value === 'resuming' || status.value === 'error')
 </script>
 
 <template>

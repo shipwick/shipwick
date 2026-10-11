@@ -146,3 +146,81 @@ func TestDeployFillsEnvFromSecretsAndNamesWhatIsMissing(t *testing.T) {
 		t.Errorf("the secret reached the log:\n%s", logs)
 	}
 }
+
+func TestASecretOfOneApplicationThroughTheAPI(t *testing.T) {
+	f := newFixture(t)
+
+	// A body without the field is the server's, as every client before 0.9
+	// sends it; the field scopes it to one application.
+	if status, _ := f.do("PUT", "/api/v1/secrets/DB_PASSWORD", `{"value": "shared"}`); status != http.StatusNoContent {
+		t.Fatalf("server-wide: status = %d", status)
+	}
+	if status, _ := f.do("PUT", "/api/v1/secrets/DB_PASSWORD", `{"value": "api-s-own", "application": "api"}`); status != http.StatusNoContent {
+		t.Fatalf("api's: status = %d", status)
+	}
+	for _, tt := range []struct{ method, path, body string }{
+		{"PUT", "/api/v1/secrets/DB_PASSWORD", `{"value": "x", "application": "Not An App"}`},
+		{"PUT", "/api/v1/secrets/DB_PASSWORD", `{"value": "x", "application": "` + strings.Repeat("a", 64) + `"}`},
+		{"DELETE", "/api/v1/secrets/DB_PASSWORD?application=Not%20An%20App", ""},
+	} {
+		status, body := f.do(tt.method, tt.path, tt.body)
+		if e := decodeError(t, body); status != http.StatusBadRequest || e.Code != api.CodeInvalidRequest || !strings.Contains(e.Message, "application") {
+			t.Errorf("%s %s: status = %d, error = %+v", tt.method, tt.path, status, e)
+		}
+	}
+
+	_, body := f.do("GET", "/api/v1/secrets", "")
+	secrets := decode[[]api.Secret](t, body)
+	if len(secrets) != 2 || secrets[0].Application != "" || secrets[1].Application != "api" || secrets[1].Name != "DB_PASSWORD" {
+		t.Errorf("list = %+v, want the server's then api's", secrets)
+	}
+	// The scope is always said, "" included: a client tells the server's
+	// secret by the value, not by a missing key.
+	if !strings.Contains(string(body), `"application":""`) || !strings.Contains(string(body), `"application":"api"`) {
+		t.Errorf("list = %s", body)
+	}
+	if strings.Contains(string(body), "shared") || strings.Contains(string(body), "api-s-own") {
+		t.Errorf("the list carries a value: %s", body)
+	}
+
+	// api's deployment gets its own, another application the server's.
+	deploy := func(name string) string {
+		t.Helper()
+		config := "name: " + name + "\nimage: ghcr.io/company/" + name + ":1\nport: 8080\nenv:\n  DB: ${DB_PASSWORD}\n"
+		if status, body := f.do("POST", "/api/v1/applications/"+name+"/deploy", config); status != http.StatusAccepted {
+			t.Fatalf("deploy %s: status = %d, body = %s", name, status, body)
+		}
+		f.engine.Wait()
+		for _, c := range f.rt.Containers() {
+			if strings.Contains(c.Name, name) {
+				return f.rt.Spec(c.ID).Env["DB"]
+			}
+		}
+		t.Fatalf("no container of %s", name)
+		return ""
+	}
+	if got := deploy("api"); got != "api-s-own" {
+		t.Errorf("api's DB = %q, want its own secret", got)
+	}
+	if got := deploy("web"); got != "shared" {
+		t.Errorf("web's DB = %q, want the server's secret", got)
+	}
+	if logs := f.logs.String(); strings.Contains(logs, "api-s-own") || strings.Contains(logs, "shared\"") {
+		t.Errorf("a value reached the log:\n%s", logs)
+	}
+
+	// Removing api's leaves the server's, and the other way round.
+	if status, _ := f.do("DELETE", "/api/v1/secrets/DB_PASSWORD?application=api", ""); status != http.StatusNoContent {
+		t.Errorf("delete api's: status = %d", status)
+	}
+	if status, body := f.do("DELETE", "/api/v1/secrets/DB_PASSWORD?application=api", ""); status != http.StatusNotFound || decodeError(t, body).Code != api.CodeNotFound {
+		t.Errorf("delete api's again: status = %d, body = %s", status, body)
+	}
+	_, body = f.do("GET", "/api/v1/secrets", "")
+	if secrets := decode[[]api.Secret](t, body); len(secrets) != 1 || secrets[0].Application != "" {
+		t.Errorf("list after api's went = %+v, want the server's alone", secrets)
+	}
+	if status, _ := f.do("DELETE", "/api/v1/secrets/DB_PASSWORD", ""); status != http.StatusNoContent {
+		t.Errorf("delete the server's: status = %d", status)
+	}
+}

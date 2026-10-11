@@ -102,6 +102,8 @@ Shipwick is running.
   From your laptop or CI:   shipwick login --url https://agent.example.com
   On this server:           shipwick ps
   Dashboard:                https://dashboard.example.com
+                            It asks for a token; make it one of its own:  shipwick token create dashboard --role admin
+                            (not the root token from /opt/shipwick/.env, which is root on this server and never leaves it)
 ```
 
 Point DNS for those hostnames, and for your applications' domains, at the
@@ -162,10 +164,16 @@ Running the Shipwick installer...
   ...
 ✓ Shipwick is running on root@203.0.113.10
 ✓ Saved the API token as context 203.0.113.10 (https://agent.example.com), now current
+✓ Port 80 open on 203.0.113.10
+✓ Port 443 open on 203.0.113.10
 
 Create these DNS records, DNS only (not proxied):
   A     agent.example.com  →  203.0.113.10
   A     dashboard.example.com  →  203.0.113.10
+
+Dashboard: https://dashboard.example.com
+  It asks for a token; make it one of its own: shipwick token create dashboard --role admin
+  (not the root token from /opt/shipwick/.env, which is root on the server and never leaves it)
 
 Next: in your project, run: shipwick init
       once the records exist, check the setup with: shipwick doctor
@@ -176,6 +184,65 @@ printed again, and the context keeps the one it has. `--version v0.4.0`
 installs that release. Without `--agent-domain` the API is not exposed and the
 context points at `http://127.0.0.1:9000`, for the tunnel described below.
 
+The two port lines are a probe from your machine, made once the installer
+is done: a connection to 80 and to 443 at the server's address, with nothing
+sent. A port that answers is open; one that refuses the connection has
+nothing listening, which right after a healthy agent means the proxy is not
+up yet; one that stays silent for three seconds is behind a firewall that
+drops the packets — on a server that was just created, the provider's
+firewall beside the machine (Hetzner Cloud Firewall, an AWS security group,
+a DigitalOcean cloud firewall), which has to admit 80 and 443 over TCP and
+443 over UDP. Certificates cannot be obtained until it does, and the command
+says so rather than leaving it to Caddy's log.
+
+When ssh itself fails, before any command runs, the command says what the
+failure means and what to do. *Permission denied* is a server that does not
+know the key ssh offered: the command runs ssh once more with `-v`, names
+the key files it offered — the public half, with its fingerprint — and gives
+the three ways to put a key on a server nothing of yours gets into yet:
+select it when the server is created at the provider, paste it through the
+provider's console or rescue system, or use the provider's own key
+installation. Where the server would also take a password, `ssh-copy-id`
+is named as the way to put the key there once; `shipwick` never types one. A
+host key that changed is a server that was rebuilt, with the `ssh-keygen -R`
+line to forget the old key — or something in the middle, which only you can
+tell. A connection refused is a server still starting or SSH on another
+port, named in `~/.ssh/config`; a connection that times out is a wrong
+address, another port, or a firewall that admits SSH from certain addresses
+only.
+
+**Changing a setting later.** The agent's settings are the `SHIPWICK_*`
+variables of `/opt/shipwick/.env` (the table below). Changing one by hand is
+SSH, an editor and a compose command; from your machine it is one command:
+
+```bash
+shipwick server configure root@203.0.113.10 SHIPWICK_WEBHOOK_URL=https://hooks.example.com/shipwick SHIPWICK_WEBHOOK_SECRET=…
+shipwick server configure root@203.0.113.10 --unset SHIPWICK_WEBHOOK_SECRET      # or SHIPWICK_WEBHOOK_SECRET=
+```
+
+```text
+✓ /opt/shipwick/.env on root@203.0.113.10: SHIPWICK_WEBHOOK_URL changed, SHIPWICK_WEBHOOK_SECRET added
+✓ The agent is healthy
+```
+
+Each `KEY=value` sets or replaces that line of `.env`, `KEY=` or `--unset
+KEY` removes it; then `docker compose up -d` runs there, which recreates the
+agent with the new environment, and the command waits for it to be healthy
+the way the installer does. It ends with what changed, by name; values are
+never printed, and never become part of a command — they go to the server as
+data, on the standard input of a fixed script, so a value may hold anything
+but a line break. The file keeps its mode, `0600`; the token in it is not
+touched. A name has to be one of the agent's settings — a misspelt one would
+sit in the file and change nothing — and a value is checked as the installer
+checks it, in the installer's words: a Cloudflare token with a quote in it,
+a hostname with `https://` in front, the same hostname for the API and the
+dashboard. `SHIPWICK_AGENT_TOKEN` and `SHIPWICK_ENCRYPTION_KEY` are not
+settings (`shipwick token create`, `shipwick server rotate-key`). When
+nothing in the file would change, the agent is not restarted, and the
+command says so. A setting with a next step gets its line: a Cloudflare
+token is checked with `shipwick doctor`, a new hostname wants its DNS
+record.
+
 On your laptop or in CI, only the CLI:
 
 ```bash
@@ -183,6 +250,26 @@ curl -fsSL https://get.shipwick.com | sh -s -- --cli
 ```
 
 Or with Homebrew, on macOS and Linux: `brew install shipwick/tap/shipwick`.
+
+On Windows, in PowerShell (Windows PowerShell 5.1 or PowerShell 7):
+
+```powershell
+irm https://get.shipwick.com/windows | iex
+```
+
+It downloads `shipwick_windows_amd64.exe` — or the Arm64 build, on a machine
+with an Arm processor — and `checksums.txt` from the latest release, verifies
+the binary's SHA-256 against the one the release lists, puts it at
+`%LOCALAPPDATA%\Programs\shipwick\shipwick.exe` and adds that directory to
+your `PATH`, once; terminals that are already open keep the `PATH` they
+started with until they are opened anew. A mismatch installs nothing. A
+shipwick already on your `PATH` ahead of that directory — one put somewhere
+by hand — is named, because it would go on being the one that runs. A
+release of your choice: `$env:SHIPWICK_VERSION = 'v0.8.1'` before the
+command; or save the script ([scripts/install.ps1](../scripts/install.ps1),
+a file of every release) and run it with `-Version` and `-Destination`.
+Running it again upgrades, as does `shipwick upgrade`. `winget install
+Shipwick.Shipwick` follows once the package is accepted into winget-pkgs.
 
 **Upgrading.** The server is upgraded by running the installer again, on the
 server: it needs Docker there, which the CLI does not have. The CLI upgrades
@@ -194,8 +281,17 @@ came from Homebrew or winget is left to them, and the command prints the
 restarts the agent; applications keep running, and a deployment that is under
 way at that moment [continues afterwards](#7-deployment). Either way it then compares
 the server's version and tells you when the server is behind. `--check` only
-reports. What an upgrade does to a server, from which release, and the way
-back: [Upgrading](#upgrading).
+reports. `shipwick upgrade --version v0.9.0-rc.1` installs exactly that
+release, a pre-release included, in place of whatever runs now — the way to
+try a release candidate, and the way back from one; the server is then
+compared with that release, and the installer line it prints names it. A
+pre-release ahead of the latest release counts as current afterwards:
+`upgrade` and `doctor` do not offer the release it precedes until that
+release is out. A development build — `shipwick --version` reads `dev`, or
+`v0.8.1-3-gabcdef` for a build made past a tag — is not a release and is
+neither upgraded nor told that one is available; both commands say that it
+is a development build. What an upgrade does to a server, from which
+release, and the way back: [Upgrading](#upgrading).
 
 Everything the installer fetches comes from one
 [release](https://github.com/shipwick/shipwick/releases) and is verified against
@@ -205,7 +301,7 @@ version it installed until you run the installer again. A specific version:
 
 **The signature.** From 0.8.0 on, a release's `checksums.txt` is signed by
 the workflow that published it. Where [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
-(2.4 or later) is installed, the installer and `shipwick upgrade` verify
+(2.5 or later) is installed, the installers and `shipwick upgrade` verify
 that signature before they use the checksums, and stop if it is not the
 workflow's. Where it is not, which is every new server, they say so in one
 line — the second of the output above — and go by the checksums alone, as
@@ -239,8 +335,8 @@ so. With the port published it works there without a tunnel, after `shipwick
 login`. To give the API a hostname later, set `SHIPWICK_AGENT_DOMAIN` in
 `/opt/shipwick/.env` and run the installer again. A published port wants
 Docker 28 or later: before that, Docker forwards it over the network the
-applications are on, and the agent has to listen there ([Security](#12-security),
-"Who can reach the API").
+applications are on, and the agent has to listen there — which is why the
+installer publishes none ([Security](#12-security), "Who can reach the API").
 
 **Your own changes** — that loopback port, a mount for registry credentials —
 go into `/opt/shipwick/compose.override.yml`. Compose merges it with
@@ -310,7 +406,8 @@ What differs by where the upgrade starts:
 
 | From | What the upgrade does besides | What you do |
 |---|---|---|
-| 0.7 | The proxy's image gains Shipwick's own way of finding replicas, and the agent loads a configuration that uses it | Nothing |
+| 0.8 | The agent adds a column to its table of secrets (migration 22): a secret can belong to one application. The secrets stored before are the server's, as they were | Nothing |
+| 0.7 | And the proxy's image gains Shipwick's own way of finding replicas, and the agent loads a configuration that uses it | Nothing |
 | 0.5, 0.6 | The same | Nothing |
 | 0.3, 0.4 | And the proxy changes from `caddy:2-alpine` to Shipwick's build of Caddy | Nothing |
 | 0.2 | And the agent creates `encryption.key` next to `shipwick.db` and encrypts the env values of earlier deployments, once | From then on, back `encryption.key` up with `shipwick.db`: without it the database cannot be read |
@@ -469,6 +566,30 @@ installations: the first keeps its data in a Docker volume, the second in
 `/var/lib/shipwick`. To move from one to the other, [export and
 import](#moving-to-a-new-server).
 
+**SELinux** — reasoned, not run: the packages were installed and run on
+Debian and Rocky Linux in containers (`scripts/test-package.sh`), where
+nothing enforces. On Rocky Linux and RHEL with SELinux enforcing, a service
+systemd starts from a binary no policy module describes runs as
+`unconfined_service_t`, which SELinux leaves alone, and the package ships no
+module: the agent's connection to Docker's socket, its files under
+`/var/lib/shipwick` and its connection to the proxy's socket in
+`/run/shipwick` are all permitted on its side. What is expected to be denied
+is on the containers' side, and only once Docker labels them
+(`"selinux-enabled": true` in `/etc/docker/daemon.json`, which Docker's own
+packages leave off): the proxy, as `container_t`, creating its admin socket
+in `/run/shipwick`, a directory of the host labelled `var_run_t` — in
+`ausearch -m AVC -ts recent` a `denied { create }` with `tclass=sock_file`
+— and the dashboard connecting to the agent's port, should that port's type
+be one containers may not connect to. For the first, `:z` on the mount
+(`/run/shipwick:/run/shipwick:z`) labels the directory `container_file_t`;
+the package replaces `compose.yml` at each upgrade, so keep the change in a
+copy of the file and start the proxy from that. For the second, `setsebool
+-P container_connect_any 1` lets containers connect to any port of the host.
+For anything else, `ausearch -m AVC -ts recent | audit2allow -M
+shipwick-local && semodule -i shipwick-local.pp` writes and installs a local
+module that allows exactly what was denied; read it before installing it.
+Confining the agent itself would be a policy module of your own.
+
 | Variable | Default | |
 |---|---|---|
 | `SHIPWICK_AGENT_TOKEN` | generated | API bearer token, min. 16 characters |
@@ -488,7 +609,7 @@ import](#moving-to-a-new-server).
 | `SHIPWICK_ALERT_DISK_PERCENT` | `85` | The disk that holds the data directory raises an alert when it is this full. A whole number from 50 to 94; at 95 the alert turns critical, whatever is set here |
 | `SHIPWICK_LOG_RETENTION_DAYS` | `14` | How long the last output of an ended container stays in the log archive, in days after it ended, from 1 to 365. See [Output that outlives its container](#output-that-outlives-its-container) |
 | `SHIPWICK_LOG_RETENTION_SIZE` | `1gb` | What the log archive may take on the disk, as `500mb` or `2gb`; over it, the application that holds the most loses its oldest entries. `0` keeps nothing |
-| `SHIPWICK_CLOUDFLARE_API_TOKEN` | — | A Cloudflare API token with *Zone → Zone → Read* and *Zone → DNS → Edit* on your zones. Certificates are then obtained through a DNS record: hostnames can stay behind Cloudflare's proxy, and can be wildcards. Needs `SHIPWICK_CADDY_ADMIN` — see [Behind Cloudflare](#11-caddy) |
+| `SHIPWICK_CLOUDFLARE_API_TOKEN` | — | A Cloudflare API token with *Zone → Zone → Read* and *Zone → DNS → Edit* on your zones, those two exactly. Certificates are then obtained through a DNS record: hostnames can stay behind Cloudflare's proxy, and can be wildcards. The agent checks what the token can do when it starts, and `shipwick doctor` on request. Needs `SHIPWICK_CADDY_ADMIN` — see [Behind Cloudflare](#11-caddy) |
 | `SHIPWICK_BACKUP_DIR` | `<data dir>/backups` | Where the backups the agent takes are kept on the server. See [Backups the server takes](#backups-the-server-takes) |
 | `SHIPWICK_BACKUP_PASSPHRASE` | — | Encrypts every backup, and is what allows the agent's own database and encryption key to be backed up at all. At least 12 characters. Keep a copy somewhere that is not this server: without it the backups cannot be read |
 | `SHIPWICK_BACKUP_S3_ENDPOINT` | — | An S3-compatible service the backups are also sent to: `https://s3.eu-central-1.amazonaws.com`, `https://<account>.r2.cloudflarestorage.com`, … Needs the next three as well |
@@ -758,20 +879,41 @@ What such a server needs besides:
 
 ### Preparing a server
 
+**Before the first command.** Two things decide whether `shipwick server
+install` gets in and whether certificates arrive, and both are set at the
+provider, before anything of Shipwick runs. First, the key: create the
+server with your SSH public key selected, so that it is in
+`/root/.ssh/authorized_keys` from the first boot. On Ubuntu images root has
+no password and logs in with a key only; a server created without one can
+be reached through the provider's console or rescue system, where the key
+is pasted into that file, or through the provider's own way of installing a
+key on a running server. `server install` says which key it offered when
+the server does not know it. Second, the firewall in front of the server —
+the one the provider offers beside the machine, not the one on it — has to
+admit 80 and 443 over TCP and 443 over UDP from everywhere, and SSH from
+where you are. One that is closed is silence, not a refusal: the installer
+finishes, the agent is healthy, and no certificate is ever issued. `server
+install` probes the two ports from your machine when it is done and names
+the firewall when they are silent, and so does `shipwick doctor`. A server
+that is to sit behind Cloudflare alone admits 80 and 443 from Cloudflare's
+address ranges instead of from everywhere; what that arrangement needs is
+under [Behind Cloudflare only](#behind-cloudflare-only).
+
 Shipwick deploys applications; it does not administer the server under them.
-Six things are the operator's, and worth doing before the server carries data
-that matters. `shipwick doctor` asks the agent, so it sees the memory, the
-swap, the two ports and the backups; it does not look at SSH, at updates or at
-the clock.
+Seven things are the operator's, and worth doing before the server carries
+data that matters. `shipwick doctor` asks the agent, so it sees the memory,
+the swap, the two ports, the backups and the number of containers; it does
+not look at SSH, at updates or at the clock.
 
 | | `shipwick doctor` |
 |---|---|
 | 1. SSH takes keys, not passwords | does not look |
 | 2. Security updates install themselves | does not look |
 | 3. The server has swap | `! The server has no swap: …` |
-| 4. A firewall lets in SSH, 80 and 443 | `✗ Port 443 is not reachable on …` when it is too strict; not when it is too open |
+| 4. A firewall lets in SSH, 80 and 443 | `✗ Port 443 on … timed out` when it is too strict; not when it is too open |
 | 5. The clock is synchronised | does not look |
 | 6. Backups leave the server | `! The encryption key exists only on this server. …` |
+| 7. The kernel's table of neighbours fits the containers | `! The server runs 301 containers; the kernel's table of neighbours holds 1024 entries …` from a quarter of the table on |
 
 The commands are for Debian and Ubuntu and for the RHEL family (RHEL, Rocky
 Linux, AlmaLinux), as root. They were run in containers of Debian 12, Ubuntu
@@ -871,10 +1013,13 @@ package](#installation-from-a-package), the firewall on the server must let
 Docker's networks reach the agent's port.
 
 `shipwick doctor` tries 80 and 443 from where it runs, and says so when one
-is closed; a port that is open and should not be is not something it sees.
+is closed, telling a port that refuses — nothing listens, the proxy is not
+up — from one that is silent, which is a firewall dropping the packets, at
+the provider; a port that is open and should not be is not something it
+sees.
 
 ```text
-✗ Port 443 is not reachable on 203.0.113.10: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443
+✗ Port 443 on 203.0.113.10 timed out after 3s: a firewall in front of the server drops the packets — the provider's firewall (Hetzner Cloud Firewall, an AWS security group, a DigitalOcean cloud firewall). Open 80 and 443 TCP and 443 UDP there; certificates cannot be obtained until then
 ```
 
 **5. The clock.** A certificate is valid from one instant to another, and
@@ -898,11 +1043,39 @@ doctor` says which of the two is missing:
 ✓ Agent state backed up 3h ago to the server's own disk (set SHIPWICK_BACKUP_S3_* in /opt/shipwick/.env to keep a copy elsewhere)
 ```
 
+**7. The kernel's table of neighbours.** Every address on the server's
+networks — each container's on each of its two networks, the proxy's, the
+agent's, and the entries every container keeps of the peers it talks to —
+is a neighbour to the kernel, and it keeps at most
+`net.ipv4.neigh.default.gc_thresh3` of them: 1024 in a stock kernel. When
+the table is full, containers stop reaching each other (`neighbour:
+arp_cache: neighbor table overflow!` in the kernel log), which [What one
+server carries](#what-one-server-carries) met between 300 and 400
+containers. A server meant for hundreds of containers raises the three
+thresholds before that; the file is read at boot.
+
+```bash
+printf 'net.ipv4.neigh.default.gc_thresh1 = 2048\nnet.ipv4.neigh.default.gc_thresh2 = 4096\nnet.ipv4.neigh.default.gc_thresh3 = 8192\n' \
+  > /etc/sysctl.d/90-neighbours.conf
+sysctl -p /etc/sysctl.d/90-neighbours.conf
+sysctl net.ipv4.neigh.default.gc_thresh3    # 8192
+```
+
+`shipwick doctor` warns from a quarter of the table on, counting the
+managed containers and the proxy. An agent installed from a package reads
+the table's size from the kernel and `GET /server` carries it
+(`kernel_limits.neighbour_table`); the agent in its container cannot — the
+kernel shows the setting in the host's own network namespace only — and
+`doctor` then names the stock size and says to check the server's:
+
+```text
+! The server runs 301 containers; the kernel's table of neighbours holds 1024 entries and each container takes several: raise net.ipv4.neigh.default.gc_thresh3 (and gc_thresh1/2) in /etc/sysctl.d before it fills
+```
+
 ## 5. Quick start
 
-With the CLI installed (above; on Windows, download `shipwick_windows_amd64.exe`,
-or `shipwick_windows_arm64.exe` for a machine with an Arm processor, from the
-[releases](https://github.com/shipwick/shipwick/releases)), in your
+With the CLI installed (above; on Windows,
+`irm https://get.shipwick.com/windows | iex` in PowerShell), in your
 application's repository:
 
 ```bash
@@ -949,13 +1122,34 @@ Deploying my-api...
 my-api 1.4.2  deployed in 6.1s
 2/2 replicas healthy
 https://api.example.com
+✓ https://api.example.com/ answers HTTP 200 through the proxy
 ```
+
+The last line is the agent asking the application its own hostname once,
+the way a visitor would, after the deployment is done; an answer that sends
+visitors round in a circle is a warning there instead (see *A redirect loop,
+caught* under [Caddy](#11-caddy)).
 
 Then `shipwick status`, `shipwick logs -f`, `shipwick ps`. The full command
 reference, and how the CLI finds the agent (SSH tunnel, CI variables), is in
 [cli/README.md](../cli/README.md). Following an application that has printed
 nothing yet, `logs -f` says so after two seconds — `Following my-api; nothing
 printed yet. Ctrl-C stops.` — in a terminal, on standard error, once.
+
+A followed log is kept alive while the application is quiet: the agent sends
+a line of nothing every 20 seconds, which the CLI does not print, so that a
+proxy between the two does not close the stream as idle — Cloudflare's does,
+after 100 seconds without a byte. When the connection is lost all the same —
+the network changes, the agent restarts for an upgrade — `logs -f`
+reconnects after a second (then two, four, eight, sixteen) and takes the
+stream up at the last line it printed: it says `Reconnected; nothing was
+missed.` on standard error and prints nothing twice. Against an agent older
+than 0.9, which cannot begin at a time, it says which minutes may be missing
+instead. Five losses in a row with nothing in between end the command with
+the error; Ctrl-C ends it at once. A stream the agent ends because the
+containers were replaced by a deployment is not taken up: the old
+containers' last lines are in the kept output (`logs --previous`), and the
+new ones are followed by running the command again.
 
 A first deployment ends with the two commands to run next, `shipwick logs -f
 my-api` and `shipwick status my-api`, and with the dashboard's address when
@@ -978,12 +1172,20 @@ with what to do about it, and exits non-zero when something is broken:
 ✓ Proxy serving 2 routes
 ✓ agent.example.com → 203.0.113.10
 ✓ Port 80 open on 203.0.113.10
-✗ Port 443 is not reachable on 203.0.113.10: open it in the server's firewall; certificates are issued and renewed through ports 80 and 443
+✗ Port 443 on 203.0.113.10 timed out after 3s: a firewall in front of the server drops the packets — the provider's firewall (Hetzner Cloud Firewall, an AWS security group, a DigitalOcean cloud firewall). Open 80 and 443 TCP and 443 UDP there; certificates cannot be obtained until then
 ✗ api.example.com resolves to Cloudflare's proxy (104.16.0.1), not to the server: turn the proxy off for this record (DNS only), or set SHIPWICK_CLOUDFLARE_API_TOKEN on the agent to keep it on
 ✓ https://api.example.com/ answers HTTP 200
 
 2 problems found.
 ```
+
+When the agent itself does not answer, the agent's line tells the causes
+apart, because each has a different remedy: a connection that times out
+(ten seconds) is the firewall sentence above — on a server that was just
+installed, the provider's firewall; a connection refused is nothing
+listening on the port, the proxy down; a TLS handshake that fails is a
+proxy that has no certificate for the hostname yet, with Caddy's log as the
+place to look; anything else is the error as it came.
 
 The hostnames are resolved through public resolvers, as the agent does (§11);
 the server's address is the one the agent's own hostname resolves to, so
@@ -992,8 +1194,11 @@ A record that points at Cloudflare's proxy is named as such, in the agent's
 words. When the agent has a Cloudflare API token (§11) it is in order —
 `✓ api.example.com → Cloudflare's proxy (104.16.0.1)` — and if the agent's own
 hostname is proxied too, the server's address cannot be learned from the
-outside: ports 80 and 443 and the records' targets are then not checked, and
-`doctor` says so.
+outside: `! Behind Cloudflare only: ports and record targets are not checked
+from outside` takes the place of the port lines (see [Behind Cloudflare
+only](#behind-cloudflare-only)). The screen ends with what the agent found
+out about its Cloudflare token, and with why a certificate did not come, in
+the proxy's words — both in §11.
 
 **Several servers.** Each `shipwick login` saves a server under a name, a
 context; `shipwick login --context staging --url https://staging.example.com`
@@ -1105,10 +1310,27 @@ or from `--env-file`. Or the server: store the value there once, and every
 deploy from every laptop and pipeline gets it, with no env file anywhere:
 
 ```bash
-shipwick secret set DATABASE_PASSWORD     # asks for the value without echo; or pipe it in
-shipwick secret ls                        # NAME  CREATED  UPDATED — never values
-shipwick secret rm DATABASE_PASSWORD
+shipwick secret set DATABASE_PASSWORD --app my-api   # asks for the value without echo; or pipe it in
+shipwick secret ls                                   # NAME  SCOPE  CREATED  UPDATED — never values
+shipwick secret rm DATABASE_PASSWORD --app my-api
 ```
+
+A secret belongs to one application or to the whole server. `--app my-api`
+stores it for `my-api` alone: only `my-api`'s `${DATABASE_PASSWORD}` resolves
+to it, and a second application can have a `DATABASE_PASSWORD` of its own.
+Without `--app` the secret is the server's, which every application without
+one of its own falls back to. Store what an application owns — its database
+password, its session key, the API key of a service only it talks to — with
+`--app`; store what several applications share — a registry login, the key of
+a mail provider they all send through — once, for the server. The application
+need not exist yet: its secrets are stored first and its first deployment
+finds them. `secret ls` shows the scope of each (`server` or the
+application's name); `secret rm NAME` without `--app` removes the server's and
+leaves the applications' where they are, and says which of them keep one;
+`secret rm NAME --app my-api` removes `my-api`'s own, and a server-wide one
+answers its `${NAME}` from the next deployment on. An agent before 0.9 keeps
+one list for the whole server; `secret set --app` against one stores nothing
+and says so.
 
 The CLI fills in what it can and leaves the rest of the `env` values to the
 agent; `shipwick validate` lists what it left. A name that neither side has
@@ -1116,8 +1338,21 @@ stops the deployment before anything is recorded, naming the variable and the
 command to run. Only `env` values work this way: a `${TAG}` in `image` must be
 set where `shipwick` runs. A changed secret applies from the next deployment
 on; running containers keep the value they were started with, and a rollback
-restores the value that deployment used. Secrets are encrypted at rest like
-env values are ([Security](#12-security)).
+restores the value that deployment used, whichever scope it came from.
+Secrets are encrypted at rest like env values are ([Security](#12-security)).
+
+*A password that goes into a URL.* A secret written into a connection string
+— `postgres://app:${DATABASE_PASSWORD}@postgres:5432/app` — is read by the
+application as part of a URL, where `@`, `:`, `/`, `?`, `#`, `%` and
+whitespace mean something and are not the password any more; the connection
+fails, and nothing says why until then. Letters, digits, `-`, `_`, `.` and
+`~` are safe anywhere in a URL. `shipwick secret set` stores a value with
+other characters, and warns which ones it saw (never the value). For a
+password you choose yourself, make one that is safe:
+
+```bash
+openssl rand -hex 24 | shipwick secret set DATABASE_PASSWORD --app my-api
+```
 
 **The file, back from the server.** `shipwick config my-api` prints the
 `deploy.yaml` that describes what `my-api` runs, in the layout `shipwick init`
@@ -1200,8 +1435,15 @@ address of its own (`/applications/my-api/backups`):
 
 The applications list and the overview mark an application that runs but has
 an alert, or a hostname whose certificate is not in order, with a few words
-next to its status. A container on its way out after a deployment is listed
-below the replicas as *Stopping*.
+next to its status. A certificate the proxy could not obtain or renew says
+why under its hostname, with the proxy's own words a click away; a hostname
+that is served while its renewal fails is marked *Renewal failing*. A
+container on its way out after a deployment is listed below the replicas as
+*Stopping*. After a deployment that routed a hostname, what the agent found
+when it asked for the application through the proxy (§11) is on the
+deployment's page and, while that deployment is the one running, on the
+application's overview: a redirect loop as a warning, an answer as a line in
+the timeline.
 
 **A new application from the dashboard.** *New application*, in the header of
 the applications list, takes a pasted `deploy.yaml`. The agent checks it
@@ -1226,8 +1468,25 @@ promotes it) and *Encryption key*. A promotion is started and then shown as
 it runs — a row per application, and the DNS records to change from the
 first moment — and it goes on when the page is closed; opening the page while
 one runs shows it. *Status* names the proxy the agent leaves the server
-through when one is set, and warns when the Docker daemon has none. *Backups*
-has *Adopt backups* for admins, which is `shipwick backups adopt`.
+through when one is set, and warns when the Docker daemon has none. It says,
+in red, when the proxy's container is not on every network it needs, with
+the command that puts it back (§12); shows the kernel's table of neighbours
+next to the count of containers, and warns when the table is near its size
+(§4); and on an agent with a Cloudflare token shows what the token's check
+found — the address Cloudflare saw the check come from, the zones and whether
+the token may edit each one's records, the problems as sentences — with
+*Check again* for admins, which the agent answers at most once a minute
+(§11). *Backups* has *Adopt backups* for admins, which is `shipwick backups
+adopt`.
+
+*Secrets* lists the secrets with their scope — the server, or one
+application (`shipwick secret set --app`, §6) — and stores one for either:
+the server's applications are offered, and another name can be typed. The
+page says, next to the value field and without repeating the value, when a
+value holds a character a URL cannot carry as it is. Removing an
+application's own secret says that the server-wide one of the same name
+answers from then on, when there is one. A deployment refused for a secret
+that is not stored links here with the name and the application filled in.
 
 *Access* has three tabs. *API tokens* lists the tokens with the applications
 each is limited to and when it expires, and creates one: applications can be
@@ -1243,7 +1502,11 @@ before the tabs — `/tokens`, `/secrets`, `/registries` — lead to the pages
 they became.
 
 An application's *Logs* tab has four views. *Live* is the output of the
-running replicas. *Previous* is the last output of the container that ended
+running replicas; a stream that is cut, or ended by an agent restarting for
+an upgrade, is taken up where it stopped — after a second, then two, four,
+eight and sixteen — without a line lost or repeated, and after that the
+viewer says so and offers *Reconnect*. Forty-five seconds without a line or
+a sign of life from the agent are marked *stale* in the status line. *Previous* is the last output of the container that ended
 most recently — the tab opens on it when the application is not healthy and a
 replica crashed, was killed for memory or was restarted for its health check.
 *Archive* lists what the agent kept of ended containers and runs, and *Search*
@@ -1257,7 +1520,8 @@ listed above the document, each with a link that stores it as a secret. The
 document is checked and deployed from there; one that still holds a mask is
 refused. A plain value that is left as it was stays plain; one that is
 changed or typed there is masked from then on, until the file it belongs in
-is deployed with `shipwick deploy`.
+is deployed with `shipwick deploy`; the editor names those values next to
+the document before the deployment is sent.
 
 The server's *Export and standby* tab downloads an export as a file, under a
 passphrase typed twice, and imports one. Both pass through the dashboard's
@@ -2517,6 +2781,17 @@ touched. One that does not pass — an export from a newer Shipwick, a
 damaged file — fails with the fields named, as `shipwick validate` would
 name them.
 
+An export written by 0.9 or later names the keys of `deploy.yaml` its
+applications use, and an agent that does not know one of them refuses the
+import before anything is taken in, naming the key and the version that
+wrote the export: it would otherwise read the application without that key
+and deploy it without what the key asked for. Agents older than 0.9 have no
+such check and cannot be given one: an agent older than 0.8 that imports a
+newer export drops the `security` block of every application without a
+word, and an agent of 0.8 drops whatever a later version adds. Importing
+into an older agent, compare `shipwick status` with the `deploy.yaml` you
+expect.
+
 An import ends with its upload. If the agent is restarted under one, the
 import has failed and says so in `shipwick import --status`, which the
 restarted agent still answers; what it had finished is in place, the
@@ -3077,12 +3352,31 @@ table says:
   replicas that use 2 MB each, on top of 200 to 300 MB for an empty server. The
   agent took 12 to 31 MB, the proxy 16 to 31 MB, the dashboard 19 to 25 MB.
 - **Supervision costs CPU all the time, in proportion to the applications**:
-  about 1.5% of one processor per application, spent by Docker answering the
-  agent, which asks every second what runs. At 50 applications that is a
-  good third of a two-processor server; near 100 one pass takes the whole second
-  and the cost stops growing, because the passes become rarer instead — which
-  is why a killed replica stays away longer and a deployment takes longer
-  from there on.
+  in 0.8 about 1.5% of one processor per application, spent by Docker
+  answering the agent, which asked every second what runs — three times, and
+  once more for every application. At 50 applications that was a good third
+  of a two-processor server; near 100 one pass took the whole second and the
+  cost stopped growing, because the passes became rarer instead — which is
+  why a killed replica stayed away longer and a deployment took longer from
+  there on. Since 0.9 the agent asks once per pass. Measured again on the
+  same machine (Docker 29.9.0 in the server), before and after that change,
+  the server's idle CPU, one rolling deployment and a killed replica's
+  return, with everything else as in the table above:
+
+  | Applications | Idle CPU, 0.8 | Idle CPU, 0.9 | Deployment, 0.8 | Deployment, 0.9 | Replica back, 0.8 | Replica back, 0.9 |
+  |---|---|---|---|---|---|---|
+  | 10 | 11% | 4% | 5.0 s | 5.1 s | 0.3 s | 4.0 s |
+  | 25 | 24% | 8% | 5.5 s | 5.5 s | 2.7 s | 3.9 s |
+  | 50 | 57% | 14% | 6.2 s | 5.6 s | 3.7 s | 3.8 s |
+  | 100 | 103% | 29% | 7.0 s | 6.5 s | 3.0 s | 3.2 s |
+
+  Up to 100 applications a pass fit in its second before as well, so the
+  killed replica came back in the same three to four seconds either way
+  (the 0.3 s at 10 applications is the measurement seeing the killed
+  container as still running for a moment, not a recovery); what the change
+  buys at these sizes is the processor, and `shipwick ps` with 100
+  applications took 149 ms before and 109 ms after, because Docker answers a
+  less busy agent sooner. Beyond 100 applications it was not measured again.
 - **The first thing to give out was the kernel, not Shipwick or the memory.**
   Between 300 and 400 containers Linux's table of neighbours (the ARP cache)
   was full — the kernel log says `neighbour: arp_cache: neighbor table
@@ -3091,18 +3385,22 @@ table says:
   another run deployments failed there, their health checks with `no route
   to host`. The limit is
   `net.ipv4.neigh.default.gc_thresh3`, 1024 in a stock kernel; a server meant
-  to carry hundreds of containers needs it raised. Memory would have been next: nine tenths of the 4 GB were
+  to carry hundreds of containers needs it raised ([Preparing a
+  server](#preparing-a-server), item 7), and `shipwick doctor` says so from
+  a quarter of the table on. Memory would have been next: nine tenths of the 4 GB were
   in use at 250 applications.
 - `shipwick status <app>` took 2.0 s at every size: it waits for Docker's two
   readings of the CPU. `GET /applications` and `GET /server` took what
   `shipwick ps` took; `GET /metrics` 4 to 10 ms.
 - The agent asks, for every hostname and every 30 seconds, whether it still
-  points at the server, one hostname after the other. With a resolver that
-  answers in a millisecond that cost nothing. In an earlier run each answer
-  took 180 ms — the test's `*.localhost` names, which two of the three public
-  resolvers do not know — and with 200 such hostnames a rolling deployment
-  took 57 s and a killed replica was away for a minute. Hostnames that
-  resolve slowly, many of them, slow everything down.
+  points at the server, eight hostnames at a time. With a resolver that
+  answers in a millisecond that costs nothing. Until 0.8 it asked one
+  hostname after the other, and in a run where each answer took 180 ms — the
+  test's `*.localhost` names, which two of the three public resolvers do not
+  know — 200 such hostnames made a rolling deployment take 57 s and kept a
+  killed replica away for a minute. Eight at a time, the same 200 answers
+  would take 4.5 s instead of 36: hostnames that resolve slowly, many of
+  them, still cost, eight times less.
 
 On 4 CPUs and 8 GB this part was not measured: the run shared the machine,
 and with it the kernel's table, with a second test server, and failed at 100
@@ -3267,9 +3565,14 @@ and the address rests for half a second after the proxy has answered. When a
 container stops by itself, a crash, nobody could tell the proxy in time, and
 the address rests for 2.5 seconds, which is longer than the proxy remembers
 it. A deployment of one application never waits for itself, and several
-deployed at once (`shipwick.yaml`) hardly wait for each other: three
+deployed at once (`shipwick.yaml`) wait a little for each other: three
 applications of two replicas each, redeployed together, took 7.3 to 7.8
-seconds where one alone took about 6.
+seconds where one alone took about 6; measured again for 0.9, 6.0 to 6.7
+seconds against 5.0. The second and a half is the rest itself — each
+application's second replica starts just as the others' first old replicas
+have stopped, and waits the half second for their addresses — and the three
+deployments taking turns at the proxy's routing, which is done for one
+application at a time.
 
 - **Only healthy replicas receive traffic.** A replica that fails its health
   check is taken off the name within a second and put back once it passes
@@ -3338,6 +3641,32 @@ decides, and `SHIPWICK_DNS_RESOLVERS` names others to ask (see
 [Behind a corporate proxy](#behind-a-corporate-proxy)). The agent's and the
 dashboard's own hostnames are never held back.
 
+**A redirect loop, caught.** An application that sends its bare domain to
+`www` — a `next.config` with `redirects`, a framework setting, a line in
+its own proxy — deployed with `redirects: [www.example.com]`, which sends
+`www` back, passes every health check and serves nobody: each request goes
+round until the browser gives up. So once a deployment is done, the agent
+asks the application its own hostname once, the way a visitor would: through
+the proxy, `GET https://<domain><path>/`, following no redirect, five
+seconds at most. An answer that redirects to a hostname of `redirects` is a
+loop, and the deployment's output says so and what to swap:
+
+```text
+! https://example.com/ sends its visitors to www.example.com, which `redirects` sends back: every request loops. Make www.example.com the `domain` and example.com a redirect, or stop the application redirecting
+```
+
+Any other answer is recorded and not judged — `https://example.com/ answers
+HTTP 302 through the proxy to https://example.com/login` is an application
+with a sign-in page, and its business. The question is asked after the
+deployment is complete, so nothing waits for it: `shipwick deploy` gives the
+answer a few seconds under its summary, and `shipwick status` shows a loop
+for as long as the deployment is the active one; the proxy's certificate for
+a new hostname may be minutes away, and the agent asks again every ten
+seconds for three minutes while the proxy cannot answer. `shipwick doctor`
+makes the same judgement from outside, from the answer `https://<domain>/`
+gives it. A folder, an application deployed stopped and a hostname still
+waiting for DNS are not asked.
+
 **Behind Cloudflare.** With the orange cloud on, a visitor's connection ends
 at Cloudflare, and so does the certificate authority's: Caddy cannot prove
 over HTTP or TLS that it serves the hostname. Give the agent a Cloudflare API
@@ -3354,8 +3683,37 @@ cd /opt/shipwick && docker compose up -d
 
 - **The token.** Cloudflare dashboard → *My Profile* → *API Tokens* → *Create
   Token*, with two permissions on the zones your hostnames are in: *Zone →
-  Zone → Read* and *Zone → DNS → Edit*. Not the Global API Key. Caddy uses it
-  to create and remove the `_acme-challenge` TXT records, nothing else.
+  Zone → Read* and *Zone → DNS → Edit* — those two exactly. *DNS Settings*,
+  *DNS Firewall* and *DNS Views* are other permissions; a token with one of
+  them in place of *DNS → Edit* lists the zones perfectly well and cannot
+  create a record, and the proxy's log says only *Authentication error (code
+  10000)*. Not the Global API Key. Caddy uses the token to create and remove
+  the `_acme-challenge` TXT records, nothing else.
+- **The token's IP filter**, if you give it one (*Client IP Address
+  Filtering*), must name every address the server calls from. A server with
+  an IPv6 address calls Cloudflare from it, and a filter that names the IPv4
+  address alone is refused with the same *Authentication error (code
+  10000)*. The agent's check (next) prints the address Cloudflare saw.
+- **The token, checked.** When the agent starts, and whenever `shipwick
+  doctor` asks, the agent verifies the token the way the proxy will use it:
+  whether Cloudflare accepts it from the address the server really calls
+  from, which zones it sees, and — the only sure test of *DNS → Edit* —
+  whether it can create a TXT record in each: `_shipwick-check.<zone>`, with
+  a TTL of 60 and a value that names the server, removed at once. The result
+  is one line in the agent's log, `cloudflare` in `GET /server`, and lines in
+  `shipwick doctor` that say what to change: *the token cannot edit DNS
+  records of example.com: it needs Zone → DNS → Edit (DNS Settings, DNS
+  Firewall and DNS Views are other permissions)*; *Cloudflare refuses the
+  token from this server's address 2a01:…: an IP filter on the token must
+  name that address, or the token is not valid*; *no zone is visible to the
+  token*. A hostname served from a zone the token cannot edit, or from a zone
+  it does not see, is a problem in `doctor` — its certificate is not coming;
+  anything else wrong with the token is a problem once hostnames are served
+  and worth a look until then. Because the check writes, it runs once at
+  start and at most once a minute on request, never in a loop; `doctor` with
+  an `admin` token asks for a fresh one, any other token reads the last. The
+  installer, given the token, prints these lines once the agent is up.
+  Nothing of the token itself is in any of this.
 - **SSL/TLS mode: Full (strict).** Set it on the zone. In *Flexible* mode
   Cloudflare talks to the server over plain HTTP, which Caddy redirects to
   HTTPS, which Cloudflare fetches over HTTP again: a redirect loop. *Full*
@@ -3377,7 +3735,8 @@ cd /opt/shipwick && docker compose up -d
   and inside the configuration the agent loads into Caddy — and therefore in
   Caddy's autosaved copy of it on the `caddy-config` volume. It is never
   logged and never returned by the API; `GET /server` says only that the DNS
-  challenge is on (`proxy.dns_challenge`), which `shipwick doctor` reads.
+  challenge is on (`proxy.dns_challenge`) and what the check above found
+  (`cloudflare`), both of which `shipwick doctor` reads.
 
 The proxy is Shipwick's own build of Caddy, `ghcr.io/shipwick/caddy`: the
 official image plus the Cloudflare DNS module and Shipwick's own way of
@@ -3469,6 +3828,7 @@ is not in order, and why:
 HOSTNAME            CERTIFICATE
 www.example.com     waiting for DNS: does not resolve yet; add an A record: www.example.com → 62.238.109.115 (DNS only, not proxied)
 new.example.com     being obtained: the proxy has no certificate for it yet; HTTPS connections to it fail until it does
+shop.example.com    being obtained: the proxy has no certificate for it yet: Let's Encrypt could not connect to the server on port 443 (tls-alpn-01): a firewall in front of it?
 old.example.com     expires in 9 days, on 2026-03-10 (Let's Encrypt E7)
 ```
 
@@ -3490,12 +3850,21 @@ own authority, and is reported as that. A hostname is *waiting for DNS* while
 the gate above holds it back, *being obtained* from the moment Caddy serves
 it until it presents a certificate for it, and *expiring* with 14 days or
 less to go: Caddy renews a ninety-day certificate thirty days before its end,
-so a certificate that gets that far is one whose renewal has been failing,
-and Caddy's log (`docker logs shipwick-caddy-1`) says why. The application's
-events record a certificate being obtained and one running out, and a
-[webhook](#7-deployment) is told `certificate.expiring` at 14 days and again
-at 3. The agent reaches Caddy at `caddy:443`; `SHIPWICK_PROXY_TLS_ADDR`
-changes that.
+so a certificate that gets that far is one whose renewal has been failing.
+Why is read out of Caddy's log for you: the agent follows the proxy's own
+messages as it follows its access log, and the last failure it logged for
+each hostname — which challenge, what the authority answered — is in
+`shipwick status` next to *being obtained*, in the application's events once
+per reason, in `GET /applications/:name` (`certificates[].failure`) and in
+`shipwick doctor` as a problem. The two a real server produced read *Let's
+Encrypt could not connect to the server on port 443 (tls-alpn-01): a firewall
+in front of it?* and *the DNS record for the challenge could not be created:
+the token cannot edit DNS records of example.com: it needs Zone → DNS →
+Edit*. A failure is forgotten when a certificate arrives; Caddy's own words
+stay in `docker logs shipwick-caddy-1`. The application's events record a
+certificate being obtained and one running out, and a [webhook](#7-deployment)
+is told `certificate.expiring` at 14 days and again at 3. The agent reaches
+Caddy at `caddy:443`; `SHIPWICK_PROXY_TLS_ADDR` changes that.
 
 **Traffic.** What the application writes is in `shipwick logs`; what was
 asked of it — how often, how it answered, how long it took — is in
@@ -3676,6 +4045,53 @@ certificates for it from its own local CA, so with the development stack up,
 `domain: hello.localhost` is reachable at `https://hello.localhost:8443`
 (`curl -k`, or trust Caddy's root certificate).
 
+### Behind Cloudflare only
+
+A server that admits ports 80 and 443 from Cloudflare's addresses alone, and
+from nowhere else, is a sound arrangement: every visitor comes through
+Cloudflare, and what Cloudflare refuses never reaches the server. It takes
+five things, and it changes what `shipwick doctor` can see.
+
+- **The provider's firewall** admits 80 and 443 (and 443/udp) from
+  Cloudflare's published ranges only — <https://www.cloudflare.com/ips-v4>
+  and <https://www.cloudflare.com/ips-v6> — and SSH from where you administer.
+  The ranges change rarely, and they do change: keep the firewall's copy
+  current. (The agent carries its own copy for recognising proxied records,
+  dated under *Behind Cloudflare* above; the firewall's is yours.)
+- **Every hostname served is proxied** (the orange cloud): the agent's and
+  the dashboard's hostnames too. A record that is *DNS only* would send
+  visitors straight at a server that refuses them.
+- **SSL/TLS mode *Full (strict)*** on the zone, as under *Behind Cloudflare*.
+- **`SHIPWICK_CLOUDFLARE_API_TOKEN`** on the agent, so that certificates come
+  through DNS. Let's Encrypt cannot reach port 443 through such a firewall:
+  without the token the `tls-alpn-01` challenge fails with *Timeout during
+  connect (likely firewall problem)*, which `shipwick status` and `doctor`
+  show as *Let's Encrypt could not connect to the server on port 443
+  (tls-alpn-01): a firewall in front of it?*
+- **The token's IP filter**, if it has one, names both of the server's
+  addresses, the IPv6 one included: a server that has one calls Cloudflare
+  from it. `doctor` prints the address Cloudflare saw the agent's check come
+  from.
+
+What `doctor` cannot see from outside: the agent's hostname resolves to
+Cloudflare, so the server's own address is nowhere in DNS, and ports 80 and
+443 and the targets of the records are not checked. The screen says so in
+one line — `! Behind Cloudflare only: ports and record targets are not
+checked from outside` — in place of the port lines. What it does see is
+what the agent sees from inside: the token's check and the certificates'
+failures, in the same screen.
+
+What Cloudflare's proxy does to a long silent stream: it closes a response
+that has been silent for about a hundred seconds. A followed log is not
+silent that long — the agent sends a line of nothing every 20 seconds — and
+when the stream is cut all the same, `shipwick logs -f` reconnects and takes
+it up where it stopped (§5). What Cloudflare refuses outright is a request
+body larger than its limit for your plan (100 MB on the free plan, per
+Cloudflare's documentation): an image sent by `shipwick deploy` from a
+`build`, a volume restore, an import. Send those through a tunnel that does
+not pass through Cloudflare: `ssh -L 9000:127.0.0.1:9000 user@server`, then
+`shipwick deploy --url http://127.0.0.1:9000`.
+
 ## 12. Security
 
 **The Docker socket is root.** The agent needs `/var/run/docker.sock`, and
@@ -3740,6 +4156,17 @@ starts, and says so: `shipwick doctor` reports it, and `GET /server` carries
   for the agent; the agent keeps listening there so that the port works. On
   Docker 28 and later the port arrives on the control network and nothing is
   open. Upgrade Docker, or give the API a hostname and remove the port.
+  There is no third way on Docker 27: the compose files start the agent on
+  the control network alone, and the moment it joins `shipwick` for its
+  health checks the daemon moves the port there — measured on Docker 27.5.1,
+  where the forwarding rule went from the control address to the
+  application network's with the join, and a listener on the control address
+  alone was reset; on 29.9 with the agent's gateway priority it stayed. An
+  address of the agent's own on the control network changes nothing, and
+  the installation's networks have no fixed subnet for one anyway. That is
+  why the installer and `configs/compose.production.yml` publish no port,
+  and why the development compose file, which does, says that it is open
+  on Docker before 28 by design.
 
 An agent installed [from a package](#installation-from-a-package) is a
 process of the host, and the addresses of a host are reachable from every
@@ -3928,9 +4355,11 @@ What Shipwick does:
   the remaining `env` values in from the secrets stored on the server, and a
   name neither has stops the deployment.
 - A secret stored with `shipwick secret set` is read by nobody afterwards: the
-  API lists names and dates only, the value goes into containers and nowhere
-  else. Its value is never an argument (arguments leak through `ps` and shell
-  history): it is asked for without echo, piped in, or read from a file.
+  API lists names, scopes and dates only, the value goes into containers and
+  nowhere else. Its value is never an argument (arguments leak through `ps`
+  and shell history): it is asked for without echo, piped in, or read from a
+  file. A secret stored with `--app` reaches that application's containers
+  and no other's.
 - A registry password stored with `shipwick registry login` is handled the
   same way: never an argument, never listed, logged or returned, sent to the
   Docker daemon with a pull from its registry and nowhere else.
@@ -4070,9 +4499,11 @@ key to change them; user namespaces are the daemon's to configure. An agent
 older than 0.8 does not know `security` and refuses a `deploy.yaml` that
 has it, as it refuses every key it does not know — the application is not
 deployed without what the block asks for — and `shipwick deploy` says that
-the server is older than the file and how to upgrade it. An export is the
-exception: an agent older than 0.8 that imports an export written by a newer
-one reads the applications without the block.
+the server is older than the file and how to upgrade it. An export written
+before 0.9 is the exception: an agent older than 0.8 that imports one reads
+the applications without the block. From 0.9 on an export names the keys it
+uses, and an agent that lacks one refuses it ([Moving to a new
+server](#moving-to-a-new-server)).
 
 
 **Secrets at rest.** The `env` values of every deployment, the secrets
@@ -4238,10 +4669,11 @@ Found a vulnerability? Please report it privately: [SECURITY.md](../SECURITY.md)
 
 The standard installation gives the agent `/var/run/docker.sock` of a daemon
 that runs as root, which is why everything above starts with "the Docker
-socket is root". Two arrangements give it less. They are independent and can
-be combined; neither is what the installer sets up, and each costs
-something. Both are run by a script in the repository, in a Docker daemon of
-its own: `sh scripts/test-socket-proxy.sh`, `sh scripts/test-rootless.sh`.
+socket is root". Three arrangements give it less. They are independent; none
+is what the installer sets up, and each costs something. Each is run by a
+script in the repository, in a Docker daemon of its own:
+`sh scripts/test-socket-proxy.sh`, `sh scripts/test-docker-authz.sh`,
+`sh scripts/test-rootless.sh`.
 
 #### Behind a socket proxy
 
@@ -4331,10 +4763,85 @@ proxy used here checks bind mounts and stops there; the other maintained
 one, [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy),
 filters by section of the API and would allow every call on containers
 once any is allowed, by its documentation. Docker's own authorization
-plugins see the whole request, and apply to every client of the daemon,
-your own `docker` commands included; none was tried here. For a server
-where a compromised agent must not become root, rootless Docker below is
-the arrangement that holds.
+plugins see the whole request: that is the next arrangement. For a server
+where a compromised agent must not become root, it or rootless Docker
+below is what holds.
+
+#### Behind an authorization plugin
+
+Docker asks an [authorization
+plugin](https://docs.docker.com/engine/extend/plugins_authorization/), when
+one is configured, about every request to the daemon before it acts on it —
+the method, the path and the body — and does what the plugin answers.
+[configs/docker-authz.rego](../configs/docker-authz.rego) is a policy for
+[opa-docker-authz](https://github.com/open-policy-agent/opa-docker-authz),
+the Open Policy Agent's plugin, maintained since 2016 (v0.11 is of
+2026-10-06). The policy allows everything except what makes a container, or a
+command run in one, root on the server:
+
+- a privileged container;
+- a directory of the server mounted: `Binds`, a `Mounts` entry of type
+  `bind`, another container's volumes (`--volumes-from`), and a volume made
+  of a directory (`docker volume create -o o=bind`), with one path allowed,
+  the daemon's own socket, which the agent's container is given and which
+  leads back to the policy;
+- a namespace of the server: `--pid`, `--net`, `--ipc`, `--userns`, `--uts`
+  or `--cgroupns` set to `host`;
+- a capability beyond Docker's default set (`--cap-add SYS_ADMIN`, `ALL`), a
+  device, and `seccomp`, `apparmor` or `systempaths` set to `unconfined`
+  or `label=disable`;
+- a privileged command in a container (`docker exec --privileged`);
+- Swarm, and plugins.
+
+Nothing in Shipwick changes for it: the compose file stays as it is, with or
+without the socket proxy. On the server, as root:
+
+```bash
+mkdir -p /etc/docker/policies
+curl -fsSL -o /etc/docker/policies/authz.rego \
+  https://raw.githubusercontent.com/shipwick/shipwick/v<version>/configs/docker-authz.rego
+docker plugin install --grant-all-permissions ghcr.io/open-policy-agent/opa-docker-authz:v0.11 \
+  opa-args="-policy-file /opa/policies/authz.rego"
+# Add to /etc/docker/daemon.json:
+#   "authorization-plugins": ["ghcr.io/open-policy-agent/opa-docker-authz:v0.11"]
+kill -HUP "$(pidof dockerd)"    # the daemon reads that setting again without a restart
+```
+
+The plugin has `/etc/docker` of the server at `/opa`, read-only, and reads
+the policy file again for every request, so a change to the file is in
+effect at once.
+
+**What it adds to the socket proxy** is the body of the request. Each of
+these was tried through the daemon's socket and refused with `authorization
+denied by plugin …: request rejected by administrative policy`: `docker run
+--privileged`, `-v /:/host`, `--mount type=bind`, `--volumes-from`,
+`--pid=host`, `--net=host`, `--ipc=host`, `--cap-add SYS_ADMIN`, `--cap-add
+ALL`, `--device`, `--security-opt seccomp=unconfined`, `docker exec
+--privileged`, `docker volume create -o type=none -o o=bind -o device=/`,
+`docker swarm init`, `docker plugin ls`. `scripts/test-docker-authz.sh`
+installs the plugin in a daemon of its own, runs everything an installation
+does through it — the agent never asks for any of the above, so everything
+passes — and then tries each refusal. On Docker 29.9 with the plugin's v0.11.
+
+One thing the plugin itself does not do: it decodes a request's body only
+when the request says `Content-Type: application/json` and nothing more,
+while the daemon also takes `application/json; charset=utf-8`. Sent with
+that header, a request for a privileged container reached the daemon with no
+body for the policy to see, and was accepted — tried here. The policy
+therefore refuses a `containers/create`, an `exec` or a `volumes/create`
+whose body it was not given; no Docker client sends JSON with a charset,
+so nothing legitimate is refused by that.
+
+**What it costs.** The policy judges every client of the daemon, not the
+agent alone: your own `docker run --privileged` on the server is refused,
+and so is a bind mount of your own — a CA file or a `config.json` in
+`compose.override.yml` — until its path is added to `allowed_binds` in the
+policy. `docker plugin` commands are refused too, so to change or remove the
+plugin, take it out of `daemon.json` and send the daemon `HUP` first. A
+policy file that is missing or unreadable makes the plugin allow every
+request; it refuses nothing by accident, and protects nothing by accident
+either. With the socket proxy or with rootless Docker in the same
+installation it was not run.
 
 #### Rootless Docker
 
@@ -4389,7 +4896,11 @@ cannot expose privileged port 80, you can add 'net.ipv4.ip_unprivileged_port_sta
 After a start that was refused, `docker compose up -d` again is not enough:
 the proxy's container was left on some of its networks only and starts that
 way, reaching the agent or the applications and not both. Make it again with
-`docker compose … up -d --force-recreate caddy`. The same message fails a
+`docker compose … up -d --force-recreate caddy`. The agent looks at the
+proxy's networks every half minute and says which are missing: in its log
+when that changes, in `GET /server` (`proxy.networks_missing`), in
+`shipwick server status`, and in `shipwick doctor` as a problem with that
+command. The same message fails a
 deployment whose `publish` names a port below the setting; ports from it
 upwards are published as on any server.
 

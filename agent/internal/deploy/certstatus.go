@@ -124,6 +124,11 @@ type certState struct {
 	// warned is how far the expiry has been reported: 0 not, 1 as expiring,
 	// 2 as about to.
 	warned int
+	// failure is the last failure the proxy logged for the hostname, and
+	// failureTold the reason that has been recorded as an event: see
+	// certfailures.go.
+	failure     *certFailure
+	failureTold string
 }
 
 func newCertWatch() *certWatch {
@@ -196,6 +201,8 @@ func (e *Engine) checkCertificates(ctx context.Context, now time.Time) {
 		}
 	}
 
+	e.reportCertificateFailures(ctx, plans, now)
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for host := range w.states {
@@ -230,6 +237,11 @@ func (e *Engine) noteCertificate(ctx context.Context, p routingPlan, host string
 		st.status, st.message = api.CertUnknown, "the proxy could not be asked: "+probeErr.Error()
 	default:
 		obtained, st.pending = st.pending, false
+		if obtained || cert.NotAfter.After(st.notAfter) {
+			// A certificate arrived, or a newer one: what failed before
+			// it is over.
+			st.failure, st.failureTold = nil, ""
+		}
 		st.issuer, st.notAfter = cert.Issuer, cert.NotAfter
 		left := cert.NotAfter.Sub(now)
 		window, urgent := certWindows(cert)
@@ -335,6 +347,7 @@ func (e *Engine) certificates(hosts hostnames) []api.HostnameCertificate {
 		}
 		e.certStatus.mu.Lock()
 		st := e.certStatus.states[host]
+		var failure *certFailure
 		switch {
 		case st == nil || st.status == "":
 			c.Message = "not checked yet"
@@ -345,7 +358,11 @@ func (e *Engine) certificates(hosts hostnames) []api.HostnameCertificate {
 				c.NotAfter = &notAfter
 			}
 		}
+		if st != nil {
+			failure = st.failure
+		}
 		e.certStatus.mu.Unlock()
+		e.explainFailure(&c, failure)
 		out = append(out, c)
 	}
 	return out

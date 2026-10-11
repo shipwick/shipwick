@@ -88,8 +88,11 @@ func fill(t *testing.T, s *Store) int64 {
 	if err != nil {
 		t.Fatalf("CreateDeployment: %v", err)
 	}
-	if err := s.SetSecret(ctx, "API_KEY", "s3cr3t", now); err != nil {
+	if err := s.SetSecret(ctx, "", "API_KEY", "s3cr3t", now); err != nil {
 		t.Fatalf("SetSecret: %v", err)
+	}
+	if err := s.SetSecret(ctx, "api", "API_KEY", "its-own", now); err != nil {
+		t.Fatalf("SetSecret for api: %v", err)
 	}
 	if err := s.SetRegistry(ctx, "ghcr.io", "octocat", "ghp_token", now); err != nil {
 		t.Fatalf("SetRegistry: %v", err)
@@ -108,9 +111,14 @@ func assertFilled(t *testing.T, s *Store, deployment int64) {
 	if d.Spec.Env["DB_PASSWORD"] != "hunter2" || d.Spec.Env["PLAIN"] != "value" {
 		t.Errorf("env = %v", d.Spec.Env)
 	}
-	secrets, err := s.GetSecrets(ctx, []string{"API_KEY"})
-	if err != nil || secrets["API_KEY"] != "s3cr3t" {
-		t.Errorf("secret = %q, %v", secrets["API_KEY"], err)
+	secrets, err := s.GetSecrets(ctx, "", []string{"API_KEY"})
+	if err != nil || secrets["API_KEY"].Value != "s3cr3t" {
+		t.Errorf("secret = %q, %v", secrets["API_KEY"].Value, err)
+	}
+	// An application's own secret is sealed under a label of its own, and a
+	// rotation must know it.
+	if own, err := s.GetSecrets(ctx, "api", []string{"API_KEY"}); err != nil || own["API_KEY"].Value != "its-own" {
+		t.Errorf("api's secret = %q, %v", own["API_KEY"].Value, err)
 	}
 	username, password, found, err := s.RegistryCredential(ctx, "ghcr.io")
 	if err != nil || !found || username != "octocat" || password != "ghp_token" {
@@ -143,8 +151,8 @@ func TestRotateKeyReencryptsEveryKindOfSealedValueAndReplacesTheKeyFile(t *testi
 	if err != nil {
 		t.Fatalf("RotateKey: %v", err)
 	}
-	if rotation.Values != 2 || rotation.Deployments != 1 {
-		t.Errorf("rotation = %+v, want 2 values and 1 deployment", rotation)
+	if rotation.Values != 3 || rotation.Deployments != 1 {
+		t.Errorf("rotation = %+v, want 3 values (two secrets, a registry password) and 1 deployment", rotation)
 	}
 	if rotation.FromEnvironment || rotation.Key != "" || rotation.KeyFile != k.keyFile {
 		t.Errorf("a key kept in the data directory is replaced there and never returned: %+v", rotation)
@@ -382,7 +390,7 @@ func TestRotateKeyWithTheKeyInTheEnvironmentReturnsItOnceAndKeepsACopyUntilTheRe
 	}
 	// The agent keeps working with the new key until it restarts.
 	assertFilled(t, s, id)
-	if err := s.SetSecret(context.Background(), "LATER", "v", time.Now()); err != nil {
+	if err := s.SetSecret(context.Background(), "", "LATER", "v", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -470,7 +478,7 @@ func TestValuesWrittenWhileTheKeyRotatesAreAllUnderTheFinalKey(t *testing.T) {
 	// waiting for a rotation.
 	const each = 40
 	writers := []func(i int) error{
-		func(i int) error { return s.SetSecret(ctx, fmt.Sprintf("S_%d", i), "value", time.Now()) },
+		func(i int) error { return s.SetSecret(ctx, "", fmt.Sprintf("S_%d", i), "value", time.Now()) },
 		func(i int) error {
 			return s.SetRegistry(ctx, fmt.Sprintf("r%d.example.com", i), "user", "password", time.Now())
 		},

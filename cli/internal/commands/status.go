@@ -109,6 +109,7 @@ func (c *cli) status(ctx context.Context, name string, verbose bool) error {
 	fields = append(fields, c.backupStatusFields(ctx, cl, app)...)
 	c.ui.Fields(fields)
 	c.certificateLines(app.Certificates, verbose)
+	c.probeLines(ctx, cl, app)
 
 	if len(app.Containers) > 0 {
 		c.ui.Println()

@@ -34,22 +34,32 @@ var ErrNoProxyContainer = errors.New("the proxy runs outside Docker; static appl
 // the compose project the agent runs in. It must be running: the files of a
 // static application are put there and checked with commands run inside it.
 func (r *Runtime) ProxyContainer(ctx context.Context) (string, error) {
+	item, err := r.runningProxy(ctx)
+	if err != nil {
+		return "", err
+	}
+	return item.ID, nil
+}
+
+// runningProxy is the proxy's container as the daemon lists it, with its
+// networks; ErrNoProxyContainer when there is none.
+func (r *Runtime) runningProxy(ctx context.Context) (container.Summary, error) {
 	filters := client.Filters{}
 	filters.Add("label", composeProjectLabel+"="+r.composeProject(ctx))
 	filters.Add("label", composeServiceLabel+"="+composeProxy)
 	res, err := r.cli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
 	if err != nil {
-		return "", fmt.Errorf("find the proxy container: %w", err)
+		return container.Summary{}, fmt.Errorf("find the proxy container: %w", err)
 	}
 	for _, item := range res.Items {
 		if item.State == container.StateRunning {
-			return item.ID, nil
+			return item, nil
 		}
 	}
 	if len(res.Items) > 0 {
-		return "", errors.New("the proxy container is not running")
+		return container.Summary{}, errors.New("the proxy container is not running")
 	}
-	return "", ErrNoProxyContainer
+	return container.Summary{}, ErrNoProxyContainer
 }
 
 // ownProject remembers the compose project of the agent's own container. A

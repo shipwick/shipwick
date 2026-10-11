@@ -57,7 +57,7 @@ func (f *fixture) importInto(query string, archive []byte, passphrase string) (i
 func TestExportIsEncryptedAndImportsOnAnotherServer(t *testing.T) {
 	a := newFixture(t)
 	a.deployStateful(map[string]string{"PG_VERSION": "17"})
-	if err := a.store.SetSecret(t.Context(), "DB_PASSWORD", "s3cret-value", a.api.now()); err != nil {
+	if err := a.store.SetSecret(t.Context(), "", "DB_PASSWORD", "s3cret-value", a.api.now()); err != nil {
 		t.Fatal(err)
 	}
 

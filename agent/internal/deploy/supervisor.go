@@ -109,9 +109,13 @@ func (e *Engine) StartSupervisor() {
 // tick performs one supervision pass. Time is a parameter so that tests can
 // drive the backoff schedule without sleeping through it.
 func (s *supervisor) tick(ctx context.Context, now time.Time) {
-	if !s.e.dockerAnswers(ctx, now) {
+	// Docker is asked for its containers here and nowhere else in the tick:
+	// see snapshot.go.
+	listed, ok := s.e.dockerAnswers(ctx, now)
+	if !ok {
 		return
 	}
+	snap := newContainerSnapshot(listed)
 	apps, err := s.e.store.ListApplications(ctx)
 	if err != nil {
 		s.logErr(ctx, "list applications", err)
@@ -120,44 +124,43 @@ func (s *supervisor) tick(ctx context.Context, now time.Time) {
 
 	active := map[int64]bool{}
 	for _, app := range apps {
-		if app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
+		if app.ActiveDeploymentID != nil && app.DesiredState == api.DesiredRunning {
+			active[*app.ActiveDeploymentID] = true
+		}
+	}
+	// Before the applications, not after: a replica this tick recreates has
+	// bookkeeping the list predates, and forgetting it would route to the
+	// replica before its health check has passed.
+	s.forgetGone(snap, active)
+	for _, app := range apps {
+		if app.ActiveDeploymentID == nil || !active[*app.ActiveDeploymentID] {
 			continue
 		}
-		active[*app.ActiveDeploymentID] = true
 		// Busy means a user operation owns the application right now; it
 		// will be looked at again next tick.
 		if wait, err := s.e.tryLock(app.Name, true); wait != nil || err != nil {
 			continue
 		}
-		s.superviseApp(ctx, now, app)
+		s.superviseApp(ctx, now, app, snap)
 		s.e.unlock(app.Name)
 	}
-	s.forgetGone(ctx, active)
 	s.forgetDown(apps)
 	s.forgetAlerts(apps, now)
 
 	// Routing follows readiness: a replica that just died or turned unhealthy
 	// leaves the rotation here, one that recovered rejoins it. Syncing is a
 	// no-op unless the set of ready replicas actually changed.
-	s.syncProxy(ctx)
+	s.syncProxy(ctx, snap)
+	s.e.checkProxyNetworks(ctx, now)
 }
 
 // forgetGone drops bookkeeping for containers and deployments that no longer
 // exist, so memory does not grow with every deployment.
-func (s *supervisor) forgetGone(ctx context.Context, activeDeployments map[int64]bool) {
-	containers, err := s.e.rt.ListContainers(ctx, "")
-	if err != nil {
-		s.logErr(ctx, "list containers", err)
-		return
-	}
-	exists := make(map[string]bool, len(containers))
-	for _, c := range containers {
-		exists[c.ID] = true
-	}
+func (s *supervisor) forgetGone(snap *containerSnapshot, activeDeployments map[int64]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id := range s.states {
-		if !exists[id] {
+		if _, exists := snap.byID[id]; !exists {
 			delete(s.states, id)
 		}
 	}
@@ -170,8 +173,8 @@ func (s *supervisor) forgetGone(ctx context.Context, activeDeployments map[int64
 
 // syncProxy reports a proxy problem when it appears and when it clears, not
 // on every tick in between.
-func (s *supervisor) syncProxy(ctx context.Context) {
-	err := s.e.SyncProxy(ctx)
+func (s *supervisor) syncProxy(ctx context.Context, snap *containerSnapshot) {
+	err := s.e.syncRoutes(ctx, snap)
 	if ctx.Err() != nil {
 		return
 	}
@@ -194,10 +197,11 @@ func (s *supervisor) syncProxy(ctx context.Context) {
 }
 
 // superviseApp reconciles one application with what Docker reports. The
-// caller holds the application's lock, and the containers are listed under
-// it: a snapshot taken earlier could predate a deployment that has since
-// finished, and would make its brand-new replicas look missing.
-func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.Application) {
+// caller holds the application's lock; the containers were listed before it
+// was taken, so a deployment that finished in between has replicas the list
+// does not have and retired ones it still has. Docker is asked by ID about
+// both before anything is concluded (see snapshot.go).
+func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.Application, snap *containerSnapshot) {
 	app, err := s.e.store.GetApplication(ctx, app.Name)
 	if err != nil || app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
 		return
@@ -215,11 +219,7 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 		s.logErr(ctx, "list replicas", err)
 		return
 	}
-	containers, err := s.e.rt.ListContainers(ctx, app.Name)
-	if err != nil {
-		s.logErr(ctx, "list containers", err)
-		return
-	}
+	containers := snap.ofApp(app.Name)
 	byID := make(map[string]docker.Container, len(containers))
 	for _, c := range containers {
 		byID[c.ID] = c
@@ -235,6 +235,11 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 			continue // replaced by the last deployment and on its way out: see drain.go
 		}
 		if c.DeploymentID != d.ID {
+			// Or retired by a deployment that finished after the list was
+			// taken, and gone: Docker is asked before anything is said of it.
+			if _, err := s.e.rt.InspectContainer(ctx, c.ID); errors.Is(err, docker.ErrNotFound) {
+				continue
+			}
 			// In the background: its grace period is its application's
 			// business, and a tick must not sit it out with the lock held.
 			if s.e.retireInBackground(c, s.e.gracePeriodOf(ctx, c.DeploymentID), nil) {
@@ -247,14 +252,23 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 	for _, r := range replicas {
 		c, exists := byID[r.ContainerID]
 		if !exists {
-			s.noteDisappeared(ctx, app, r)
-			continue
+			// Created after the list was taken, or gone: Docker says which.
+			var err error
+			if c, exists, err = snap.lookup(ctx, s.e.rt, r.ContainerID); err != nil {
+				s.logErr(ctx, "inspect replica", err)
+				continue
+			}
+			if !exists {
+				s.noteDisappeared(ctx, app, r)
+				continue
+			}
+			byID[r.ContainerID] = c
 		}
 		present[r.Index] = true
 		if c.Running {
-			s.superviseRunning(ctx, now, app, d, r, c)
+			s.superviseRunning(ctx, now, app, d, r, c, snap)
 		} else if c.State == "exited" || c.State == "dead" || c.State == "created" {
-			s.superviseDown(ctx, now, app, d, r)
+			s.superviseDown(ctx, now, app, d, r, snap)
 		}
 	}
 
@@ -273,12 +287,9 @@ func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.
 
 // noteDisappeared retires the record of a replica whose container no longer
 // exists — removed by hand, by `docker system prune`, by anything that is not
-// Shipwick. Docker is asked once more by ID first: acting on a listing alone
-// would be acting on hearsay.
+// Shipwick. The caller has asked Docker by ID, not only the listing: acting on
+// a listing alone would be acting on hearsay.
 func (s *supervisor) noteDisappeared(ctx context.Context, app store.Application, r store.Replica) {
-	if _, err := s.e.rt.InspectContainer(ctx, r.ContainerID); !errors.Is(err, docker.ErrNotFound) {
-		return
-	}
 	if err := s.e.store.MarkReplicaRemoved(ctx, r.ContainerID, time.Now()); err != nil {
 		s.logErr(ctx, "mark replica removed", err)
 		return
@@ -357,7 +368,7 @@ func (s *supervisor) reset(containerID string, hasHealthCheck bool) {
 	s.states[containerID] = st
 }
 
-func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app store.Application, d store.Deployment, r store.Replica, c docker.Container) {
+func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app store.Application, d store.Deployment, r store.Replica, c docker.Container, snap *containerSnapshot) {
 	s.mu.Lock()
 	st := s.state(r.ContainerID, d)
 	st.exitSeen, st.leaveStopped = false, false
@@ -411,7 +422,7 @@ func (s *supervisor) superviseRunning(ctx context.Context, now time.Time, app st
 		}
 	}
 	if restartUnhealthy {
-		s.restart(ctx, now, app, r, func() error {
+		s.restart(ctx, now, app, r, snap, func() error {
 			return s.e.restartNameless(ctx, r.ContainerID, s.e.gracePeriod(d.Spec))
 		})
 		s.e.archiveInBackground(r.ContainerID, logEnd{reason: api.LogReasonUnhealthy})
@@ -464,7 +475,7 @@ func (s *supervisor) probe(ctx context.Context, now time.Time, app store.Applica
 	}
 }
 
-func (s *supervisor) superviseDown(ctx context.Context, now time.Time, app store.Application, d store.Deployment, r store.Replica) {
+func (s *supervisor) superviseDown(ctx context.Context, now time.Time, app store.Application, d store.Deployment, r store.Replica, snap *containerSnapshot) {
 	s.mu.Lock()
 	st := s.state(r.ContainerID, d)
 	firstSight := !st.exitSeen
@@ -506,7 +517,7 @@ func (s *supervisor) superviseDown(ctx context.Context, now time.Time, app store
 	due := !st.leaveStopped && !now.Before(st.nextRestart)
 	s.mu.Unlock()
 	if due {
-		s.restart(ctx, now, app, r, func() error { return s.e.startNameless(ctx, r.ContainerID) })
+		s.restart(ctx, now, app, r, snap, func() error { return s.e.startNameless(ctx, r.ContainerID) })
 	}
 }
 
@@ -529,9 +540,14 @@ func (s *supervisor) delay(restartsSoFar int) time.Duration {
 	return s.e.opts.CrashLoopDelay
 }
 
-// restart brings a replica back with do, and advances its backoff.
-func (s *supervisor) restart(ctx context.Context, now time.Time, app store.Application, r store.Replica, do func() error) {
+// restart brings a replica back with do, and advances its backoff. The tick's
+// list still has the replica as it was found; routing at the end of the tick
+// must see it as it is now.
+func (s *supervisor) restart(ctx context.Context, now time.Time, app store.Application, r store.Replica, snap *containerSnapshot, do func() error) {
 	err := do()
+	if err == nil {
+		snap.refresh(ctx, s.e.rt, r.ContainerID)
+	}
 
 	s.mu.Lock()
 	st := s.states[r.ContainerID]

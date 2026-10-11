@@ -44,12 +44,13 @@ func (e *Engine) DeployWith(ctx context.Context, app spec.App, plain []string) (
 	return e.start(ctx, app.Name, func(ctx context.Context) (origin, error) {
 		// The one place a spec arrives from outside: whatever the CLI left
 		// for the server to fill in is filled in here, and stored filled in.
-		resolved, err := e.resolveSecrets(ctx, app)
+		resolved, scoped, err := e.resolveSecrets(ctx, app)
 		if err != nil {
 			return origin{}, err
 		}
 		references := spec.ReferencesOf(app)
 		references.Plain = plain
+		references.Scoped = scoped
 		return origin{spec: resolved, kind: api.KindDeploy, references: references.For(app)}, nil
 	})
 }

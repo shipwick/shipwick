@@ -112,6 +112,22 @@ export function keptPlain(text: string, document: string, plain: readonly string
   })
 }
 
+/**
+ * The handed-out values the text no longer holds as they were: changed or
+ * removed here, the agent masks them from the next deployment on, and the
+ * document shows "********" where they stood until `shipwick deploy` sends the
+ * file from the project again. Said next to the editor before the deployment,
+ * so nobody finds out afterwards. A variable the text dropped is not among
+ * them: there is nothing left to mask.
+ */
+export function maskedByEdit(text: string, document: string, plain: readonly string[]): string[] {
+  const kept = new Set(keptPlain(text, document, plain))
+  return plain.filter((field) => {
+    const variable = maskedVariable(field)
+    return variable !== '' && !kept.has(field) && envEntry(text, variable) !== ''
+  }).map(maskedVariable)
+}
+
 /** The keys of deploy.yaml that came with 0.8: an agent before it answers `unknown field "<key>"` for them, which reads like a typo and is not one. */
 const KEYS_SINCE_08: readonly string[] = ['security']
 

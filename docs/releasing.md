@@ -10,6 +10,7 @@ which — only after the whole CI suite passed on that commit — publishes:
 | `<binary>.spdx.json` for each of those CLI binaries, and `shipwick-agent_<arch>.spdx.json` for the agent in the packages: what each was built from | the GitHub release |
 | `compose.production.yml`, **all three images pinned to this version** | the GitHub release |
 | `install.sh`, the installer as it is at the tag, for `shipwick server bundle` | the GitHub release |
+| `install.ps1`, the Windows installer of the CLI as it is at the tag | the GitHub release |
 | `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard`, `ghcr.io/shipwick/caddy` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
 | `image-digests.txt`: the digests of those images, read back from the registry | the GitHub release |
 | `checksums.txt` (SHA-256 of every file above) | the GitHub release |

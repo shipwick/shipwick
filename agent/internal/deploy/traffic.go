@@ -385,6 +385,7 @@ func (e *Engine) startProxyWatch() {
 			}
 		}
 	}()
+	e.startFailureWatch()
 }
 
 // followProxy reads the access log from now on, and opens it again whenever

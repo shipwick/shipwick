@@ -30,7 +30,7 @@ proxy:
 func (h *harness) secrets(pairs ...string) {
 	h.t.Helper()
 	for i := 0; i+1 < len(pairs); i += 2 {
-		if err := h.store.SetSecret(context.Background(), pairs[i], pairs[i+1], time.Now()); err != nil {
+		if err := h.store.SetSecret(context.Background(), "", pairs[i], pairs[i+1], time.Now()); err != nil {
 			h.t.Fatal(err)
 		}
 	}

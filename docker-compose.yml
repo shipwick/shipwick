@@ -85,6 +85,11 @@ services:
       SHIPWICK_OIDC_REDIRECT_URL: ${SHIPWICK_OIDC_REDIRECT_URL:-}
     ports:
       # Loopback only: the API is plain HTTP and must not face the network.
+      # On Docker before 28 this port makes the API reachable from application
+      # containers, by design here: Docker forwards it over the network the
+      # agent joins for health checks, and the agent listens there to keep the
+      # port working (handbook, "Who can reach the API"). Production publishes
+      # no port.
       - "127.0.0.1:9000:9000"
     volumes:
       - agent-data:/var/lib/shipwick

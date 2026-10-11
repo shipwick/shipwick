@@ -33,7 +33,8 @@ import type { H3Event } from 'h3'
 const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE'])
 const FORWARDED_REQUEST_HEADERS = ['accept', 'content-type'] as const
 // retry-after: a 429 says when the agent will look at tokens from this address again.
-const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition', 'retry-after'] as const
+// x-shipwick-log-since: a followed log taken up with `since` says the agent honoured it; an older agent sends its tail instead.
+const FORWARDED_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-disposition', 'retry-after', 'x-shipwick-log-since'] as const
 
 /** The agent refuses JSON bodies over 64 KB; leave it a little room to say so itself. */
 const MAX_BODY_BYTES = 128 * 1024

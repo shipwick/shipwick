@@ -210,6 +210,7 @@ func (c *cli) followDeployment(ctx context.Context, cl *client.Client, d api.Dep
 		info, _ := cl.Server(ctx)
 		c.printNextSteps(name, final.Spec.Static != nil, info.DashboardURL)
 	}
+	c.reportProbe(ctx, cl, final)
 	return nil
 }
 

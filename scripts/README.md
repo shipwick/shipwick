@@ -40,7 +40,10 @@ What it does on a server:
    the installer never writes its YAML. Without a hostname nothing is saved:
    the agent publishes no port for the CLI to reach.
 7. Prints the token (once, and only if it was generated in this run) and the
-   next steps.
+   next steps. With `SHIPWICK_CLOUDFLARE_API_TOKEN` in `.env` and the CLI
+   signed in, also what the agent found out about the token — the lines of
+   `shipwick doctor` about it, run on the server (`cloudflare_findings`); an
+   older CLI or agent has none, and nothing is printed.
 
 Properties worth keeping if you change it:
 
@@ -133,6 +136,83 @@ container started with `--add-host agent.localhost:127.0.0.1`, copy
 `/data/caddy/pki/authorities/local/root.crt` out of the Caddy container and
 point `SSL_CERT_FILE` at it.
 
+## install.ps1
+
+The Windows counterpart of `install.sh --cli`, behind
+`irm https://get.shipwick.com/windows | iex`:
+
+```powershell
+irm https://get.shipwick.com/windows | iex                   # the latest release
+$env:SHIPWICK_VERSION = 'v0.8.1'; irm https://get.shipwick.com/windows | iex
+.\install.ps1 -Version v0.8.1 -Destination C:\tools\shipwick  # from a file
+& ([scriptblock]::Create((irm https://get.shipwick.com/windows))) -Destination C:\tools\shipwick
+```
+
+What it does:
+
+1. Names the build for the machine: `amd64` or `arm64`. PowerShell 7 asks
+   .NET (`RuntimeInformation.OSArchitecture`), which names the machine even
+   from an emulated x64 process on Windows on Arm; Windows PowerShell reads
+   the system's `PROCESSOR_ARCHITECTURE` from the registry, which is the
+   machine's whatever the process is, and falls back to the process's own.
+2. Resolves `latest` to a tag: GitHub answers `/releases/latest` with a
+   redirect to the release's page, and the tag is its last segment — one
+   request, never a pre-release, and no API with an hourly limit. A version
+   given by hand must look like one before it goes into a URL.
+3. Downloads `checksums.txt` and `shipwick_windows_<arch>.exe` from that
+   release, each through a temporary name, and verifies the binary's SHA-256
+   against the line in `checksums.txt`. **A mismatch removes the download
+   and installs nothing.**
+4. Where `cosign` is on the `PATH`, verifies `checksums.txt` against the
+   release's `checksums.txt.sigstore.json` first — `cosign verify-blob` with
+   the identity of the release workflow at exactly that tag, as `shipwick
+   upgrade` does — and stops if it is not the workflow's. Without cosign it
+   says in one line that it did not check; a release without a signature
+   (before 0.8.0) is a warning. `SHIPWICK_REQUIRE_SIGNATURE=1` turns both
+   into a refusal, as for `install.sh`.
+5. Puts the binary at `%LOCALAPPDATA%\Programs\shipwick\shipwick.exe` (or
+   `-Destination`). A `shipwick.exe` that is there and running cannot be
+   overwritten but can be renamed: it moves aside as `shipwick.old.exe`,
+   which shipwick removes on its next run, the way `shipwick upgrade` does.
+6. Adds the directory to the user's `PATH` once: in `HKCU\Environment`,
+   appended to the value as it is (unexpanded, so `%USERPROFILE%\bin` stays
+   as written), in the current process, and announced with
+   `WM_SETTINGCHANGE` so that terminals opened from now on carry it. The
+   output says that terminals already open do not. A `shipwick.exe` that
+   `PATH` finds ahead of the new one is named, because it is the one that
+   would go on running.
+
+Properties worth keeping if you change it:
+
+- **Safe to pipe.** Everything is in functions and the last line is the one
+  call, as in `install.sh`: a download cut off half-way executes nothing.
+  Nothing is assigned at the top level, because `iex` runs the script in the
+  caller's scope: `$ErrorActionPreference` and the like are set inside the
+  entry function and go no further.
+- **A failure is a terminating error, never `exit`.** Piped into `iex`,
+  `exit` would close the window. The entry function prints the `✗` line and
+  throws; a prompt gets its prompt back, a script that ran the installer
+  stops with a non-zero exit code, and so does `powershell -File`.
+- **ASCII only.** Windows PowerShell reads a file without a byte-order mark
+  in the system code page; the check marks are written as `[char]0x2713`.
+- **Both editions.** It runs under Windows PowerShell 5.1 and PowerShell 7,
+  and the differences are in one place each: the architecture (above), the
+  redirect (one .NET returns a response that was not followed, the other
+  throws an exception that carries it), and `-UseBasicParsing`, which 5.1
+  needs and 7 ignores. `Invoke-WebRequest`'s progress bar is turned off for
+  the run: under 5.1 the 14 MB binary took six seconds to download with it
+  and under one without, on one machine.
+- **Checked with PSScriptAnalyzer** (`Invoke-ScriptAnalyzer -Path
+  scripts/install.ps1`, in CI with every rule at every severity); the one
+  suppression is `PSAvoidUsingWriteHost`, because an installer talks to the
+  person running it.
+
+Testing it: run it with `-Destination` into a scratch directory, under both
+`powershell` and `pwsh`, and run the installed `shipwick.exe --version`. The
+`PATH` step writes to the registry; read `HKCU\Environment\Path` first and
+put it back afterwards. The signature paths can be walked with a `cosign.cmd`
+on the `PATH` that records its arguments and exits as told.
+
 ## test-install.sh
 
 The installer, run as a new server would run it and then again as an
@@ -204,16 +284,17 @@ again and says why, and that is what is checked.
 built here, for two runs at once. CI runs it for the last two releases on
 `main` and before a release. What every release's walk found is in the
 handbook, §4, *Upgrading*.
-## test-socket-proxy.sh, test-rootless.sh
+## test-socket-proxy.sh, test-docker-authz.sh, test-rootless.sh
 
-The two arrangements of the handbook's *Less than the whole socket*, each
+The three arrangements of the handbook's *Less than the whole socket*, each
 started in a Docker daemon of its own and put through everything an
 installation does:
 
 ```bash
 sh scripts/test-socket-proxy.sh              # the agent behind configs/compose.socket-proxy.yml
+sh scripts/test-docker-authz.sh              # a daemon that asks opa-docker-authz, with configs/docker-authz.rego
 sh scripts/test-rootless.sh                  # on docker:dind-rootless, with configs/compose.rootless.yml
-sh scripts/test-rootless.sh --socket-proxy   # both
+sh scripts/test-rootless.sh --socket-proxy   # both overlays
 ```
 
 Each builds the three images and the CLI from the checkout (Docker, and Go
@@ -225,7 +306,7 @@ one-off command, a backup with its verification, a restore, a static
 folder, a built image, an export and an import, deletion, with the fixtures
 of `scripts/testdata`. Nothing else of the Docker they are started from is
 touched; the container is removed at the end unless `SHIPWICK_TEST_KEEP=1`.
-`test-lib.sh` holds what the two share and lists the variables. They take a
+`test-lib.sh` holds what they share and lists the variables. They take a
 few minutes each, most of it pulling inside the new daemon, and are not part
 of CI.
 
@@ -234,11 +315,42 @@ of CI.
   allow-list of `configs/compose.socket-proxy.yml` and in the handbook's
   table**, and this is the test that notices. It then tries what the proxy
   must refuse, and what it is documented not to.
+- `test-docker-authz.sh` installs the plugin in the daemon, points the daemon
+  at it through `daemon.json` and `SIGHUP`, and runs the cycle: the policy
+  refuses nothing the agent asks for, so an operation that fails is a
+  request the agent did not make before. It then tries each refusal the
+  handbook lists, and a request whose body the plugin cannot read.
+  `SHIPWICK_AUTHZ_PLUGIN` names another build of the plugin.
 - `test-rootless.sh` first starts the stack with ports below 1024 closed to
   ordinary users, which must fail with Docker's message, and after that
   recreates it: the refused start leaves the proxy's container on one of its
   two networks. Its daemon has no cgroups, so it also holds the agent to
   saying that limits are not enforced.
+
+## test-package.sh
+
+The `.deb` and the `.rpm` of the agent, installed where they are meant for
+and put to use:
+
+```bash
+sh scripts/test-package.sh                           # builds the packages first (build-packages.sh)
+SHIPWICK_PACKAGES=dist sh scripts/test-package.sh    # packages built already
+```
+
+It starts `docker:dind` as the server and, inside it, a container of
+`debian:stable-slim` and then one of `rockylinux/rockylinux:9` as the host
+the package is installed on: in the daemon's network namespace, with the
+daemon's socket and `/run/shipwick`, which is what the agent sees of a
+server with Docker. In each it installs the package (`dpkg -i`, `rpm -i`),
+checks what the package put in place — the binary, the unit, the compose
+file, `agent.env` with a token and mode `0600` — starts the agent by hand
+with the unit's environment (a container has no systemd), starts the proxy
+from the package's compose file with the proxy image built here, and runs
+`test-cycle.sh` against it. `SHIPWICK_DEB_IMAGE` and `SHIPWICK_RPM_IMAGE`
+name other distributions; the variables of `test-lib.sh` apply. What it does
+not run: systemd, SELinux enforcing, a host firewall, the dashboard. Not part
+of CI, whose `packages` job installs and removes the packages without
+starting the agent.
 
 ## measure-limits.sh
 

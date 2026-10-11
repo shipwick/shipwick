@@ -167,3 +167,21 @@ describe('verdict', () => {
     expect(statusCounts(of('STOPPED', 'HEALTHY')).map(c => c.status)).toEqual(['HEALTHY', 'DEGRADED', 'DOWN', 'CRASH_LOOP', 'FAILED', 'DEPLOYING', 'STOPPED'])
   })
 })
+
+describe('a renewal that is failing', () => {
+  it('is a finding with the failure\'s reason, since a certificate that is ok has no message', () => {
+    const findings = diagnose(app({ certificates: [
+      { hostname: 'a.example.com', status: 'ok', message: '', issuer: 'Let\'s Encrypt E7', not_after: '2026-11-20T08:00:00Z', failure: { at: '2026-10-11T14:00:12Z', challenge: 'dns-01', reason: 'the DNS record for the challenge could not be created: the token cannot edit DNS records of example.com', detail: 'HTTP 403' } },
+    ] } as Partial<ApplicationDetail>), { deployments: [deployment()] })
+    expect(findings).toHaveLength(1)
+    expect(findings[0]?.title).toBe('a.example.com: renewal failing')
+    expect(findings[0]?.detail).toBe('The DNS record for the challenge could not be created: the token cannot edit DNS records of example.com.')
+  })
+
+  it('does not end a reason that is a question with a full stop', () => {
+    const findings = diagnose(app({ certificates: [
+      { hostname: 'a.example.com', status: 'obtaining', message: 'the proxy has no certificate for it yet: a firewall in front of it?', issuer: '', not_after: null },
+    ] } as Partial<ApplicationDetail>), { deployments: [deployment()] })
+    expect(findings[0]?.detail).toBe('The proxy has no certificate for it yet: a firewall in front of it?')
+  })
+})

@@ -145,7 +145,7 @@ func (o upgradeOptions) checkSignature(ctx context.Context, base, tag string, su
 		if said == "" {
 			said = err.Error()
 		}
-		return 0, nil, fmt.Errorf("the signature of release %s's checksums did not verify as one made by the release workflow of github.com/%s for %s; nothing was changed\n  cosign: %s\n  cosign 2.4 or later reads this signature; an older one fails here whatever the file", tag, releaseRepo, tag, said)
+		return 0, nil, fmt.Errorf("the signature of release %s's checksums did not verify as one made by the release workflow of github.com/%s for %s; nothing was changed\n  cosign: %s\n  cosign 2.5 or later reads this signature; an older one fails here whatever the file", tag, releaseRepo, tag, said)
 	}
 	return signatureVerified, signature, nil
 }
