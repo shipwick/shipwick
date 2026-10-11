@@ -8,6 +8,8 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-11
+
 ### Fixed
 
 - **Built with Go 1.27.2**, which fixes nine vulnerabilities in the standard
@@ -1330,7 +1332,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/shipwick/shipwick/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/shipwick/shipwick/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shipwick/shipwick/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/shipwick/shipwick/compare/v0.5.1...v0.6.0

@@ -77,7 +77,11 @@ Two versions are pinned by hand, because nothing updates them:
 
 ## Cutting a release
 
-1. `main` is green.
+1. `main` is green. When it is red at "Known vulnerabilities in dependencies"
+   with fixes in the standard library, Go has published a patch release:
+   the `go` line of `go.mod` and of `caddy/go.mod` and `GO_VERSION` in
+   `Dockerfile.caddy` move to it together (Dependabot does not move them),
+   and the release that follows carries the fix.
 2. In `CHANGELOG.md`, rename *Unreleased* to the version with today's date,
    start a new empty *Unreleased*, and update the two links at the bottom.
    The section becomes the release notes; the workflow refuses to release a
