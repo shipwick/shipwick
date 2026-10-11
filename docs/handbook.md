@@ -180,9 +180,12 @@ Next: in your project, run: shipwick init
 ```
 
 Running it again upgrades the server; the token is unchanged then, is not
-printed again, and the context keeps the one it has. `--version v0.4.0`
-installs that release. Without `--agent-domain` the API is not exposed and the
-context points at `http://127.0.0.1:9000`, for the tunnel described below.
+printed again, and the context keeps the one it has. The hostnames the server
+was installed with are read from its `.env`, so they need not be given again,
+and the context keeps its address. `--version v0.4.0` installs that release.
+Without `--agent-domain`, on a server that has no API hostname, the API is
+not exposed and the context points at `http://127.0.0.1:9000`, for the tunnel
+described below.
 
 The two port lines are a probe from your machine, made once the installer
 is done: a connection to 80 and to 443 at the server's address, with nothing
@@ -193,7 +196,9 @@ drops the packets — on a server that was just created, the provider's
 firewall beside the machine (Hetzner Cloud Firewall, an AWS security group,
 a DigitalOcean cloud firewall), which has to admit 80 and 443 over TCP and
 443 over UDP. Certificates cannot be obtained until it does, and the command
-says so rather than leaving it to Caddy's log.
+says so rather than leaving it to Caddy's log. A hostname that resolves to
+Cloudflare's proxy is not probed: the server's ports are then usually open to
+Cloudflare alone (*Behind Cloudflare only*, §11), and the line says so.
 
 When ssh itself fails, before any command runs, the command says what the
 failure means and what to do. *Permission denied* is a server that does not

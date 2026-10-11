@@ -12,6 +12,9 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/shipwick/shipwick/cli/internal/ui"
+	"github.com/shipwick/shipwick/pkg/cloudflare"
 )
 
 // portState is what one TCP connect to a port on the server found out. The
@@ -101,8 +104,20 @@ func probePort(ctx context.Context, local localOptions, r *report, host string, 
 // is done: the two ports Caddy has to be reachable on, tried from where the
 // command runs. A port that is silent right after a healthy agent is a
 // firewall at the provider, and the sooner that is said the fewer minutes
-// go into Caddy's log.
-func (c *cli) probeInstalledPorts(ctx context.Context, local localOptions, t sshTarget) {
+// go into Caddy's log. A hostname that resolves to Cloudflare's proxy is
+// reached through it, and the server's own ports are then usually open to
+// Cloudflare alone (see the handbook, Behind Cloudflare only): a probe from
+// here would blame a firewall for doing its job, so none is made.
+func (c *cli) probeInstalledPorts(ctx context.Context, local localOptions, t sshTarget, opts installOptions) {
+	for _, h := range []string{opts.agentDomain, opts.dashboardDomain} {
+		if h == "" {
+			continue
+		}
+		if resolved, err := local.lookupHost(ctx, h); err == nil && cloudflare.Proxied(resolved) {
+			c.ui.Println(c.ui.Styled(ui.Yellow, "!") + " Behind Cloudflare only: " + h + " resolves to Cloudflare's proxy, so ports 80 and 443 were not probed from here. Certificates then need a Cloudflare token on the agent; check with: shipwick doctor")
+			return
+		}
+	}
 	host := t.host
 	if net.ParseIP(host) == nil {
 		resolved, err := local.lookupHost(ctx, host)

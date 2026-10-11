@@ -17,6 +17,7 @@ import (
 
 	"github.com/shipwick/shipwick/cli/internal/cliconfig"
 	"github.com/shipwick/shipwick/cli/internal/ui"
+	"github.com/shipwick/shipwick/pkg/cloudflare"
 	"github.com/shipwick/shipwick/pkg/spec"
 	"github.com/shipwick/shipwick/pkg/version"
 )
@@ -91,6 +92,9 @@ const (
 	remoteHasDocker     = "command -v docker >/dev/null 2>&1"
 	remoteDockerVersion = "docker version --format '{{.Server.Version}}'"
 	remoteInstallDocker = "curl -fsSL https://get.docker.com | sh"
+	// The hostnames an installed server has, from its .env: what an upgrade
+	// run without the flags keeps.
+	remoteSavedHostnames = "grep -E '^SHIPWICK_(AGENT|DASHBOARD)_DOMAIN=' /opt/shipwick/.env 2>/dev/null || true"
 )
 
 // A daemon installed at first boot answers within a minute of the server
@@ -104,15 +108,62 @@ const (
 // settings as environment assignments. Every value passed the validation
 // above, so none can hold a quote or anything else the remote shell would
 // read; the quotes are there so that what is sent reads as what is meant.
+// A setting that was not given is not sent: an empty one in the environment
+// would hide the value in the server's .env from Docker Compose, and an
+// upgrade would start the agent without its hostnames.
 func installerRemoteCommand(o installOptions) string {
-	env := []string{
-		"SHIPWICK_AGENT_DOMAIN='" + o.agentDomain + "'",
-		"SHIPWICK_DASHBOARD_DOMAIN='" + o.dashboardDomain + "'",
+	var env []string
+	for _, s := range []struct{ name, value string }{
+		{"SHIPWICK_AGENT_DOMAIN", o.agentDomain},
+		{"SHIPWICK_DASHBOARD_DOMAIN", o.dashboardDomain},
+		{"SHIPWICK_VERSION", o.version},
+	} {
+		if s.value != "" {
+			env = append(env, s.name+"='"+s.value+"'")
+		}
 	}
-	if o.version != "" {
-		env = append(env, "SHIPWICK_VERSION='"+o.version+"'")
+	if len(env) == 0 {
+		return "curl -fsSL https://get.shipwick.com | sh"
 	}
 	return "curl -fsSL https://get.shipwick.com | " + strings.Join(env, " ") + " sh"
+}
+
+// savedHostnames reads the hostnames from what remoteSavedHostnames printed:
+// KEY=value lines of the server's .env. A value that is not a hostname is
+// left out, as the agent refuses it too; two equal ones are left out both.
+func savedHostnames(output string) (agent, dashboard string) {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		value = strings.ToLower(strings.Trim(strings.TrimSpace(value), "\"'"))
+		if value == "" || spec.ValidateDomain(value) != nil {
+			continue
+		}
+		switch key {
+		case "SHIPWICK_AGENT_DOMAIN":
+			agent = value
+		case "SHIPWICK_DASHBOARD_DOMAIN":
+			dashboard = value
+		}
+	}
+	if agent != "" && agent == dashboard {
+		return "", ""
+	}
+	return agent, dashboard
+}
+
+// describeHostnames names the hostnames in use, for a line of the report.
+func describeHostnames(o installOptions) string {
+	var parts []string
+	if o.agentDomain != "" {
+		parts = append(parts, "API "+o.agentDomain)
+	}
+	if o.dashboardDomain != "" {
+		parts = append(parts, "dashboard "+o.dashboardDomain)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (c *cli) serverInstallCommand() *cobra.Command {
@@ -206,6 +257,20 @@ func (c *cli) serverInstall(ctx context.Context, target string, opts installOpti
 		c.ui.Success("Installed Docker")
 	}
 
+	// An upgrade run without the flags keeps the hostnames the server was
+	// installed with: read from its .env, so that the installer, the context
+	// and the records below know them. A server without the file, one being
+	// installed now, prints nothing.
+	if opts.agentDomain == "" && opts.dashboardDomain == "" {
+		var saved bytes.Buffer
+		if ssh(remoteSavedHostnames, &saved, io.Discard) == nil {
+			opts.agentDomain, opts.dashboardDomain = savedHostnames(saved.String())
+			if opts.agentDomain != "" || opts.dashboardDomain != "" {
+				c.ui.Success("Keeping the server's hostnames: %s", describeHostnames(opts))
+			}
+		}
+	}
+
 	c.ui.Println("Running the Shipwick installer...")
 	installer := &dimmedLines{c: c}
 	err = ssh(installerRemoteCommand(opts), installer, installer)
@@ -218,7 +283,7 @@ func (c *cli) serverInstall(ctx context.Context, target string, opts installOpti
 	if err := c.saveInstalledContext(t, opts, installerToken(installer.lines)); err != nil {
 		return err
 	}
-	c.probeInstalledPorts(ctx, local, t)
+	c.probeInstalledPorts(ctx, local, t, opts)
 	c.printDNSRecords(ctx, local, t, opts)
 	return nil
 }
@@ -241,8 +306,10 @@ func (c *cli) saveInstalledContext(t sshTarget, opts installOptions, token strin
 	}
 	entry := cliconfig.Context{URL: url, Token: token}
 	if token == "" {
-		if prev, ok := saved.Contexts[name]; ok && prev.URL == url {
-			entry.Token = prev.Token
+		// A run that learned no hostname does not move a context that has
+		// one back to the tunnel's address.
+		if prev, ok := saved.Contexts[name]; ok && (prev.URL == url || opts.agentDomain == "") {
+			entry = prev
 		}
 	}
 	saved.Set(name, entry)
@@ -251,11 +318,11 @@ func (c *cli) saveInstalledContext(t sshTarget, opts installOptions, token strin
 	}
 	switch {
 	case token != "":
-		c.ui.Success("Saved the API token as context %s (%s), now current", name, url)
+		c.ui.Success("Saved the API token as context %s (%s), now current", name, entry.URL)
 	case entry.Token != "":
-		c.ui.Success("Context %s (%s) is current; its token is unchanged", name, url)
+		c.ui.Success("Context %s (%s) is current; its token is unchanged", name, entry.URL)
 	default:
-		c.ui.Println(c.ui.Styled(ui.Yellow, "!") + fmt.Sprintf(" Context %s (%s) was saved without a token: the server already had one, and the installer does not print it again.", name, url))
+		c.ui.Println(c.ui.Styled(ui.Yellow, "!") + fmt.Sprintf(" Context %s (%s) was saved without a token: the server already had one, and the installer does not print it again.", name, entry.URL))
 		c.ui.Println(fmt.Sprintf("  Copy SHIPWICK_AGENT_TOKEN from /opt/shipwick/.env on the server, then run: shipwick login --context %s", name))
 	}
 	return nil
@@ -263,7 +330,9 @@ func (c *cli) saveInstalledContext(t sshTarget, opts installOptions, token strin
 
 // printDNSRecords spells out what the hostnames need: one A record each,
 // pointing straight at the server. A CDN's proxy in between would take the
-// TLS handshake away from Caddy, and no certificate could be issued.
+// TLS handshake away from Caddy, and no certificate could be issued — unless
+// the agent has a Cloudflare token, which is what a record that resolves to
+// Cloudflare's proxy is taken to mean here, with the alternative named.
 func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarget, opts installOptions) {
 	var hostnames []string
 	for _, h := range []string{opts.agentDomain, opts.dashboardDomain} {
@@ -287,8 +356,13 @@ func (c *cli) printDNSRecords(ctx context.Context, local localOptions, t sshTarg
 		// asking for them again.
 		var missing []string
 		for _, h := range hostnames {
-			if resolved, err := local.lookupHost(ctx, h); err == nil && pointsAt(resolved, addrs) {
+			resolved, err := local.lookupHost(ctx, h)
+			switch {
+			case err == nil && pointsAt(resolved, addrs):
 				c.ui.Success("%s already points at %s", h, strings.Join(resolved, ", "))
+				continue
+			case err == nil && cloudflare.Proxied(resolved):
+				c.ui.Success("%s → Cloudflare's proxy (%s); in order with a Cloudflare token on the agent, otherwise make the record DNS only", h, strings.Join(resolved, ", "))
 				continue
 			}
 			missing = append(missing, h)

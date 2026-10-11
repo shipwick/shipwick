@@ -8,6 +8,22 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`shipwick server install`, run again to upgrade, kept the server's
+  hostnames.** Run without `--agent-domain` and `--dashboard-domain` it sent
+  both to the installer empty, and an empty setting in the environment hid
+  the values of the server's `.env` from Docker Compose: the agent came up
+  without its hostnames and took the API's and the dashboard's routes out of
+  the proxy, and the context on the machine that ran it was moved to the
+  tunnel's address without its token. The hostnames are now read from the
+  server's `.env` when the flags are not given, a setting that was not given
+  is not sent, the installer ignores an empty one, and a run that learned no
+  hostname leaves the context alone. A hostname that resolves to Cloudflare's
+  proxy is no longer probed from the laptop or asked for as a DNS-only record.
+  Until then: `cd /opt/shipwick && docker compose up -d` on the server puts
+  the routes back, and `shipwick login` the context.
+
 ## [0.9.0] - 2026-10-11
 
 ### Added

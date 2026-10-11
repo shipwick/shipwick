@@ -68,6 +68,8 @@ func freshServer(argv []string, stdout, stderr io.Writer) error {
 		return errors.New("exit status 1")
 	case remoteInstallDocker:
 		fmt.Fprintln(stdout, "# Executing docker install script")
+	case remoteSavedHostnames:
+		// A server being installed has no .env yet.
 	default:
 		fmt.Fprint(stdout, installerSummary)
 	}
@@ -161,10 +163,12 @@ func TestServerInstallWithDockerAndNoHostname(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server install: %v\n%s", err, out)
 	}
-	if n := len(programs.argvs); n != 4 || !strings.Contains(remote(programs.argvs[2]), "docker version") {
+	if n := len(programs.argvs); n != 5 || !strings.Contains(remote(programs.argvs[2]), "docker version") || remote(programs.argvs[3]) != remoteSavedHostnames {
 		t.Errorf("Docker being present, nothing should be installed but Shipwick: %q", programs.argvs)
 	}
-	if got := remote(programs.argvs[3]); got != "curl -fsSL https://get.shipwick.com | SHIPWICK_AGENT_DOMAIN='' SHIPWICK_DASHBOARD_DOMAIN='' SHIPWICK_VERSION='v0.4.0' sh" {
+	// A setting that was not given is not sent: empty, it would hide the
+	// server's .env from Docker Compose.
+	if got := remote(programs.argvs[4]); got != "curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION='v0.4.0' sh" {
 		t.Errorf("installer command: %s", got)
 	}
 	assertInOrder(t, out, []string{
@@ -260,6 +264,108 @@ func TestServerInstallUpgradeKeepsOrAsksForTheToken(t *testing.T) {
 	saved, _ = cliconfig.Load(config)
 	if saved.Contexts["203.0.113.11"].Token != "" {
 		t.Errorf("no token was printed, none may be saved: %+v", saved)
+	}
+}
+
+func TestServerInstallUpgradeKeepsTheServersHostnames(t *testing.T) {
+	// An installed server: Docker present, hostnames in its .env, the
+	// installer printing no token. The hostnames resolve to Cloudflare's
+	// proxy, which the server's firewall admits alone.
+	env := "SHIPWICK_AGENT_DOMAIN=agent.example.com\nSHIPWICK_DASHBOARD_DOMAIN=Dashboard.Example.com\n"
+	programs := &fakePrograms{respond: func(argv []string, stdout, stderr io.Writer) error {
+		switch remote(argv) {
+		case remoteUname:
+			fmt.Fprintln(stdout, "Linux x86_64")
+		case remoteHasDocker:
+		case remoteDockerVersion:
+			fmt.Fprintln(stdout, "29.9.0")
+		case remoteSavedHostnames:
+			fmt.Fprint(stdout, env)
+		default:
+			fmt.Fprintln(stdout, "  Your API token is unchanged: SHIPWICK_AGENT_TOKEN in /opt/shipwick/.env")
+		}
+		return nil
+	}}
+	f := newFakeAgent(t)
+	f.local = localOptions{
+		exec: programs.exec,
+		lookupHost: func(_ context.Context, host string) ([]string, error) {
+			if host == "203.0.113.10" {
+				t.Fatal("an IP address needs no lookup")
+			}
+			return []string{"104.16.1.1", "2606:4700::6810:101"}, nil
+		},
+		dial: func(_ context.Context, address string) error {
+			t.Errorf("behind Cloudflare the server's ports are not probed; dialled %s", address)
+			return nil
+		},
+	}
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	f.env = map[string]string{cliconfig.EnvConfig: config}
+	if err := cliconfig.Save(config, cliconfig.Config{Current: "203.0.113.10", Contexts: map[string]cliconfig.Context{
+		"203.0.113.10": {URL: "https://agent.example.com", Token: "kept"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := f.run(t.TempDir(), "server", "install", "root@203.0.113.10")
+	if err != nil {
+		t.Fatalf("server install: %v\n%s", err, out)
+	}
+	if got := remote(programs.argvs[4]); got != "curl -fsSL https://get.shipwick.com | SHIPWICK_AGENT_DOMAIN='agent.example.com' SHIPWICK_DASHBOARD_DOMAIN='dashboard.example.com' sh" {
+		t.Errorf("the installer is given the server's own hostnames: %s", got)
+	}
+	assertInOrder(t, out, []string{
+		"✓ Keeping the server's hostnames: API agent.example.com, dashboard dashboard.example.com",
+		"✓ Context 203.0.113.10 (https://agent.example.com) is current; its token is unchanged",
+		"! Behind Cloudflare only: agent.example.com resolves to Cloudflare's proxy",
+		"✓ agent.example.com → Cloudflare's proxy (104.16.1.1, 2606:4700::6810:101)",
+		"✓ dashboard.example.com → Cloudflare's proxy",
+		"shipwick token create dashboard --role admin",
+	})
+	for _, wrong := range []string{"Create these DNS records", "reachable only through an SSH tunnel", "timed out"} {
+		if strings.Contains(out, wrong) {
+			t.Errorf("%q has no place on this upgrade:\n%s", wrong, out)
+		}
+	}
+	saved, _ := cliconfig.Load(config)
+	if ctx := saved.Contexts["203.0.113.10"]; ctx.URL != "https://agent.example.com" || ctx.Token != "kept" {
+		t.Errorf("the context keeps its address and token: %+v", ctx)
+	}
+
+	// A server whose .env names no hostname: the context is not moved to
+	// the tunnel's address by a run that learned none. With no hostname known
+	// the ports are probed, as on any server.
+	env = ""
+	f.local.dial = func(context.Context, string) error { return nil }
+	programs.argvs = nil
+	out, _, err = f.run(t.TempDir(), "server", "install", "root@203.0.113.10")
+	if err != nil {
+		t.Fatalf("server install: %v\n%s", err, out)
+	}
+	if got := remote(programs.argvs[4]); got != "curl -fsSL https://get.shipwick.com | sh" {
+		t.Errorf("nothing given, nothing sent: %s", got)
+	}
+	saved, _ = cliconfig.Load(config)
+	if ctx := saved.Contexts["203.0.113.10"]; ctx.URL != "https://agent.example.com" || ctx.Token != "kept" {
+		t.Errorf("a run without hostnames leaves the context alone: %+v", ctx)
+	}
+}
+
+func TestSavedHostnamesReadsTheEnvLines(t *testing.T) {
+	agent, dashboard := savedHostnames("SHIPWICK_AGENT_DOMAIN=\"Agent.Example.com\"\r\nSHIPWICK_DASHBOARD_DOMAIN=dash.example.com\r\n")
+	if agent != "agent.example.com" || dashboard != "dash.example.com" {
+		t.Errorf("got %q, %q", agent, dashboard)
+	}
+	agent, dashboard = savedHostnames("SHIPWICK_AGENT_DOMAIN=https://agent.example.com\nSHIPWICK_DASHBOARD_DOMAIN=\n")
+	if agent != "" || dashboard != "" {
+		t.Errorf("what is not a hostname is left out, got %q, %q", agent, dashboard)
+	}
+	if a, d := savedHostnames("SHIPWICK_AGENT_DOMAIN=x.example.com\nSHIPWICK_DASHBOARD_DOMAIN=x.example.com\n"); a != "" || d != "" {
+		t.Errorf("two equal hostnames are left out, got %q, %q", a, d)
+	}
+	if a, d := savedHostnames(""); a != "" || d != "" {
+		t.Errorf("nothing printed, nothing read, got %q, %q", a, d)
 	}
 }
 

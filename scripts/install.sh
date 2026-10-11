@@ -413,6 +413,13 @@ write_env() {
     if [ -f "$env_file" ]; then
         step "Keeping the existing $env_file (your API token is unchanged)"
         GENERATED_TOKEN=""
+        # A setting that is in the environment but empty — a shell's, or a
+        # client's that was not given it — would hide the file's value from
+        # Docker Compose, and the agent would start without its hostnames.
+        for name in SHIPWICK_AGENT_DOMAIN SHIPWICK_DASHBOARD_DOMAIN; do
+            eval "value=\${$name:-}"
+            [ -n "$value" ] || unset "$name"
+        done
         return 0
     fi
 
