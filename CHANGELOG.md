@@ -8,6 +8,14 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- The dashboard no longer carries `simple-git` 3, which Nuxt's development
+  tools bring along and which has four advisories: it is held at 4 through an
+  `overrides` entry. The tools are off in this project and nothing of them
+  reaches a built dashboard; the library sat in the lockfile and in every
+  scanner's report.
+
 ## [0.8.1] - 2026-10-11
 
 ### Fixed
