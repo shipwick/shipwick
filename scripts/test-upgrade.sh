@@ -79,6 +79,8 @@ trap cleanup EXIT
 
 # since VERSION — the release under test is that version or a later one.
 since() { [ "$(ordinal "$RELEASE")" -ge "$(ordinal "$1")" ]; }
+# not COMMAND... — succeeds when the command fails, for a check of an absence.
+not() { ! "$@"; }
 ordinal() { echo "${1#v}" | awk -F. '{ print $1 * 10000 + $2 * 100 + $3 }'; }
 
 # on_server COMMAND... — as root on the server.
@@ -424,7 +426,15 @@ check_upgraded() {
 # start the checkout again.
 go_back() {
     say "Back to $RELEASE"
-    check "The proxy's saved configuration names what the proxy of $RELEASE does not have" proxy_has_kept_source
+    # The proxy's own source of replicas came with 0.8.0: the proxy of an
+    # older release cannot read a configuration that names it, and the
+    # installer removes that configuration; the proxy of 0.8.0 or later reads
+    # it and keeps it.
+    if since v0.8.0; then
+        check "The proxy's saved configuration is one the proxy of $RELEASE reads" proxy_has_kept_source
+    else
+        check "The proxy's saved configuration names what the proxy of $RELEASE does not have" proxy_has_kept_source
+    fi
     start_requests
     went_back=1
     on_server env "SHIPWICK_VERSION=$RELEASE" sh /root/checkout/install.sh > "$WORK/back.out" 2>&1 || went_back=""
@@ -437,6 +447,10 @@ go_back() {
         check "The installer said that the agent of $RELEASE cannot read the database" grep -q "cannot read the database" "$WORK/back.out"
         check "and started the checkout again: the agent is $CHECKOUT_VERSION" eventually agent_is "$CHECKOUT_VERSION"
         check "The proxy runs the configuration of this version again" eventually proxy_has_kept_source
+    elif since v0.8.0; then
+        check "The installer left the saved configuration, which the proxy of $RELEASE reads" not grep -q "saved configuration was written by a newer release" "$WORK/back.out"
+        check "The agent is $RELEASE again" eventually agent_is "$RELEASE"
+        check "The proxy of $RELEASE runs, with the configuration both versions share" eventually proxy_has_kept_source
     else
         check "The installer removed the saved configuration the older proxy cannot read" grep -q "saved configuration was written by a newer release" "$WORK/back.out"
         check "The agent is $RELEASE again" eventually agent_is "$RELEASE"

@@ -98,6 +98,10 @@ jobs:
         run: |
           version=$(sed -n 's/^ARG CADDY_VERSION=//p' Dockerfile.caddy)
           grep -qx "	github.com/caddyserver/caddy/v2 v$version" caddy/go.mod
+      - name: caddy/go.mod names the Go the proxy is compiled with
+        run: |
+          version=$(sed -n 's/^ARG GO_VERSION=//p' Dockerfile.caddy)
+          grep -qx "go $version" caddy/go.mod
       - name: Compose files are valid
         run: |
           docker compose config --quiet

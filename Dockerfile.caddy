@@ -18,17 +18,24 @@
 # caddy/go.mod names the same Caddy: the module is compiled against the Caddy
 # it is built into, and CI fails when the two disagree.
 ARG CADDY_VERSION=2.11.6
+# The Go the proxy is compiled with. The builder image brings a Go of its own
+# and does not move it; this one is downloaded and used instead, so that the
+# proxy, which is what the internet talks to, gets the standard library's
+# fixes as soon as the agent does. caddy/go.mod names the same version, and
+# CI fails when the two disagree.
+ARG GO_VERSION=1.27.2
 
 # The build stage runs on the builder's own architecture and cross-compiles:
 # pure Go, so a multi-platform build needs no emulation.
 FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder-alpine AS build
 ARG CADDY_VERSION
+ARG GO_VERSION
 ARG CLOUDFLARE_DNS_VERSION=v0.2.4
 ARG TARGETOS TARGETARCH
 COPY caddy /src/caddy
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH xcaddy build "v${CADDY_VERSION}" \
+    GOTOOLCHAIN="go${GO_VERSION}" CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH xcaddy build "v${CADDY_VERSION}" \
       --with "github.com/caddy-dns/cloudflare@${CLOUDFLARE_DNS_VERSION}" \
       --with "github.com/shipwick/shipwick/caddy=/src/caddy" \
       --output /out/caddy

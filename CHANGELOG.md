@@ -8,6 +8,16 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Built with Go 1.27.2**, which fixes nine vulnerabilities in the standard
+  library's HTTP server and client and in TLS (GO-2026-6603 to GO-2026-6617)
+  that the agent, the CLI and the proxy of 0.8.0 were built with. The proxy's
+  Dockerfile names the Go it is compiled with from now on, so that the proxy
+  moves with the agent instead of with its builder image.
+- The dashboard's dependencies `shell-quote` (used by Nuxt's development
+  tools only) and `source-map-js` moved past their advisories.
+
 ## [0.8.0] - 2026-10-04
 
 ### Added
