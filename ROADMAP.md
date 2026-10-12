@@ -6,14 +6,17 @@ one theme per minor version, in the order it is likely to ship. Nothing here
 is a promise; an item moves when a real installation shows that something
 else matters more.
 
-## 0.9 — Stability and ease
+## 0.9 and 0.10 — Stability and ease, then the last look before 1.0
 
-The last minor version before 1.0. It took what a real installation — a bare
-server to a live application, by hand, every mistake written down — taught,
-and what 0.8 left open, and built the answers: the `Unreleased` section of
-the changelog lists them. What is below could not be done from where 0.9 was
-built: each needs a machine, a person or a review that was not at hand. None
-is a feature; 1.0 is cut when they are done or dropped on purpose.
+0.9 took what a real installation — a bare server to a live application, by
+hand, every mistake written down — taught, and what 0.8 left open, and built
+the answers. 0.10 followed with three security reviews of the code and their
+fixes, the agent at half the processor time it spent watching applications,
+the API's names and lists made consistent before they are frozen, and every
+document read against the code; the changelog lists both. What is below
+could not be done from where they were built: each needs a machine, a person
+or a review that was not at hand. None is a feature; 1.0 is cut when they are
+done or dropped on purpose.
 
 ### Run where it has not run
 

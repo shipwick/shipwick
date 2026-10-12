@@ -3442,7 +3442,7 @@ table says:
   a quarter of the table on. Memory would have been next: nine tenths of the 4 GB were
   in use at 250 applications.
 - **The agent's own share, Docker aside**, is small and was made smaller
-  before 1.0. Measured on the machine above with `go test -bench` in
+  in 0.10. Measured on the machine above with `go test -bench` in
   `agent/internal/deploy`, where Docker and the proxy are in-memory stand-ins
   that answer at once, so that what is left is the agent's: applications of
   two replicas, each with a hostname and a health check; medians of three
