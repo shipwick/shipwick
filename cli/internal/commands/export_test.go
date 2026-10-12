@@ -72,7 +72,10 @@ func newExportAgent(t *testing.T) *exportAgent {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		sealed, _ := backupfile.NewWriter(w, req.Passphrase)
 		sealed.Write(exportArchive(t))
-		if !e.cut {
+		e.mu.Lock()
+		cut := e.cut
+		e.mu.Unlock()
+		if !cut {
 			sealed.Close()
 		}
 	})
@@ -86,11 +89,20 @@ func newExportAgent(t *testing.T) *exportAgent {
 		body, _ := io.ReadAll(plain)
 		e.mu.Lock()
 		e.imported, e.importQuery, e.importPassphrase = body, r.URL.Query(), string(passphrase)
+		result := e.result
 		e.mu.Unlock()
+		respond(w, 200, result)
+	})
+	mux.HandleFunc("GET /api/v1/import", func(w http.ResponseWriter, r *http.Request) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
 		respond(w, 200, e.result)
 	})
-	mux.HandleFunc("GET /api/v1/import", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, e.result) })
-	mux.HandleFunc("GET /api/v1/standby", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, e.standby) })
+	mux.HandleFunc("GET /api/v1/standby", func(w http.ResponseWriter, r *http.Request) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		respond(w, 200, e.standby)
+	})
 	mux.HandleFunc("POST /api/v1/standby/promote", func(w http.ResponseWriter, r *http.Request) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
@@ -116,6 +128,20 @@ func newExportAgent(t *testing.T) *exportAgent {
 	e.srv = srv
 	e.env = map[string]string{envExportPassphrase: movePassphrase}
 	return e
+}
+
+// run is the fake agent's run with the mutex taken and released before and
+// after: the tests set the fake's answers and read what it received around a
+// run, the handlers do both under the mutex, and the order between the two is
+// otherwise only the request's bytes on a socket, which the race detector does
+// not see.
+func (e *exportAgent) run(dir string, args ...string) (string, string, error) {
+	e.mu.Lock()
+	e.mu.Unlock()
+	out, errOut, err := e.fakeAgent.run(dir, args...)
+	e.mu.Lock()
+	e.mu.Unlock()
+	return out, errOut, err
 }
 
 func TestExportWritesAFileThatWasReadBackWhole(t *testing.T) {
