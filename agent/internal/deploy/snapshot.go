@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/shipwick/shipwick/agent/internal/docker"
+	"github.com/shipwick/shipwick/agent/internal/store"
 )
 
 // A supervision pass asks Docker for the list of its containers once, at the
@@ -39,6 +40,11 @@ type containerSnapshot struct {
 	byApp map[string][]docker.Container
 	// gone are the containers Docker was asked about by ID and did not have.
 	gone map[string]bool
+	// deployments are the active deployments as the database had them when
+	// the list was taken, by ID. A deployment's record never changes in what
+	// the tick reads of it, so an application found pointing at one of these
+	// under its lock is not asked about it again; nil asks every time.
+	deployments map[int64]store.Deployment
 }
 
 func newContainerSnapshot(list []docker.Container) *containerSnapshot {

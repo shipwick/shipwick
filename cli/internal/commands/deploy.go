@@ -428,7 +428,7 @@ func describeSpec(app spec.App) [][2]string {
 		fields = append(fields, [2]string{"Aliases", strings.Join(app.Aliases, ", ")})
 	}
 	if len(app.Redirects) > 0 {
-		fields = append(fields, [2]string{"Redirects", strings.Join(app.Redirects, ", ") + " → https://" + app.Domain})
+		fields = append(fields, [2]string{"Redirects", strings.Join(app.Redirects, ", ") + " → https://" + app.Domain + app.Path})
 	}
 	if app.Proxy != nil {
 		fields = append(fields, [2]string{"Proxy", describeProxy(app)})

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"regexp"
@@ -132,9 +131,8 @@ func (s *Server) handleSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req api.SignInRequest
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSignInBody))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "request body is too large or unreadable", nil)
+	body, ok := readBody(w, r, maxSignInBody)
+	if !ok {
 		return
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))

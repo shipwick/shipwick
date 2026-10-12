@@ -19,7 +19,10 @@ import (
 
 // Applications returns a summary of every application.
 func (e *Engine) Applications(ctx context.Context) ([]api.Application, error) {
-	apps, inFlight, err := e.store.ApplicationsWithDeployments(ctx, store.DeploymentFilter{Statuses: InFlightStatuses()})
+	// The applications, their active deployments and the ones under way come
+	// from one read: a deployment committed between two reads would show an
+	// application as having neither, which the views call FAILED.
+	state, err := e.store.ActiveDeployments(ctx, InFlightStatuses()...)
 	if err != nil {
 		return nil, err
 	}
@@ -28,18 +31,14 @@ func (e *Engine) Applications(ctx context.Context) ([]api.Application, error) {
 		return nil, err
 	}
 	deploying := map[string]*int64{}
-	for _, d := range inFlight {
+	for _, d := range state.InFlight {
 		deploying[d.Application] = &d.ID
 	}
 
-	out := make([]api.Application, 0, len(apps))
-	for _, app := range apps {
+	out := make([]api.Application, 0, len(state.Applications))
+	for _, app := range state.Applications {
 		var active *store.Deployment
-		if app.ActiveDeploymentID != nil {
-			d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
-			if err != nil {
-				return nil, err
-			}
+		if d, ok := state.Deployments[app.ID]; ok {
 			active = &d
 		}
 		out = append(out, e.summarize(app, active, containers, deploying[app.Name]))
@@ -127,6 +126,8 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 		Name:         app.Name,
 		DesiredState: app.DesiredState,
 		Deploying:    deploying,
+		Aliases:      []string{},
+		Redirects:    []string{},
 
 		InFlightDeploymentID: inFlight,
 		CreatedAt:            app.CreatedAt,
@@ -135,7 +136,7 @@ func (e *Engine) summarize(app store.Application, active *store.Deployment, cont
 	crashLoop := false
 	if active != nil {
 		out.Image, out.Version, out.Domain = active.Image, active.Version, active.Spec.Domain
-		out.Aliases, out.Redirects, out.Path = active.Spec.Aliases, active.Spec.Redirects, active.Spec.Path
+		out.Aliases, out.Redirects, out.Path = append(out.Aliases, active.Spec.Aliases...), append(out.Redirects, active.Spec.Redirects...), active.Spec.Path
 		out.Replicas.Desired = active.Spec.Replicas
 		if active.StaticDigest != "" {
 			// The proxy serves it; there is nothing to count, and nothing
@@ -383,22 +384,19 @@ func logLineView(r store.Replica, entry docker.LogEntry) api.LogLine {
 
 // unlimitedMemory names the applications whose replicas run without a memory
 // limit. One that is stopped uses none, and a static one has no replica.
-func (e *Engine) unlimitedMemory(ctx context.Context, apps []store.Application) ([]string, error) {
-	var names []string
-	for _, app := range apps {
-		if app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
+func unlimitedMemory(active store.Active) []string {
+	names := []string{}
+	for _, app := range active.Applications {
+		d, ok := active.Deployments[app.ID]
+		if !ok || app.DesiredState != api.DesiredRunning {
 			continue
-		}
-		d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
-		if err != nil {
-			return nil, err
 		}
 		if d.StaticDigest == "" && d.Spec.Resources.MemoryBytes <= 0 {
 			names = append(names, app.Name)
 		}
 	}
 	sort.Strings(names)
-	return names, nil
+	return names
 }
 
 // Server describes the host the agent runs on.
@@ -407,10 +405,11 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 	if err != nil {
 		return api.Server{}, err
 	}
-	apps, err := e.store.ListApplications(ctx)
+	active, err := e.store.ActiveDeployments(ctx)
 	if err != nil {
 		return api.Server{}, err
 	}
+	apps := active.Applications
 	containers, err := e.rt.ListContainers(ctx, "")
 	if err != nil {
 		return api.Server{}, err
@@ -425,10 +424,6 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 	hostname := info.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
-	}
-	unlimited, err := e.unlimitedMemory(ctx, apps)
-	if err != nil {
-		return api.Server{}, err
 	}
 	var swap *int64
 	if e.opts.SwapBytes != nil {
@@ -453,7 +448,7 @@ func (e *Engine) Server(ctx context.Context) (api.Server, error) {
 		Alerts:          e.Alerts(),
 		Disk:            e.Disk(),
 		SwapBytes:       swap,
-		UnlimitedMemory: unlimited,
+		UnlimitedMemory: unlimitedMemory(active),
 		Backups:         e.BackupStatus(ctx),
 		Network:         e.networkStatus(info),
 		LogArchive:      e.logArchiveStatus(ctx),

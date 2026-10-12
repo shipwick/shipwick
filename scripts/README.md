@@ -26,10 +26,15 @@ What it does on a server:
 3. On first run only, writes `/opt/shipwick/.env` (mode `0600`, directory
    `0700`) with a freshly generated API token and the two optional hostnames —
    asked for in a terminal, or taken from `SHIPWICK_AGENT_DOMAIN` /
-   `SHIPWICK_DASHBOARD_DOMAIN`. Hostnames are validated before anything is written.
-   Settings given for the run are kept in it too: the ports, images of your
-   own, the webhook, and `SHIPWICK_CLOUDFLARE_API_TOKEN` (certificates through
-   Cloudflare DNS, for hostnames behind Cloudflare's proxy).
+   `SHIPWICK_DASHBOARD_DOMAIN`. Hostnames are validated before `.env` is written.
+   Settings given for the run are kept in it too — every variable `--help`
+   lists under *Environment* except the installer's own (`SHIPWICK_VERSION`,
+   `SHIPWICK_REQUIRE_SIGNATURE`, `SHIPWICK_BUNDLE`, the directories): the
+   ports, images of your own, the webhook, `SHIPWICK_CLOUDFLARE_API_TOKEN`
+   (certificates through Cloudflare DNS, for hostnames behind Cloudflare's
+   proxy), alerts, backups, exports, the standby, the proxy, sign-in, the log
+   archive and the update check. `cli/internal/commands/serverconfigure.go`
+   keeps a copy of the list, and a test fails when the two drift apart.
 4. Pulls the images, starts the stack, waits for the agent to report healthy.
 5. Installs `shipwick`, verified the same way. **A checksum mismatch installs
    nothing** and leaves a running installation as it was.
@@ -72,7 +77,21 @@ Properties worth keeping if you change it:
   and moved into place, so an interrupted download never leaves a half file.
 - **Everything comes from one release** — `SHIPWICK_VERSION`, by default the
   latest — never from a branch, so the compose file, the images and the CLI
-  always belong together.
+  always belong together. `latest` is resolved to a tag before the first
+  download (`resolve_latest`: the `Location` of `/releases/latest`, as
+  `install.ps1` does), so every file is fetched by that tag and the signature
+  is held to it; fetched through `latest` one by one, two files could come
+  from two releases, and the files of an older, signed release put in the
+  latest one's place would pass as signed.
+- **What the pull brought is held against the release.**
+  `verify_pulled_images` fetches the release's `image-digests.txt` after
+  `docker compose pull` and compares each image's `RepoDigests` with its
+  `index` line — the digest of the manifest list the tag pointed at. An image
+  that does not match is untagged, the compose file that ran is put back and
+  the installer stops; nothing is started. Images `.env` names in place of
+  the release's have no line and are said to be not compared. Without the
+  file — a release before 0.7.0 — it warns and goes on, or stops under
+  `SHIPWICK_REQUIRE_SIGNATURE=1`.
 - **A bundle is the same release, brought along.** With `--bundle <directory
   or .tar.gz>` (or run from inside an unpacked bundle, made by `shipwick
   server bundle`) the installer makes no network call: `fetch_release_asset`
@@ -96,14 +115,17 @@ Properties worth keeping if you change it:
 - **The signature is checked with cosign or not at all.** `verify_signature`
   runs once, when `checksums.txt` has been downloaded: `cosign verify-blob`
   with the release's `checksums.txt.sigstore.json` and the identity of the
-  release workflow — at the tag `SHIPWICK_VERSION` names, or at any plain
-  version tag for `latest`. A signature that does not verify stops the
+  release workflow — at the tag `SHIPWICK_VERSION` names or `latest` was
+  resolved to; a bundle's release is not named, so any plain version tag
+  there. A signature that does not verify stops the
   installer. No cosign, or a release without a signature (before 0.8.0), is
   one line of output; with `SHIPWICK_REQUIRE_SIGNATURE=1` either stops it
   too. The installer never installs cosign. With a bundle it verifies only
   when that variable is set: cosign fetches Sigstore's keys, which a server
   with no way out cannot. Do not make the check quieter: "was not checked"
-  must stay in the output of an installation that did not check.
+  must stay in the output of an installation that downloaded and did not
+  check. A bundle installation says nothing about it; `shipwick server
+  bundle` said it where the bundle was made.
 - **Behind a proxy** it reads `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` in
   either case, exports both spellings (`wget` reads the lower one only), and
   writes them to a new `.env`. When a pull fails while the installer has a
@@ -200,8 +222,9 @@ Properties worth keeping if you change it:
   redirect (one .NET returns a response that was not followed, the other
   throws an exception that carries it), and `-UseBasicParsing`, which 5.1
   needs and 7 ignores. `Invoke-WebRequest`'s progress bar is turned off for
-  the run: under 5.1 the 14 MB binary took six seconds to download with it
-  and under one without, on one machine.
+  the run: under 5.1 the 14 MB binary of 0.9.1 took ten seconds to download
+  with it (9.4 and 9.8 in two runs) and under one without (0.6 and 0.5), on
+  one machine.
 - **Checked with PSScriptAnalyzer** (`Invoke-ScriptAnalyzer -Path
   scripts/install.ps1`, in CI with every rule at every severity); the one
   suppression is `PSAvoidUsingWriteHost`, because an installer talks to the
@@ -268,7 +291,7 @@ installed with the checkout's `install.sh`.
 Afterwards it checks that the agent runs the new version, that the replicas
 are the containers the release started, that both hostnames answer, the key is
 in the volume, the history is whole, the secret resolves on a redeploy, the
-release's CLI and the checkout's both deploy and roll back, the token works,
+release's CLI redeploys and the checkout's deploys and rolls back, the token works,
 the job runs, the backup verifies, the proxy runs this version's
 configuration, and that `shipwick doctor` finds no problem. Requests go to the
 application about ten times a second while the installer runs; how many were
@@ -294,7 +317,7 @@ installation does:
 sh scripts/test-socket-proxy.sh              # the agent behind configs/compose.socket-proxy.yml
 sh scripts/test-docker-authz.sh              # a daemon that asks opa-docker-authz, with configs/docker-authz.rego
 sh scripts/test-rootless.sh                  # on docker:dind-rootless, with configs/compose.rootless.yml
-sh scripts/test-rootless.sh --socket-proxy   # both overlays
+sh scripts/test-rootless.sh --socket-proxy   # behind the socket proxy as well: compose.socket-proxy.yml alone, which reads SHIPWICK_DOCKER_SOCKET
 ```
 
 Each builds the three images and the CLI from the checkout (Docker, and Go
@@ -305,7 +328,8 @@ container: deploy, rollout, rollback, stop and start, a hook, a job, a
 one-off command, a backup with its verification, a restore, a static
 folder, a built image, an export and an import, deletion, with the fixtures
 of `scripts/testdata`. Nothing else of the Docker they are started from is
-touched; the container is removed at the end unless `SHIPWICK_TEST_KEEP=1`.
+touched, apart from three images tagged `shipwick-test-*` that stay; the
+container is removed at the end unless `SHIPWICK_TEST_KEEP=1`.
 `test-lib.sh` holds what they share and lists the variables. They take a
 few minutes each, most of it pulling inside the new daemon, and are not part
 of CI.

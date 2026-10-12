@@ -55,7 +55,14 @@ done
 [ -n "$RELEASE" ] || { echo "usage: sh scripts/test-upgrade.sh [--back] <release, such as v0.7.0>" >&2; exit 2; }
 
 cd "$(dirname "$0")/.."
+# Git Bash would rewrite the server's paths into Windows ones — the //p of a
+# sed expression among them — and docker there is a Windows program, which
+# takes the work directory by its Windows name.
+export MSYS_NO_PATHCONV=1
 WORK="$(mktemp -d)"
+if command -v cygpath >/dev/null 2>&1; then
+    WORK="$(cygpath -m "$WORK")"
+fi
 FAILED=0
 # Set while doctor runs: see there.
 CA_FILE=""

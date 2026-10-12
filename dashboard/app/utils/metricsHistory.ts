@@ -26,14 +26,9 @@ export function isMetricsRange(value: unknown): value is MetricsRange {
   return typeof value === 'string' && (METRICS_RANGES as readonly string[]).includes(value)
 }
 
-/** Parses the agent's step ("30s", "5m", "1h") into milliseconds; falls back to the range's own. */
-export function parseStep(step: string, range: MetricsRange): number {
-  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/.exec(step.trim())
-  if (!match) return RANGE_WINDOWS[range].stepMs
-  const n = Number(match[1])
-  const unit = match[2] === 'ms' ? 1 : match[2] === 's' ? 1000 : match[2] === 'm' ? MINUTE : HOUR
-  const ms = n * unit
-  return ms > 0 ? ms : RANGE_WINDOWS[range].stepMs
+/** The agent's `step_seconds` (30, 300, 3600) in milliseconds; falls back to the range's own for anything that is not a positive number. */
+export function parseStep(stepSeconds: number, range: MetricsRange): number {
+  return Number.isFinite(stepSeconds) && stepSeconds > 0 ? stepSeconds * 1000 : RANGE_WINDOWS[range].stepMs
 }
 
 export type HistoryMetric = 'cpu_percent' | 'memory_bytes'
@@ -101,7 +96,7 @@ export function historyLimit(history: Pick<MetricsHistory, 'limits'>, metric: Hi
  * the space before it stays empty rather than the chart stretching.
  */
 export function toChartData(history: MetricsHistory, metric: HistoryMetric, range: MetricsRange, end: number = Date.now()): ChartData {
-  const stepMs = parseStep(history.step, range)
+  const stepMs = parseStep(history.step_seconds, range)
   const since = Date.parse(history.since)
   const start = Number.isNaN(since) ? end - RANGE_WINDOWS[range].windowMs : since
   const limit = historyLimit(history, metric)

@@ -96,7 +96,7 @@ func crashedEntry() api.LogArchiveDetail {
 	ended := fixedNow.Add(-5 * time.Minute)
 	return api.LogArchiveDetail{
 		LogArchiveEntry: api.LogArchiveEntry{
-			ID: 41, Application: "my-api", Kind: api.LogKindReplica, DeploymentID: ptr(int64(30)), Deployment: 3, Version: "1.4.2",
+			ID: 41, Application: "my-api", Kind: api.LogKindReplica, DeploymentID: ptr(int64(30)), Sequence: 3, Version: "1.4.2",
 			Replica: 2, Container: "shipwick_my-api_3_2", Reason: api.LogReasonCrashed, ExitCode: ptr(1), EndedAt: ended,
 			Lines: 2, Bytes: 52, StoredBytes: 70,
 		},
@@ -210,13 +210,13 @@ func TestLogsSearchFollowsThePagesAndPrintsOldestFirstUnderItsSources(t *testing
 	}
 	f.archive.pages = map[string]api.LogSearchResult{
 		"": {Next: "a41", Lines: []api.LogMatch{
-			{LogLine: line(1, "shipwick_my-api_4_1", "timeout talking to redis", 50*time.Minute), DeploymentID: ptr(int64(40)), Deployment: 4},
+			{LogLine: line(1, "shipwick_my-api_4_1", "timeout talking to redis", 50*time.Minute), DeploymentID: ptr(int64(40)), Sequence: 4},
 		}},
 		// A page that read its fill without finding anything.
 		"a41": {Next: "a41.7", Lines: []api.LogMatch{}},
 		"a41.7": {Lines: []api.LogMatch{
-			{LogLine: line(2, "shipwick_my-api_3_2", "Timeout talking to postgres", 2*time.Minute), ArchiveID: ptr(int64(41)), DeploymentID: ptr(int64(30)), Deployment: 3},
-			{LogLine: line(2, "shipwick_my-api_3_2", "timeout talking to redis", time.Minute), ArchiveID: ptr(int64(41)), DeploymentID: ptr(int64(30)), Deployment: 3},
+			{LogLine: line(2, "shipwick_my-api_3_2", "Timeout talking to postgres", 2*time.Minute), ArchiveID: ptr(int64(41)), DeploymentID: ptr(int64(30)), Sequence: 3},
+			{LogLine: line(2, "shipwick_my-api_3_2", "timeout talking to redis", time.Minute), ArchiveID: ptr(int64(41)), DeploymentID: ptr(int64(30)), Sequence: 3},
 			{LogLine: api.LogLine{Container: "shipwick_my-api_job_sync_9", Time: at, Message: "sync: timeout"}, ArchiveID: ptr(int64(38)), RunID: ptr(int64(9)), Job: "sync"},
 		}},
 	}
@@ -363,7 +363,7 @@ func TestStatusEndsWithTheCommandThatShowsWhyAReplicaDied(t *testing.T) {
 	replaced := crashedEntry()
 	replaced.ID, replaced.Reason = 43, api.LogReasonReplaced
 	ofFailed := crashedEntry()
-	ofFailed.ID, ofFailed.DeploymentID, ofFailed.Deployment, ofFailed.Reason, ofFailed.Container = 42, ptr(int64(40)), 4, api.LogReasonDeploymentFailed, "shipwick_my-api_4_1"
+	ofFailed.ID, ofFailed.DeploymentID, ofFailed.Sequence, ofFailed.Reason, ofFailed.Container = 42, ptr(int64(40)), 4, api.LogReasonDeploymentFailed, "shipwick_my-api_4_1"
 	f.archive.entries = []api.LogArchiveDetail{replaced, ofFailed, crashedEntry()}
 
 	out, _, err := f.run(t.TempDir(), "status", "my-api")

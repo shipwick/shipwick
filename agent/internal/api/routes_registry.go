@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/shipwick/shipwick/agent/internal/deploy"
@@ -50,9 +49,8 @@ func (s *Server) handleSetRegistry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRegistryBody))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "request body is too large or unreadable", nil)
+	body, ok := readBody(w, r, maxRegistryBody)
+	if !ok {
 		return
 	}
 	var req api.SetRegistryRequest

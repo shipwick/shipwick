@@ -373,7 +373,8 @@ func (c *cli) backupsDownloadCommand() *cobra.Command {
 }
 
 func (c *cli) backupsRemoveCommand() *cobra.Command {
-	return &cobra.Command{
+	var yes bool
+	cmd := &cobra.Command{
 		Use:   "rm <app> <id>",
 		Short: "Remove a backup from the server and the bucket",
 		Args:  cobra.ExactArgs(2),
@@ -386,6 +387,16 @@ func (c *cli) backupsRemoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !yes {
+				if !isTerminal(c.in) {
+					return errors.New("refusing to remove without confirmation; pass --yes")
+				}
+				c.ui.Printf("Remove backup #%d of %s from the server and the bucket? It cannot be restored afterwards. [y/N] ", id, name)
+				answer, _ := bufio.NewReader(c.in).ReadString('\n')
+				if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+					return errors.New("cancelled")
+				}
+			}
 			cl, err := c.connect()
 			if err != nil {
 				return err
@@ -397,6 +408,8 @@ func (c *cli) backupsRemoveCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation")
+	return cmd
 }
 
 func (c *cli) backupsDecryptCommand() *cobra.Command {

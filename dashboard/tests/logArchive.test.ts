@@ -31,7 +31,7 @@ function entry(over: Partial<LogArchiveEntry> = {}): LogArchiveEntry {
     application: 'web',
     kind: 'replica',
     deployment_id: 7,
-    deployment: 3,
+    sequence: 3,
     version: '1.4.2',
     replica: 2,
     job: '',
@@ -102,7 +102,7 @@ describe('how a container ended', () => {
 describe('whose output an entry is', () => {
   it('names a replica by its deployment and number, and a run by its number and job', () => {
     expect(outputOf(entry())).toBe('#3 replica 2')
-    expect(outputOf(entry({ deployment: 0, deployment_id: null }))).toBe('replica 2')
+    expect(outputOf(entry({ sequence: 0, deployment_id: null }))).toBe('replica 2')
     expect(outputOf(run())).toBe('run 12 of nightly-report')
     expect(outputOf(run({ job: 'run' }))).toBe('run 12, a command')
     expect(outputOf(run({ job: 'pre-deploy' }))).toBe('run 12, the pre-deploy command')
@@ -110,7 +110,7 @@ describe('whose output an entry is', () => {
 
   it('starts a sentence with it', () => {
     expect(entrySubject(entry())).toBe('Replica 2 of #3 (1.4.2)')
-    expect(entrySubject(entry({ deployment: 0, version: '' }))).toBe('Replica 2')
+    expect(entrySubject(entry({ sequence: 0, version: '' }))).toBe('Replica 2')
     expect(entrySubject(run())).toBe('Run 12 of nightly-report')
   })
 
@@ -196,7 +196,7 @@ describe('the last output of a replica', () => {
 
 describe('groupMatches', () => {
   const line = (container: string, archive: number | null, second: number, over: Partial<LogMatch> = {}): LogMatch => ({
-    replica: 2, container, stream: 'stdout', time: `2026-10-04T08:00:${String(second).padStart(2, '0')}Z`, message: `line ${second}`, archive_id: archive, deployment_id: 7, deployment: 3, job: '', run_id: null, ...over,
+    replica: 2, container, stream: 'stdout', time: `2026-10-04T08:00:${String(second).padStart(2, '0')}Z`, message: `line ${second}`, archive_id: archive, deployment_id: 7, sequence: 3, job: '', run_id: null, ...over,
   })
 
   it('groups by source in the order sources arrive, each group in reading order', () => {
@@ -221,9 +221,9 @@ describe('groupMatches', () => {
   })
 
   it('names what a group is the output of', () => {
-    expect(groupSource({ deployment: 3, replica: 2, job: '', runId: null })).toBe('replica 2 of #3')
-    expect(groupSource({ deployment: 0, replica: 1, job: '', runId: null })).toBe('replica 1')
-    expect(groupSource({ deployment: 3, replica: 0, job: 'nightly-report', runId: 12 })).toBe('run 12 of nightly-report')
+    expect(groupSource({ sequence: 3, replica: 2, job: '', runId: null })).toBe('replica 2 of #3')
+    expect(groupSource({ sequence: 0, replica: 1, job: '', runId: null })).toBe('replica 1')
+    expect(groupSource({ sequence: 3, replica: 0, job: 'nightly-report', runId: 12 })).toBe('run 12 of nightly-report')
   })
 
   it('is nothing for nothing', () => {

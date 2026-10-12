@@ -178,7 +178,8 @@ func (e *Engine) noteProxyError(line []byte) (host string, f certFailure, ok boo
 // look at. The two that a real server produced read as "Let's Encrypt could
 // not connect to the server on port 443 (tls-alpn-01): a firewall in front
 // of it?" and "the DNS record for the challenge could not be created: the
-// token cannot edit DNS records of example.com: it needs Zone → DNS → Edit".
+// token cannot edit DNS records of example.com: it needs Zone → DNS → Edit
+// (DNS Settings, DNS Firewall and DNS Views are other permissions)".
 func (e *Engine) failureReason(host string, f certFailure) string {
 	ca := e.authorityName(f.issuer)
 	port := "443"

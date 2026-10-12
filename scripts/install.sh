@@ -69,8 +69,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # download URL DEST — fails on HTTP errors, never leaves a partial DEST behind.
 download() {
     tmp="$2.download.$$"
+    # A release download from GitHub fails now and then with a reset or a
+    # 5xx on the way; one more try usually lands it.
     if have curl; then
-        curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+        curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "$tmp" "$1" || { rm -f "$tmp"; return 1; }
     elif have wget; then
         # --https-only keeps redirects on HTTPS too. BusyBox wget (Alpine) does
         # not have it; what it downloads is still checked against the release's
@@ -78,7 +80,7 @@ download() {
         https_only=""
         if wget --help 2>&1 | grep -q -- --https-only; then https_only="--https-only"; fi
         # shellcheck disable=SC2086  # one optional flag, deliberately unquoted
-        wget -q $https_only -O "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+        wget -q --tries=3 $https_only -O "$tmp" "$1" || { rm -f "$tmp"; return 1; }
     else
         die "Neither curl nor wget is installed."
     fi
@@ -86,11 +88,44 @@ download() {
 }
 
 release_url() { # release_url ASSET
+    # Nothing is downloaded through "latest" (resolve_latest comes first); the
+    # branch is for the message of a download that failed before it could be.
     if [ "$VERSION" = "latest" ]; then
         echo "https://github.com/$REPO/releases/latest/download/$1"
     else
         echo "https://github.com/$REPO/releases/download/$VERSION/$1"
     fi
+}
+
+# resolve_latest makes VERSION the tag of the release GitHub calls latest,
+# which is never a pre-release: GitHub answers /releases/latest with a
+# redirect to the release's page, and the tag is its last path segment — one
+# request, and no API with an hourly limit. Fixed once, before anything is
+# downloaded, every file comes from that one release and its signature is
+# held to that tag. Fetched through "latest" one by one, the files could
+# straddle a release being published, and whoever replaced the latest
+# release's files with those of an older, signed release would have them
+# pass as signed. Returns 1 when GitHub cannot be reached, which the callers
+# treat as a download that failed.
+resolve_latest() {
+    [ "$VERSION" = "latest" ] || return 0
+    url="https://github.com/$REPO/releases/latest"
+    if have curl; then
+        location="$(curl -fsS --proto '=https' --tlsv1.2 -o /dev/null -w '%{redirect_url}' "$url")" || return 1
+    elif have wget; then
+        # With -S, GNU and BusyBox wget alike print the headers of every
+        # answer; the first Location is the redirect's. BusyBox follows it
+        # regardless, to a page that has none.
+        location="$(wget -S --spider -O /dev/null "$url" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | head -n 1 | tr -d '\r')"
+        [ -n "$location" ] || return 1
+    else
+        die "Neither curl nor wget is installed."
+    fi
+    case "$location" in
+        */releases/tag/v[0-9]*.[0-9]*.[0-9]*) VERSION="${location##*/}" ;;
+        *) die "$url did not point at a release (Location: $location). Name the release instead:  SHIPWICK_VERSION=v0.9.1" ;;
+    esac
+    info "The latest release is $VERSION"
 }
 
 # fetch_release_asset ASSET DEST — downloads a file of the release and refuses
@@ -111,6 +146,7 @@ fetch_release_asset() {
             [ -z "$REQUIRE_SIGNATURE" ] || verify_signature
         fi
     else
+        resolve_latest || return 1
         download "$(release_url "$1")" "$2" 2>/dev/null || return 1
     fi
 
@@ -164,8 +200,10 @@ verify_signature() {
         warn "This release has no signature to check: releases before 0.8.0 were not signed. Every file is checked against its checksums."
         return 0
     fi
-    # A named version must be signed for that tag. "latest" is whichever
-    # release GitHub calls so, and never a pre-release: any plain version tag.
+    # A named version must be signed for that tag, and a download has one by
+    # now: "latest" was resolved before the first file came (resolve_latest).
+    # A bundle's release is not named here, only brought: any plain version
+    # tag, never a pre-release.
     workflow="https://github.com/$REPO/.github/workflows/release.yml@refs/tags/"
     if [ "$VERSION" = "latest" ]; then
         set -- --certificate-identity-regexp "^$(printf '%s' "$workflow" | sed 's/[.]/[.]/g')v[0-9]+[.][0-9]+[.][0-9]+\$"
@@ -273,6 +311,61 @@ verify_bundle_images() {
   The image was removed again and the installation was left as it was. Make the bundle again with:  shipwick server bundle"
     done
     step "The images are the ones the release published"
+}
+
+# verify_pulled_images holds what the pull brought against the same digests.
+# The compose file names the images by tag, and a tag is a name the registry
+# can point anywhere: whoever can write to the packages moves it, without the
+# identity that signs a release. What an image was pulled by is among its
+# RepoDigests — the digest of the manifest list the tag pointed at, the
+# image's index line in image-digests.txt. An image that .env names in place
+# of the release's is the server's own: it has no line, and is not compared.
+# An image that does not match is untagged again, the compose file that ran
+# is put back, and nothing is started.
+verify_pulled_images() {
+    if ! fetch_release_asset image-digests.txt "$WORK_DIR/image-digests.txt"; then
+        [ -z "$REQUIRE_SIGNATURE" ] || {
+            restore_previous_compose
+            die "SHIPWICK_REQUIRE_SIGNATURE is set and the release's image-digests.txt could not be downloaded: the pulled images cannot be held against the release's digests.
+  Releases before 0.7.0 published none. Nothing was started."
+        }
+        warn "The pulled images were not checked against the release's digests: the release's image-digests.txt could not be downloaded (releases before 0.7.0 published none)."
+        return 0
+    fi
+    checked=0
+    own=""
+    for image in $(docker compose config --images); do
+        expected="$(awk -v i="$image" '$1 == i && $2 == "index" { print $3 }' "$WORK_DIR/image-digests.txt")"
+        if [ -z "$expected" ]; then
+            own="$own $image"
+            continue
+        fi
+        if docker image inspect --format '{{join .RepoDigests "\n"}}' "$image" 2>/dev/null | grep -qxF "${image%:*}@$expected"; then
+            checked=$((checked + 1))
+            continue
+        fi
+        pulled="$(docker image inspect --format '{{join .RepoDigests " "}}' "$image" 2>/dev/null || true)"
+        docker image rm "$image" >/dev/null 2>&1 || true
+        restore_previous_compose
+        die "$image is not the image the release published: the registry served ${pulled:-an image without a digest} under the tag;
+  the release published $expected. The image was removed again and the installation was left as it was.
+  Something moved the tag: please report it (SECURITY.md of github.com/$REPO), and install from a bundle made
+  elsewhere in the meantime:  shipwick server bundle"
+    done
+    if [ "$checked" -eq 0 ]; then
+        warn "No image was compared with the release's digests: the compose file names none of the release's images (named in $INSTALL_DIR/.env or built here:$own)."
+    elif [ -n "$own" ]; then
+        step "The images are the ones the release published; not compared, not the release's (named in $INSTALL_DIR/.env or built here):$own"
+    else
+        step "The images are the ones the release published"
+    fi
+}
+
+# restore_previous_compose puts back the compose file that ran, kept when the
+# release's replaced it (install_server), so that "left as it was" is true of
+# the file too. On a new server there is none.
+restore_previous_compose() {
+    [ ! -f "$WORK_DIR/compose.previous" ] || cp "$WORK_DIR/compose.previous" "$INSTALL_DIR/$COMPOSE_FILE"
 }
 
 detect_platform() {
@@ -459,7 +552,7 @@ SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
       # Settings given for this run have to outlive it: the next run, an
       # upgrade, must not quietly move the proxy back to the default ports.
-      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_OIDC_NAME_CLAIM SHIPWICK_OIDC_TENANTS SHIPWICK_AGENTS SHIPWICK_LOG_RETENTION_DAYS SHIPWICK_LOG_RETENTION_SIZE SHIPWICK_UPDATE_CHECK; do
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_DIR SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_OIDC_NAME_CLAIM SHIPWICK_OIDC_TENANTS SHIPWICK_AGENTS SHIPWICK_LOG_RETENTION_DAYS SHIPWICK_LOG_RETENTION_SIZE SHIPWICK_UPDATE_CHECK; do
           eval "value=\${$name:-}"
           [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
       done
@@ -506,7 +599,9 @@ install_server() {
         [ -z "$missing" ] || die "Not on this server and not in the bundle:$missing
   If $INSTALL_DIR/.env names images of your own (SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE,
   SHIPWICK_CADDY_IMAGE), load them with docker load, or remove those lines."
-    elif ! docker compose pull --quiet 2>/dev/null; then
+    elif docker compose pull --quiet 2>/dev/null; then
+        verify_pulled_images
+    else
         # Not fatal if every image the compose file names is here anyway: built
         # locally, or pulled earlier.
         missing=""
@@ -757,7 +852,8 @@ user who runs the installer: the URL and the token are saved as a context, so
 "shipwick ps" works there too. A context saved there by hand is not touched.
 
 Environment:
-  SHIPWICK_VERSION            release to install (default: latest)
+  SHIPWICK_VERSION            release to install, such as v0.9.1 (default: latest, which is looked
+                              up first so that every file, and the signature, is that one release's)
   SHIPWICK_REQUIRE_SIGNATURE  set to 1: install nothing unless cosign is here and verifies the
                               release's signature (default: verified when cosign is installed,
                               said when it is not)
@@ -769,6 +865,8 @@ Environment:
                               a Cloudflare API token (Zone:Read, DNS:Edit): certificates
                               through DNS, so hostnames can stay behind Cloudflare's
                               proxy and can be wildcards (optional)
+  SHIPWICK_BACKUP_DIR         where the backups the agent takes are kept, a path inside the
+                              agent's container; default: backups/ in its data directory (optional)
   SHIPWICK_BACKUP_PASSPHRASE  encrypts the backups the agent takes, and lets it back up
                               its own database and key (optional)
   SHIPWICK_BACKUP_S3_ENDPOINT, _BUCKET, _ACCESS_KEY_ID, _SECRET_ACCESS_KEY, _REGION, _PREFIX

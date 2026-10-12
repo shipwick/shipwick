@@ -8,9 +8,11 @@
 #     the policy refuses,
 #   - the policy refuses what the socket proxy lets through: a privileged
 #     container, a directory of the server mounted, a namespace of the server,
-#     a capability beyond Docker's default set, a device, a privileged command
-#     in a container, a volume made of a directory of the server, Swarm, and a
-#     request whose body the plugin cannot read.
+#     a capability beyond Docker's default set, a device, a container without
+#     Docker's confinement, a privileged command in a container, a volume made
+#     of a directory of the server (asked for on its own or inline in a
+#     container's mount), Swarm, and a request whose body the plugin cannot
+#     read.
 #
 # See docs/handbook.md, "Less than the whole socket".
 #
@@ -79,8 +81,13 @@ refuses create --cap-add SYS_ADMIN alpine:3.22
 refuses create --cap-add ALL alpine:3.22
 refuses create --device /dev/null:/dev/host-device alpine:3.22
 refuses create --security-opt seccomp=unconfined alpine:3.22
+# The docker command sends this one as an empty MaskedPaths and ReadonlyPaths,
+# not as a SecurityOpt.
+refuses create --security-opt systempaths=unconfined alpine:3.22
 refuses exec --privileged shipwick-caddy-1 true
 refuses volume create -o type=none -o o=bind -o device=/ host-root
+# The same volume, created by the daemon on the way to the container.
+refuses create --mount type=volume,src=host-root,dst=/host,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/ alpine:3.22
 refuses swarm init
 refuses plugin ls
 
@@ -97,7 +104,7 @@ code=$(in_daemon curl -s -o /dev/null -w '%{http_code}' --unix-socket /var/run/d
 echo "refused: 403"
 
 say "what it does not refuse"
-for flags in "--cap-add CHOWN" "-v named:/data" "-v /var/run/docker.sock:/var/run/docker.sock"; do
+for flags in "--cap-add CHOWN" "-v named:/data" "--mount type=volume,src=named,dst=/data" "-v /var/run/docker.sock:/var/run/docker.sock"; do
     # shellcheck disable=SC2086 # several flags in one entry
     id=$(in_daemon docker create $flags alpine:3.22) || die "docker create $flags was refused: the policy allows it"
     in_daemon docker rm "$id" >/dev/null

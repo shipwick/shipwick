@@ -60,11 +60,15 @@ Expected behavior — not vulnerabilities:
   containers through Docker, or otherwise controlling the server;
 - anyone with access to the Docker socket, the agent's data directory or
   Caddy's admin socket doing the same;
-- an application container reaching the agent's API over the `shipwick`
-  network: the agent is on that network for health checks, and the API asks
-  for the token there like anywhere else (documented; on the roadmap);
+- an application container reaching the agent's API in one of the three
+  arrangements the handbook's Security section names as leaving it open — a
+  compose file of your own without the `shipwick-control` network,
+  `SHIPWICK_LISTEN_ADDR` set for the agent's container, the API's port
+  published on Docker before 28 — where `shipwick doctor` and
+  `open_to_applications` in `GET /server` say so;
 - root on the server reading the encryption key next to the database, or env
-  values through `docker inspect` (documented in the README);
+  values through `docker inspect` (documented in the handbook's Security
+  section);
 - exposing port 9000 to the internet against the documentation's advice;
 - an installation without cosign going by the release's checksums alone: the
   installer says so, and `SHIPWICK_REQUIRE_SIGNATURE=1` refuses instead.

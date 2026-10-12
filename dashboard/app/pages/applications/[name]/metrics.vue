@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { formatBytes, formatPercent } from '~/utils/format'
+import { formatBytes, formatDuration, formatPercent } from '~/utils/format'
 import { DAEMON_USAGE_NOTICE, limitsNotice, usageIsTheDaemons, withoutUnenforced } from '~/utils/limits'
 
 /** What the proxy saw of the application, and what its replicas used: both over the last hour, day or week. */
@@ -26,7 +26,7 @@ const notice = computed(() => {
     <TrafficPanel :application="name" :routed="Boolean(detail.domain)" :enabled="hasActive && !gone" />
 
     <!-- The sampled history: per replica, average CPU and peak memory per step, refreshed every 30s -->
-    <UiPanel v-if="!isStatic" title="CPU and memory" :meta="history.history.value ? `one point every ${history.history.value.step}` : null">
+    <UiPanel v-if="!isStatic" title="CPU and memory" :meta="history.history.value ? `one point every ${formatDuration(history.history.value.step_seconds * 1000)}` : null">
       <template #actions>
         <RangeSwitch v-model="history.range.value" />
       </template>

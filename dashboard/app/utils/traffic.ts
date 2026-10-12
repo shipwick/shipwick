@@ -44,7 +44,7 @@ export function toTrafficChart(traffic: Traffic, range: TrafficRange, end: numbe
 
   const byStep = new Map<number, TrafficPoint>()
   for (const p of traffic.points ?? []) {
-    const t = Date.parse(p.t)
+    const t = Date.parse(p.at)
     if (!Number.isNaN(t)) byStep.set(t, p)
   }
 

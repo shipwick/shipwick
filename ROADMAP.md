@@ -67,37 +67,14 @@ published with the release.
 
 Not tied to a version; written when someone needs them.
 
-**From Docker Compose.** A guide for the commonest starting point: a
-`docker-compose.yml` on a server, and what each of its parts becomes in
-`deploy.yaml` and `shipwick.yaml`.
-
 **GitLab CI and Azure Pipelines.** The GitHub Action has a page; the same
 three lines for a `.gitlab-ci.yml` and an `azure-pipelines.yml`, each run
 against a real server before it is published.
-
-**Where your data is.** One page for whoever has to answer a security
-questionnaire: what the agent stores and where, what is encrypted and with
-which key, what leaves the server (nothing, unless a webhook is set), and
-what a backup contains.
 
 **Coming from another tool.** The same guide as for Compose, for the tools
 people most often arrive from: Dokku and Coolify. What each of their concepts
 becomes here and how to move a running application across, without a
 comparison of merits.
-
-**Staging and production.** Two servers are two contexts, and promoting a
-version is deploying the image that ran on one to the other:
-`shipwick --context production deploy --image <the one staging runs>`. An
-approval before production is the pipeline's to ask for (a protected
-environment in GitHub or GitLab); the page shows both.
-
-**Scanning an image before it is deployed.** A scanner belongs in the
-pipeline, before `shipwick deploy`, where its result can stop the job: a
-worked example with Trivy next to the GitHub Action.
-
-**Keeping the encryption key off the server's disk.** `SHIPWICK_ENCRYPTION_KEY`
-already lets the key come from the environment; a page on supplying it from a
-secret manager at start-up, and what that does to an unattended reboot.
 
 ## 1.0
 

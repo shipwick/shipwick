@@ -48,9 +48,10 @@ To look at the manifests of a release before it is published, give the script
 the checksums that `scripts/build-release.sh` wrote:
 
 ```sh
-SHIPWICK_CHECKSUMS=dist/checksums.txt sh packaging/winget/update-manifests.sh v0.7.0
+SHIPWICK_CHECKSUMS=$PWD/dist/checksums.txt sh packaging/winget/update-manifests.sh v0.7.0
 ```
 
-They name files the release does not have yet: remove the directory again, or
+The path is read after the script has changed into its own directory: give
+it in full. They name files the release does not have yet: remove the directory again, or
 keep it for the pull request once the release is out and the checksums are
 the same.

@@ -38,7 +38,7 @@ func (c *Client) PushImage(ctx context.Context, name string, archive io.Reader, 
 		return api.LoadedImage{}, &UnreachableError{URL: c.base.String(), Err: err}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return api.LoadedImage{}, decodeError(resp)
 	}
 	var envelope api.Response[api.LoadedImage]

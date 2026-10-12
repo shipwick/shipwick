@@ -50,11 +50,10 @@ func (s *Store) AddSamples(ctx context.Context, samples []MetricSample) error {
 // PruneSamples removes every sample taken before the given time and reports
 // how many.
 func (s *Store) PruneSamples(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM metric_samples WHERE at < ?`, formatTime(before))
+	n, err := s.pruneSamplesOf(ctx, "metric_samples", before)
 	if err != nil {
 		return 0, fmt.Errorf("prune metric samples: %w", err)
 	}
-	n, _ := res.RowsAffected()
 	return n, nil
 }
 

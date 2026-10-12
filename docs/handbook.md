@@ -66,12 +66,13 @@ The agent owns the deployment lifecycle. Every deployment is an immutable record
 moving through a state machine:
 
 ```text
-PENDING → BUILDING → STARTING → HEALTH_CHECKING → HEALTHY → ACTIVE
-                          any step can → FAILED
+PENDING → BUILDING → STARTING → HEALTH_CHECKING → HEALTHY → ACTIVE → SUPERSEDED
+                 any step before ACTIVE can → FAILED → ROLLBACK → RESTORING → ROLLED_BACK
 ```
 
 Replicas are replaced one at a time, each new one only after it proved healthy;
-if a deployment fails half-way, the previous version is restored.
+if a deployment fails half-way, the previous version is restored. A rollback
+or a restore that fails itself ends in FAILED as well.
 Details: [docs/architecture.md](architecture.md) · API: [docs/api.md](api.md).
 
 ## 4. Installation
@@ -217,7 +218,8 @@ address, another port, or a firewall that admits SSH from certain addresses
 only.
 
 **Changing a setting later.** The agent's settings are the `SHIPWICK_*`
-variables of `/opt/shipwick/.env` (the table below). Changing one by hand is
+variables of the table below; on a server the installer set up, the ones
+`compose.yml` reads from `/opt/shipwick/.env`. Changing one by hand is
 SSH, an editor and a compose command; from your machine it is one command:
 
 ```bash
@@ -237,8 +239,10 @@ the way the installer does. It ends with what changed, by name; values are
 never printed, and never become part of a command — they go to the server as
 data, on the standard input of a fixed script, so a value may hold anything
 but a line break. The file keeps its mode, `0600`; the token in it is not
-touched. A name has to be one of the agent's settings — a misspelt one would
-sit in the file and change nothing — and a value is checked as the installer
+touched. A name has to be one of the settings `compose.yml` reads from
+`.env` — the ones `install.sh --help` lists, and the two hostnames; a
+misspelt one, or one the compose file does not pass on, would sit in the
+file and change nothing — and a value is checked as the installer
 checks it, in the installer's words: a Cloudflare token with a quote in it,
 a hostname with `https://` in front, the same hostname for the API and the
 dashboard. `SHIPWICK_AGENT_TOKEN` and `SHIPWICK_ENCRYPTION_KEY` are not
@@ -300,8 +304,14 @@ release, and the way back: [Upgrading](#upgrading).
 
 Everything the installer fetches comes from one
 [release](https://github.com/shipwick/shipwick/releases) and is verified against
-its checksums; the images are pinned to that release, so a server runs the
-version it installed until you run the installer again. A specific version:
+its checksums — `latest` is resolved to a release's tag before the first
+download, so two files cannot come from two releases — and the images are
+pinned to that release: the compose file names its tags, and what the pull
+brought is compared with the digests the release published (its
+`image-digests.txt`, signed with the rest); an image the registry serves
+under the tag that is not the release's is removed again and the installer
+stops with the installation as it was. So a server runs the version it
+installed until you run the installer again. A specific version:
 `curl -fsSL https://get.shipwick.com | SHIPWICK_VERSION=v0.3.0 sh`.
 
 **The signature.** From 0.8.0 on, a release's `checksums.txt` is signed by
@@ -595,27 +605,34 @@ shipwick-local && semodule -i shipwick-local.pp` writes and installs a local
 module that allows exactly what was denied; read it before installing it.
 Confining the agent itself would be a policy module of your own.
 
+Every row is read by the agent from its environment. On a server the
+installer set up, `compose.yml` hands the agent the rows `install.sh --help`
+lists, from `.env`; the rest it decides itself — the listen address, the data
+directory, `SHIPWICK_CADDY_ADMIN`, `SHIPWICK_LOG_FORMAT` (`json`) — and a
+change to one of those is a `compose.override.yml`. The package reads every
+row from `/etc/shipwick/agent.env`.
+
 | Variable | Default | |
 |---|---|---|
 | `SHIPWICK_AGENT_TOKEN` | generated | API bearer token, min. 16 characters |
 | `SHIPWICK_LISTEN_ADDR` | `127.0.0.1:9000` | Loopback by default, on purpose. The container image sets `0.0.0.0:9000`, which the agent narrows to its address on the `shipwick-control` network and loopback: the proxy and the dashboard reach it there, applications do not (§12), and the compose file publishes no port. An address set here is used as it is |
-| `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database, token hash, encryption key, and the uploaded folders of static applications (`uploads/`) until they are deployed. Off Linux, the default is `shipwick` in the user's configuration directory |
-| `SHIPWICK_ENCRYPTION_KEY` | generated | Key that encrypts `env` values, stored secrets and registry passwords in the database, 64 hex characters. Unset: `encryption.key` in the data directory, created on first start and replaced by `shipwick server rotate-key` (§12) |
+| `SHIPWICK_DATA_DIR` | `/var/lib/shipwick` | SQLite database (`shipwick.db`), token hash, encryption key, the log archive (`logs/`), backups and exports unless `SHIPWICK_BACKUP_DIR` says otherwise (`backups/`), the exports a standby fetched (`standby/`), the last answer about newer releases (`update-check.json`), and the uploaded folders of static applications (`uploads/`) until they are deployed. Off Linux, the default is `shipwick` in the user's configuration directory |
+| `SHIPWICK_ENCRYPTION_KEY` | generated | Key that encrypts `env` values, stored secrets, registry passwords, certificate keys and the secret values a deployment referred to in the database, 64 hex characters. Unset: `encryption.key` in the data directory, created on first start and replaced by `shipwick server rotate-key` (§12) |
 | `SHIPWICK_DOCKER_NETWORK` | `shipwick` | Network application containers join. The other two are named after it: `<network>-services`, where applications are found by name, and `<network>-control`, where the API is reached |
 | `SHIPWICK_CADDY_ADMIN` | — | Caddy's admin endpoint: `unix//run/caddy/admin.sock` (recommended) or `http://127.0.0.1:2019`. Unset: domains are recorded but not served |
 | `SHIPWICK_AGENT_DOMAIN` | — | Serve the agent's API over HTTPS at this hostname, through Caddy |
 | `SHIPWICK_DASHBOARD_DOMAIN` | — | Serve the dashboard over HTTPS at this hostname, through Caddy |
 | `SHIPWICK_DASHBOARD_UPSTREAM` | `dashboard:3000` | Where Caddy reaches the dashboard |
-| `SHIPWICK_AGENTS` | — | Read by the dashboard, not the agent: the servers one dashboard shows, as `name=URL` pairs separated by commas or spaces, names of at most 40 characters (`production=http://agent:9000,staging=https://agent.staging.example.com`). Unset, the dashboard shows the server it runs on (`SHIPWICK_AGENT_URL`, which the compose file sets). See [Dashboard](#dashboard) |
+| `SHIPWICK_AGENTS` | — | Read by the dashboard, not the agent: the servers one dashboard shows, as `name=URL` pairs separated by commas or spaces, at most 20 servers, names of at most 40 characters (`production=http://agent:9000,staging=https://agent.staging.example.com`). Unset, the dashboard shows the server it runs on (`SHIPWICK_AGENT_URL`, which the compose file sets). See [Dashboard](#dashboard) |
 | `SHIPWICK_PROXY_TLS_ADDR` | `caddy:443` | Where the agent reaches Caddy's TLS port, to report each hostname's certificate (§11) |
-| `SHIPWICK_WEBHOOK_URL` | — | Where to post notifications: a Slack or Discord webhook, or any HTTPS endpoint. See [Being told](#7-deployment) |
+| `SHIPWICK_WEBHOOK_URL` | — | Where to post notifications: a Slack or Discord webhook, or any HTTPS endpoint (`http` only for `localhost` and private addresses). See [Being told](#7-deployment) |
 | `SHIPWICK_WEBHOOK_SECRET` | — | Signs each notification (`X-Shipwick-Signature: sha256=<HMAC of the body>`), so your endpoint can tell it came from the agent |
 | `SHIPWICK_ALERT_MEMORY_PERCENT` | `90` | A replica at or above this share of its `resources.memory` raises an alert, see [Alerts](#7-deployment). A whole number from 50 to 100 |
 | `SHIPWICK_ALERT_DISK_PERCENT` | `85` | The disk that holds the data directory raises an alert when it is this full. A whole number from 50 to 94; at 95 the alert turns critical, whatever is set here |
 | `SHIPWICK_LOG_RETENTION_DAYS` | `14` | How long the last output of an ended container stays in the log archive, in days after it ended, from 1 to 365. See [Output that outlives its container](#output-that-outlives-its-container) |
-| `SHIPWICK_LOG_RETENTION_SIZE` | `1gb` | What the log archive may take on the disk, as `500mb` or `2gb`; over it, the application that holds the most loses its oldest entries. `0` keeps nothing |
+| `SHIPWICK_LOG_RETENTION_SIZE` | `1gb` | What the log archive may take on the disk, as `500mb` or `2gb`, at least `6mb`; over it, the application that holds the most loses its oldest entries. `0` keeps nothing |
 | `SHIPWICK_CLOUDFLARE_API_TOKEN` | — | A Cloudflare API token with *Zone → Zone → Read* and *Zone → DNS → Edit* on your zones, those two exactly. Certificates are then obtained through a DNS record: hostnames can stay behind Cloudflare's proxy, and can be wildcards. The agent checks what the token can do when it starts, and `shipwick doctor` on request. Needs `SHIPWICK_CADDY_ADMIN` — see [Behind Cloudflare](#11-caddy) |
-| `SHIPWICK_BACKUP_DIR` | `<data dir>/backups` | Where the backups the agent takes are kept on the server. See [Backups the server takes](#backups-the-server-takes) |
+| `SHIPWICK_BACKUP_DIR` | `<data dir>/backups` | Where the backups the agent takes are kept on the server, a path inside the agent's container: the directory on the host it should land on is mounted in `compose.override.yml`. Carried into `.env` by the installer when it is set, and changed with `shipwick server configure`. See [Backups the server takes](#backups-the-server-takes) |
 | `SHIPWICK_BACKUP_PASSPHRASE` | — | Encrypts every backup, and is what allows the agent's own database and encryption key to be backed up at all. At least 12 characters. Keep a copy somewhere that is not this server: without it the backups cannot be read |
 | `SHIPWICK_BACKUP_S3_ENDPOINT` | — | An S3-compatible service the backups are also sent to: `https://s3.eu-central-1.amazonaws.com`, `https://<account>.r2.cloudflarestorage.com`, … Needs the next three as well |
 | `SHIPWICK_BACKUP_S3_BUCKET` | — | The bucket; it must exist |
@@ -623,10 +640,10 @@ Confining the agent itself would be a policy module of your own.
 | `SHIPWICK_BACKUP_S3_REGION` | `auto` | The region requests are signed for; AWS wants the bucket's own |
 | `SHIPWICK_BACKUP_S3_PREFIX` | — | Put in front of every object's key: one bucket for several servers, each under its own prefix |
 | `SHIPWICK_EXPORT_SCHEDULE` | — | A five-field cron expression, UTC: when an [export of the whole server](#moving-to-a-new-server) is written to where backups go. Needs `SHIPWICK_BACKUP_PASSPHRASE` |
-| `SHIPWICK_EXPORT_KEEP` | `3` | How many of those exports are kept |
+| `SHIPWICK_EXPORT_KEEP` | `3` | How many of those exports are kept, 1 to 100 |
 | `SHIPWICK_STANDBY_SCHEDULE` | — | Makes the server a [standby](#a-second-server-kept-ready): when it imports the newest export from the bucket, with every application stopped. Needs the `SHIPWICK_BACKUP_S3_*` variables and the passphrase of the server it stands by for; its own backups then stay on its disk. Not together with `SHIPWICK_EXPORT_SCHEDULE` |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | — | The proxy the agent's own requests go through — the webhook, the bucket, the sign-in provider — and Caddy's. Not the Docker daemon's, which pulls the images. See [Behind a corporate proxy](#behind-a-corporate-proxy) |
-| `SHIPWICK_CA_FILE` | — | A PEM file of certificate authorities trusted in addition to the system's, as the agent sees the path; in a container, mounted in `compose.override.yml`. The agent does not start with a file it cannot use |
+| `SHIPWICK_CA_FILE` | — | A PEM file of certificate authorities trusted in addition to the system's, as the agent sees the path, absolute; in a container, mounted in `compose.override.yml`. The agent does not start with a file it cannot use |
 | `SHIPWICK_DNS_RESOLVERS` | public resolvers | Who is asked whether a hostname points at the server: `system`, the server's own resolver, or name servers by address, `10.0.0.2,10.0.0.3`. Unset, the public ones, and the server's own when they cannot be reached |
 | `SHIPWICK_ACME_DIRECTORY` | Let's Encrypt | The directory URL of an ACME server of your own, `https://…`: Caddy obtains every certificate there. Needs `SHIPWICK_CADDY_ADMIN` |
 | `SHIPWICK_OIDC_ISSUER` | — | The issuer URL of an OpenID Connect provider: people then [sign in to the dashboard](#signing-in-with-the-companys-accounts) with its accounts. `https`; plain `http` only for `localhost` and private addresses. Needs the next two and `SHIPWICK_DASHBOARD_DOMAIN` |
@@ -638,7 +655,9 @@ Confining the agent itself would be a policy module of your own.
 | `SHIPWICK_OIDC_REDIRECT_URL` | `https://<SHIPWICK_DASHBOARD_DOMAIN>/auth/callback` | Development only: where the provider sends the browser back to when the dashboard runs on the developer's machine, `http://localhost:3000/auth/callback`. Anything but a localhost URL is refused |
 | `SHIPWICK_UPDATE_CHECK` | `on` | `off` stops the agent's daily question to GitHub about a newer release; `GET /server` then says so and the dashboard shows no notice. See [A newer release](#4-installation) |
 | `SHIPWICK_LOG_LEVEL` | `info` | `debug` `info` `warn` `error` |
-| `SHIPWICK_LOG_FORMAT` | `text` | `text` `json` |
+| `SHIPWICK_LOG_FORMAT` | `text` | `text` `json`. The installer's compose file sets `json` |
+| `SHIPWICK_HTTP_PORT`, `SHIPWICK_HTTPS_PORT` | `80`, `443` | Read by Compose, not the agent: the server ports Caddy is published on (443 over UDP as well). Only when something else owns 80 and 443; certificates need the real ones reachable from the internet |
+| `SHIPWICK_AGENT_IMAGE`, `SHIPWICK_DASHBOARD_IMAGE`, `SHIPWICK_CADDY_IMAGE` | the release's | Read by Compose: images of your own in place of the release's. The installer keeps them across upgrades; with a bundle, `docker load` them first |
 | `DOCKER_HOST`, `DOCKER_CONFIG` | Docker defaults | Standard Docker variables are honored |
 
 ### Behind a corporate proxy
@@ -1279,7 +1298,7 @@ Not deployed now and assumed to be running: postgres
 
 The commands that take the application's name from `deploy.yaml` — `status`,
 `logs`, `stop`, `start`, `rollback`, `redeploy`, `run`, `jobs`, `open`,
-`backup`, `restore` — take it from `shipwick.yaml` when that is the file in
+`backup`, `backups`, `restore` — take it from `shipwick.yaml` when that is the file in
 the directory (or the one `-f` names) and it describes one application. When
 it describes several they ask which, with the names and the command to type:
 
@@ -1296,6 +1315,7 @@ in `web/`, writes `web/Dockerfile` and `web/.dockerignore`, and appends
 ```yaml
   - name: web
     build: ./web
+    init: true
     port: 3000
     health:
       path: /
@@ -1324,7 +1344,9 @@ A secret belongs to one application or to the whole server. `--app my-api`
 stores it for `my-api` alone: only `my-api`'s `${DATABASE_PASSWORD}` resolves
 to it, and a second application can have a `DATABASE_PASSWORD` of its own.
 Without `--app` the secret is the server's, which every application without
-one of its own falls back to. Store what an application owns — its database
+one of its own falls back to — and so can read, through its own container:
+a `deploy` token limited to one application reaches every server-wide secret
+that application's `deploy.yaml` names. Store what an application owns — its database
 password, its session key, the API key of a service only it talks to — with
 `--app`; store what several applications share — a registry login, the key of
 a mail provider they all send through — once, for the server. The application
@@ -1460,7 +1482,7 @@ image that is in a registry: a document with `build:` or `static:` is told
 that it is deployed with `shipwick deploy` from the project's directory,
 because the dashboard has neither a project to build from nor a folder to
 upload. The same page deploys a changed configuration of an existing
-application (*deploy a changed configuration* on its Configuration tab). It
+application (*Change the configuration* on its Configuration tab). It
 starts empty: the agent never returns the values of an application's
 environment, so the document has to come from the project.
 
@@ -1606,19 +1628,19 @@ proxy serves itself needs `name`, `static` and `domain`. Annotated example:
 |---|---|---|
 | `name` | — | Lowercase letters, digits, dashes; starts and ends with a letter or digit; max 63. Other applications reach this one at `http://<name>:<port>`. `agent`, `caddy`, `dashboard` and `localhost` are taken |
 | `image` | — | Any Docker image reference. Its tag becomes the deployment's version. A private registry needs a credential on the server: `shipwick registry login`, see [Private images](#6-deployyaml) below |
-| `build` | — | Build the image on your machine instead of naming one: `build: .`, or `{context, dockerfile}` (default context `.`, the directory of deploy.yaml; default `Dockerfile`, relative to the context); paths are relative to deploy.yaml and stay inside its directory. `shipwick deploy` runs `docker build` and sends the image to the server; no `image` and no registry — see [Deployment](#7-deployment) |
-| `static` | — | A folder, relative to deploy.yaml, served by Caddy as it is: a built frontend. `static: dist/`, or `{dir, fallback}`. No container: `image`, `port`, `replicas`, `env`, `health`, `resources`, `volumes`, `publish`, `entrypoint`, `command`, `user`, `logging`, `pre_deploy`, `jobs`, `backups`, `security` and `deploy.stop_timeout` do not apply. Needs `domain` — see [Deployment](#7-deployment) |
+| `build` | — | Build the image on your machine instead of naming one: `build: .`, or `{context, dockerfile}`: the context is relative to deploy.yaml (default `.`, its directory), the Dockerfile relative to the context (default `Dockerfile`); neither may be absolute or climb out of the directory it is relative to. `shipwick deploy` runs `docker build` and sends the image to the server; no `image` and no registry — see [Deployment](#7-deployment) |
+| `static` | — | A folder, relative to deploy.yaml, served by Caddy as it is: a built frontend. `static: dist/`, or `{dir, fallback}`. No container: `image`, `build`, `port`, `replicas`, `env`, `health`, `resources`, `volumes`, `publish`, `entrypoint`, `command`, `user`, `init`, `logging`, `pre_deploy`, `jobs`, `backups`, `security` and `deploy.stop_timeout` do not apply. Needs `domain` — see [Deployment](#7-deployment) |
 | `static.fallback` | — | A file in the folder answered, with status 200, for every path that names no file: `index.html` for a single-page application. Without it such a path is a `404` |
 | `entrypoint` / `command` | the image's | Replace the image's `ENTRYPOINT` / `CMD`. A list of arguments; a string is one argument and is never split — see below |
 | `user` | the image's | User the process runs as: `app`, `1000`, `1000:1000` |
-| `port` | — | Port the app listens on. Required with `domain` or `health` |
+| `port` | — | Port the app listens on. Required with `domain` or `health.path` |
 | `domain` | — | Public hostname, served over HTTPS by Caddy. May be a wildcard, `"*.example.com"`: every name one label below the domain — see [Wildcards](#11-caddy) |
 | `aliases` | — | Up to 20 more hostnames served exactly like `domain`, wildcards included. Needs `domain` |
 | `redirects` | — | Up to 20 hostnames redirected (308) to `https://<domain>` — to `https://<domain><path>` for an application with a `path` — path and query kept: `www.example.com`, an old domain. Needs `domain` |
 | `path` | — | Serve only this path of the domain and everything under it: `/api` takes `example.com/api` and `example.com/api/users`, not `/apix`. Several applications share a domain under different paths; the longest path wins and an application without one takes the rest. Starts with `/`, no trailing slash, letters, digits and `. _ ~ -` between the slashes, at most 200 characters. Needs `domain` — see [Caddy](#11-caddy) |
 | `proxy.strip_prefix` | `false` | Remove `path` from a request before the application sees it: `/api/users` arrives as `/users`. Needs `path`. A static application's files are always looked up without it |
 | `proxy.headers` | — | Up to 50 response headers, set on every response the application or its folder gives, over what the application sent under the same name. Not the ones that belong to the connection (`Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, …) |
-| `proxy.basic_auth[].path` / `username` / `password` | everything / — / — | Up to 20 accounts asked for by the proxy before a request reaches the application. The password is a secret like an `env` value — at least 8 characters, `${NAME}` filled in the same way — and is never returned by the API. Where paths overlap, the accounts of the longest decide |
+| `proxy.basic_auth[].path` / `username` / `password` | everything / — / — | Up to 20 accounts asked for by the proxy before a request reaches the application. The password is a secret like an `env` value — at least 8 characters, `${NAME}` filled in the same way — and is never returned by the API. Where paths overlap, the accounts of the longest decide. A username holds no braces: the proxy would read `{…}` as a placeholder |
 | `proxy.redirects[].from` / `to` / `status` | — / — / `308` | Up to 100 paths answered with a redirect: `from` is one exact path, `to` a path on the same host or an `https://` URL, `status` one of 301, 302, 307, 308. The query is kept unless `to` has its own |
 | `replicas` | `1` | 1–50; must be 1 with `volumes` or `publish` |
 | `env` | — | Environment variables; values are never logged or returned by the API. `${NAME}` is filled in when you deploy — by the CLI from its environment or `--env-file`, else by the agent from the secrets stored with `shipwick secret set` — so secrets stay out of the file. `$${NAME}` is a literal `${NAME}` |
@@ -1783,13 +1805,24 @@ logging:
 The options are the driver's own and reach Docker as written; Shipwick checks
 only that a collector address is `scheme://host:port` (a socket is a path on
 the server, and Shipwick never touches those) and that no option names a file
-on the server. With `json-file` or `local` the caps stay unless you set
+on the server. One option is a credential: `splunk-token`, the HEC token of
+the `splunk` driver. It is treated like an `env` value — encrypted on the
+server, shown as `********` in every answer of the API and never handed out
+again — and it may be written as `${SPLUNK_TOKEN}`, filled in from a secret
+stored with `shipwick secret set` ([Secrets](#5-quick-start)) like an `env`
+value is. With `json-file` or `local` the caps stay unless you set
 `max-size` and `max-file` yourself. With a remote driver, `shipwick logs`
 keeps working through the local copy Docker keeps for `docker logs` — its
 dual logging, on by default since Docker 20.10; if it was turned off
 daemon-wide, `shipwick logs` shows nothing for that application. The log
 archive reads the same copy: what `shipwick logs` can show of a container,
 the archive can keep of it when it ends, and no more.
+
+The options are the daemon's to act on, not the container's: the connection
+to the address an option names is made by the daemon, from the server, and a
+driver's `env`, `env-regex` and `labels` options copy the container's
+environment values into every log line. Give them the care `env` gets, and
+treat the collector as a place the application's secrets can arrive.
 
 ## 7. Deployment
 
@@ -1918,7 +1951,9 @@ terminal are silent until each build ends.
 from it, so such an image is either on the server or it is not, and a
 deployment whose image is gone (pruned, or a rollback to a version that was
 never sent to this server) says so and asks for another `shipwick deploy` from
-the project. Old local images are pruned like any other; the two that matter
+the project. An image under `shipwick.local` is the application's own: another
+application's tag in `deploy.yaml`, or given to `redeploy`, is refused with the owner's
+name. Old local images are pruned like any other; the two that matter
 stay. The first deployment sends the whole image; after that only the layers
 the server does not have travel. The CLI asks the agent which of the
 image's layers its Docker lacks and leaves the others out of the archive, so a
@@ -2047,7 +2082,10 @@ says so when the application is running; stop it first. A restore replaces
 *everything* in the volume with the archive's contents, so it requires the
 application to be stopped and leaves it stopped.
 The archives are plain tar files holding the volume's contents, relative to
-the mount point; anything that can write such a tar can be restored.
+the mount point; anything that can write such a tar can be restored. It is
+written as it is, device nodes and setuid bits included; the daemon keeps it
+inside the volume, and the container's defaults — `no-new-privileges` and the
+daemon's device cgroup — are what hold what it may contain.
 
 **A folder instead of a container.** A built frontend — the `dist/` of a Vite
 or Nuxt site, the `out/` of a Next export, any folder of HTML, CSS and
@@ -2067,7 +2105,10 @@ asked to validate the file before the folder is uploaded, as before a build.
 Everything sent
 is served to anyone who asks for its path, so what describes the site stays
 out: `deploy.yaml` and `shipwick.yaml`, `.git` and `.env` files, wherever
-they are in the folder. Other dotfiles go in; `.well-known` is content.
+they are in the folder. Everything else in the folder is sent and served,
+dotfiles included — `.well-known` is content, and so is any other file that
+begins with a dot: run the build into a folder of its own, not into the
+project's root.
 
 ```text
 ✓ Validated deploy.yaml
@@ -2225,7 +2266,13 @@ $ shipwick run my-api -- rails db:migrate
 The command follows `--` and runs on the server, for at most an hour; its
 output is printed when it finishes, and `shipwick` exits with its exit code.
 Several commands may run at once. Every run keeps the last 200 lines (64 KB) of
-what the command wrote; the container itself is removed. A job's output goes
+what the command wrote; the container itself is removed. The command line
+itself is kept with the run as well, and the dashboard and the API
+(`GET /applications/<name>/runs`) show it to every token that can read the
+application — so a credential does not belong in it: `psql postgres://app:hunter2@postgres/app` typed after `--`
+is readable by everyone on the server afterwards. Put the password in `env`
+as `${NAME}` and let the command read it from the environment, as the image's
+own command does. A job's output goes
 through Docker's default log driver, whatever `logging` says: that copy is
 where the run's output is read from. The log archive keeps more of it, the
 last 10,000 lines: `shipwick logs my-api --run <id>`, see
@@ -2487,8 +2534,8 @@ command does not run inside the replica but in a container of its own next to
 it, for as long as the command takes. At `before_timeout` that container is
 stopped — `SIGTERM`, and `SIGKILL` if it is still there ten seconds later —
 and removed, the backup
-fails with `backups.before did not finish within 1h and was stopped`, and
-nothing of the command is left; the same happens when the agent is stopped
+fails with `backups.before did not finish within 1h and was stopped; nothing
+was archived. …`, and nothing of the command is left; the same happens when the agent is stopped
 while it runs. The replica is not touched.
 
 ```yaml
@@ -2535,7 +2582,7 @@ ID   WHEN      TRIGGER    SIZE      WHERE                   STATUS      VERIFIED
 | `shipwick backups verify <app> [id]` | Prove that a backup restores; the latest unless an id is given |
 | `shipwick backups restore <app> <id>` | Replace the volumes with a backup's contents. The application must be stopped and stays stopped; asks for its name |
 | `shipwick backups download <app> <id> [-o dir]` | Fetch a backup's archives, decrypted, as `<app>-<volume>-backup-<id>.tar` |
-| `shipwick backups rm <app> <id>` | Remove one, from the server and the bucket |
+| `shipwick backups rm <app> <id>` | Remove one, from the server and the bucket; asks first, `--yes` to skip |
 | `shipwick backups decrypt <file>` | Decrypt a file taken from the server or the bucket, on your machine |
 | `shipwick backups adopt [app]` | Record the backups that the directory and the bucket hold and the agent's database does not know, as after [restoring the agent's state](#backups-the-server-takes); everything, or one application's |
 
@@ -2744,9 +2791,9 @@ sealed again on import with the new server's own key. The old key does not
 travel. Exporting and importing take a token with the `admin` role.
 
 **What happens to a running application.** Each one is held while its volumes
-are read, the way a backup holds it: a `deploy` asked for meanwhile is told to
-wait, and an application that is being deployed fails the export, which names
-it. If its deploy.yaml has `backups.before` or `backups.stop`, the export does
+are read, the way a backup taken by hand holds it: a `deploy` asked for
+meanwhile is refused with "another operation is in progress", and an
+application that is being deployed fails the export, which names it. If its deploy.yaml has `backups.before` or `backups.stop`, the export does
 the same first. Without either, a database is copied while it writes, and
 what arrives is what a power cut would have left. The CLI reads the file back
 before it calls it an export; one that was cut off is removed.
@@ -3394,6 +3441,30 @@ table says:
   server](#preparing-a-server), item 7), and `shipwick doctor` says so from
   a quarter of the table on. Memory would have been next: nine tenths of the 4 GB were
   in use at 250 applications.
+- **The agent's own share, Docker aside**, is small and was made smaller
+  before 1.0. Measured on the machine above with `go test -bench` in
+  `agent/internal/deploy`, where Docker and the proxy are in-memory stand-ins
+  that answer at once, so that what is left is the agent's: applications of
+  two replicas, each with a hostname and a health check; medians of three
+  runs. One supervision pass took 5.5 ms of processor time with 50
+  applications, 10.9 ms with 100 and 22.4 ms with 200, and takes 2.6, 5.0
+  and 10.1 ms: it read each application's deployment and its replicas from
+  the database one application at a time, seven statements for each, and
+  reads them in one go now. `GET /applications` with 100 applications cost
+  the agent 2.4 ms and costs 1.2; `GET /server` 2.2 ms and 1.0; the sampler's
+  round every 30 seconds 6.3 ms and 4.7. What an agent does with its
+  database before it answers — recovering what was left, telling the proxy
+  the routes — is 1.5 ms with 50 applications and 2.8 ms with 100: an
+  agent's start is Docker's and the migrations' time, not this. One line of
+  the proxy's access log costs the agent 2.2 µs to read and count; the
+  proxy's own lookup of an application's replicas, in `caddy/`, 0.26 µs and
+  six small allocations per request. In the server, measured again with
+  `measure-limits.sh apps` at 50 and 100 applications before and after, the
+  agent's own processor went from 2% and 3% of one to 1% and 2% — the
+  script's resolution is the percent — and the server's idle from 13% and
+  28% to 14% and 25%; `shipwick ps`, `GET /applications` and `GET /server`
+  took the same 55 to 126 ms, nine tenths of which is Docker listing the
+  containers (`list` in the script's table).
 - `shipwick status <app>` took 2.0 s at every size: it waits for Docker's two
   readings of the CPU. `GET /applications` and `GET /server` took what
   `shipwick ps` took; `GET /metrics` 4 to 10 ms.
@@ -3482,6 +3553,33 @@ measured file was 5.3 MB with 42,000 samples in it, next to a write-ahead log
 of 5.2 MB that stays at about that size. The database is not what a server
 runs out of.
 
+What the queries cost against a database of that age was measured too, on
+the machine above and not in the server, with `go test -bench` in
+`agent/internal/store` (`BenchmarkYearOldDatabase`): 20 applications, ten of
+them deployed every day for a year, 3,660 deployments with their replicas and
+13 events each, 500 supervisor events per application, a week of 30-second
+samples of 40 replicas (403,200 rows), a week of traffic minutes (201,600
+rows) and 100,000 audit entries. Everything a request or the agent's loops
+ask is answered in less than a millisecond — the list of recent deployments
+in 0.7 ms, an application's 25 newest in 0.44 ms (it was 1.3: the whole year
+of that application was sorted for the page), its 50 newest events in
+0.18 ms, a page of the audit trail in 0.25 to 0.34 ms with any filter, the
+read every supervision pass makes of all applications in 0.56 ms (5.4 before
+1.0: it walked the year's deployments to find the 20 active ones), the
+hourly prune of a week's samples in 6 ms with an hour's rows to remove and
+0.1 ms with none (it was 123 ms either way, and read the whole week) — with
+two exceptions. The metrics history over `7d` reads the 40,320 samples of an
+application's two replicas and takes 150 ms; over `24h` 20 ms, over `1h`
+0.8 ms. The traffic over `7d` reads 10,080 minutes and takes 61 ms. Both are
+asked once every 30 seconds by a dashboard that shows that range, which is
+well under one percent of a processor; the samples are aggregated when they
+are read so that the step can be chosen per request, and the rows are the
+price. Beyond these, a supervisor restart writes its count against a table
+of replicas that has no index on the container (0.55 ms over the year's
+7,320 rows), and pruning an application's own events after one is recorded
+takes 2.4 ms for an application with a year of deployment events; neither
+happens more than a few times an hour on the busiest server.
+
 **A backup and a restore.** One volume holding one file of random bytes,
 `shipwick backups run`, `verify` and `restore`, to the server's own directory
 (no bucket), each size once without and once with
@@ -3539,7 +3637,11 @@ domain: api.example.com
 That is the whole configuration. Point the domain's DNS at the server, deploy,
 and [Caddy](https://caddyserver.com) serves it over HTTPS: the certificate is
 obtained and renewed automatically, and plain HTTP is redirected. Shipwick does
-not reimplement any of that — it only tells Caddy what to route where.
+not reimplement any of that — it only tells Caddy what to route where. The
+API's and the dashboard's own hostnames answer with
+`Strict-Transport-Security: max-age=31536000`, so a browser that has seen
+them once asks over HTTPS from the start; an application sets its own through
+`proxy.headers` ([below](#11-caddy)).
 
 ```text
 Internet ──▶ Caddy :443 ──▶ my-api:8080 ──┬──▶ shipwick_my-api_7_1
@@ -3580,15 +3682,17 @@ deployments taking turns at the proxy's routing, which is done for one
 application at a time.
 
 - **Only healthy replicas receive traffic.** A replica that fails its health
-  check is taken off the name within a second and put back once it passes
-  again; one that crashes disappears from it at once. Requests are spread
-  round-robin.
+  check is taken off the name as soon as the agent sees it, and the proxy
+  stops sending to it within a second of that; it is put back once it passes
+  again. One that crashes disappears from the name at once. Requests are
+  spread round-robin.
 - **A deployment does not touch the proxy.** A new replica takes the name only
   once it is healthy; the old one it replaces keeps answering until it is
   stopped, and taking it off the name is the same thing as stopping it. Caddy's
-  configuration changes only when a domain or a port does, so a rollout, a
-  crash and a restart never reload it — and a reload is the one thing that
-  costs requests: Caddy resets connections that are being established at that
+  configuration changes when a domain, a path or a port does, and when an
+  application goes from having a ready replica to having none, or back — so a
+  rollout, the crash of one replica among several and a restart never reload
+  it; a reload is the one thing that costs requests: Caddy resets connections that are being established at that
   instant. Measured with a new connection per request, 12 clients and 50 ms of
   added latency, through 18 consecutive rolling redeploys: 15,774 of 15,774
   requests answered, 0 reloads.
@@ -3865,7 +3969,8 @@ per reason, in `GET /applications/:name` (`certificates[].failure`) and in
 Encrypt could not connect to the server on port 443 (tls-alpn-01): a firewall
 in front of it?* and *the DNS record for the challenge could not be created:
 the token cannot edit DNS records of example.com: it needs Zone → DNS →
-Edit*. A failure is forgotten when a certificate arrives; Caddy's own words
+Edit (DNS Settings, DNS Firewall and DNS Views are other permissions)*. A
+failure is forgotten when a certificate arrives; Caddy's own words
 stay in `docker logs shipwick-caddy-1`. The application's events record a
 certificate being obtained and one running out, and a [webhook](#7-deployment)
 is told `certificate.expiring` at 14 days and again at 3. The agent reaches
@@ -3883,7 +3988,7 @@ my-api   208       20 (0.2%)    48ms    118 MB
 web      12.4      0            2.1ms   3.2 MB
 
 $ shipwick traffic my-api --since 24h
-$ shipwick traffic my-api --requests -f
+$ shipwick traffic my-api --requests --follow
 15:04:05  200  GET /api/users  12ms  2 KB  203.0.113.7
 15:04:06  502  POST /checkout  1.2s  45 B  203.0.113.9
 ```
@@ -3957,8 +4062,9 @@ frameworks can be told their base path; for one that cannot,
 its redirects and links must then add the prefix themselves, the proxy does
 not rewrite responses. A static application under a path is always served
 with the prefix removed, since its files are looked up in its folder, and a
-request for the path itself is sent to it with a trailing slash, so that
-relative links in the page lead below it.
+request for the path itself is answered with a `308` to the path with a
+trailing slash, as a web server would, so that relative links in the page
+lead below it.
 
 **Headers, passwords and redirects.** The `proxy` block says what Caddy does
 for an application's requests beyond passing them on:
@@ -3995,7 +4101,13 @@ configuration is shown, and Caddy is given a bcrypt hash of it, never the
 password. It must have at least 8 characters and at most 72 bytes. Several
 entries with the same `path` are several users of it. Where the paths of two
 entries overlap, the longer one decides: with one account for everything and
-another for `/admin`, `/admin` accepts only the second. Basic authentication
+another for `/admin`, `/admin` accepts only the second. A gate with a `path`
+matches the path as the proxy reads it — case-insensitively, with `..`, `//`
+and percent-encoding resolved — and nothing else: `/admin;x`, `/admin.` or
+`/admin%20` are not `/admin` to the proxy and reach the application, which may
+well read them as `/admin` (Tomcat drops `;…`, IIS a trailing dot), so an
+application with routes of its own under the gated path is gated without
+`path`, or does its own authentication. Basic authentication
 sends the password with every request; it is protected by HTTPS, which every
 domain has. It keeps a staging site or an admin area closed; it is not a
 login system.
@@ -4032,7 +4144,8 @@ application reloads Caddy once — the one kind of change a rollout of
 containers never causes.
 
 **The agent owns Caddy's configuration entirely** — it regenerates and reloads
-the full config whenever a domain or a port changes, and restores it within
+the full config whenever a domain, a path or a port changes, or an
+application's last ready replica comes or goes, and restores it within
 seconds should Caddy ever come back without it. Do not edit it by hand: it
 would be overwritten. Custom Caddy directives are not supported; the `proxy`
 block of `deploy.yaml` is the supported way to ask more of it.
@@ -4379,9 +4492,13 @@ What Shipwick does:
   supplied certificates: that volume is mounted by Caddy alone, and should
   stay so.
 - `shipwick` never takes the token as a flag (arguments leak through `ps` and
-  shell history), stores it `0600`, refuses to send a saved token to a
-  different agent than the one it was saved for, and warns before a token
-  crosses the network over plain HTTP.
+  shell history), stores it `0600` on Unix — on Windows the file lives in the
+  profile's `AppData` with the profile's own permissions (the user, SYSTEM
+  and Administrators), and a `SHIPWICK_CONFIG` pointed at a shared folder
+  gets no protection from the CLI — refuses to send a saved token to a different
+  agent than the one it was saved for (a redirect answered at the saved URL
+  is not followed, and the token is not sent where it points), and warns
+  before a token crosses the network over plain HTTP.
 - Guessing is answered: after 20 failed authentications within a minute
   from one address, the agent answers wrong tokens from it with `429` for
   the next minute. A valid token is never refused and `GET /health` is not
@@ -4513,8 +4630,10 @@ server](#moving-to-a-new-server)).
 
 **Secrets at rest.** The `env` values of every deployment, the secrets
 stored with `shipwick secret set`, the registry passwords stored with
-`shipwick registry login` and the keys of the certificates supplied with
-`shipwick cert set` are encrypted before they are written to
+`shipwick registry login`, the keys of the certificates supplied with
+`shipwick cert set` and the secret values a deployment's document referred
+to with `${NAME}` (kept with the deployment, so that a redeploy or rollback
+need not look them up) are encrypted before they are written to
 the database (AES-256-GCM; everything else in the record, including the
 variable names, stays readable). The key is `encryption.key` in
 the data directory, created by the agent on its first start, or the value of
@@ -4597,7 +4716,7 @@ The release's files — the CLI for every platform, the packages, the compose
 file, the installer, the digests of the images — are listed in
 `checksums.txt`, and `checksums.txt` is what is signed
 (`checksums.txt.sigstore.json`). With
-[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.4
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.5
 or later:
 
 ```bash
@@ -4624,7 +4743,11 @@ cosign verify ghcr.io/shipwick/agent:0.8.0 \
 and the same for `ghcr.io/shipwick/dashboard` and `ghcr.io/shipwick/caddy`.
 The digest it prints is the `index` line of that image in the release's
 `image-digests.txt`, and what `docker image inspect --format
-'{{.RepoDigests}}'` shows on a server that pulled the tag.
+'{{.RepoDigests}}'` shows on a server that pulled the tag. The installer
+compares the two after every pull: an image the registry serves under the
+release's tag that is not the one the release published is removed again,
+and the installation is left as it was ([§4](#4-installation)). Images of
+your own, named in `.env`, are not compared.
 
 Each file and each image also has a provenance attestation, kept by GitHub:
 the repository, the commit, the workflow and the run. With the GitHub CLI,
@@ -4722,19 +4845,19 @@ The list, which is all the agent ever asks of Docker:
 | `POST /containers/create`, `/containers/<id>/start`, `/stop`, `/wait`; `DELETE /containers/<id>` | Replicas, jobs, the containers of backups |
 | `POST /containers/<id>/exec`, `/exec/<id>/start`; `GET /exec/<id>/json` | Health checks by command, `backups.before`, the checks on a static folder |
 | `POST /images/create`, `/images/load` | Pulling an image; an image built by the CLI, or brought by an import |
-| `GET /images/json`, `/images/<name>/json`, `/images/get` | Which images are here, and their layers; an image written into an export |
-| `DELETE /images/<name>` | Images no deployment can go back to |
-| `GET /networks/<name>`, `POST /networks/create` | The two networks, made at the first start |
+| `GET /images/json`, `/images/<name>/json`, `/images/get` | Which images are here, and their layers; an image written into an export; which image each tag names, before an archive is loaded |
+| `POST /images/<id>/tag` | A tag an upload the agent refused had moved, pointed back at the image it named |
+| `DELETE /images/<name>` | Images no deployment can go back to; what a refused upload brought, by its ID |
+| `GET /networks/<name>`, `POST /networks/create` | The two networks, made at the first start; at every start, the subnets the API may be called from |
 | `POST /networks/<name>/connect`, `/disconnect` | A replica's names on the services network |
 | `GET /volumes`, `POST /volumes/create`, `DELETE /volumes/<name>` | The volumes of applications |
 | `POST /auth` | A registry login is tried before it is stored |
 
-It was found by reading the agent and confirmed by recording: the
-integration tests and every operation of `scripts/test-cycle.sh` — deploy,
-rollout, rollback, stop and start, a hook, a job, a one-off command, a
-backup with its verification, a restore, a static folder, a built image, an
-export and an import, deletion — run through the proxy with nothing
-refused.
+It was found by reading the agent and confirmed by recording: every
+operation of `scripts/test-cycle.sh` — deploy, rollout, rollback, stop and
+start, a hook, a job, a one-off command, a backup with its verification, a
+restore, a static folder, a built image, an export and an import, deletion —
+runs through the proxy with nothing refused.
 
 **What it takes away.** Everything in the Engine API that is not on the
 list: Swarm, plugins, builds, `commit`, `kill`, `restart`, `rename`,
@@ -4744,8 +4867,10 @@ request, every bind mount: a container created with a directory of the
 server mounted (`-v /:/host`, `--mount type=bind`), with another
 container's volumes (`--volumes-from`), or a volume made of a directory
 (`o=bind`) is refused. The agent mounts named volumes only, so the one
-directory the proxy is told to allow does not exist. Each of these was
-tried through the filtered socket and refused.
+directory the proxy is told to allow does not exist. Each of the bind
+mounts was tried through the filtered socket and refused, as were Swarm,
+plugins, `kill`, `update`, `commit`, `network rm` and `system prune`
+(`scripts/test-socket-proxy.sh`).
 
 **What it does not take away.** The proxy reads the path of a request and
 its bind mounts, and nothing else of its body. `POST /containers/create` is
@@ -4786,15 +4911,20 @@ command run in one, root on the server:
 
 - a privileged container;
 - a directory of the server mounted: `Binds`, a `Mounts` entry of type
-  `bind`, another container's volumes (`--volumes-from`), and a volume made
-  of a directory (`docker volume create -o o=bind`), with one path allowed,
-  the daemon's own socket, which the agent's container is given and which
-  leads back to the policy;
+  `bind`, another container's volumes (`--volumes-from`), and a volume with
+  any driver option (`docker volume create -o …`, which is how a directory of
+  the server becomes a volume: `-o o=bind` — or the same options on a
+  container's `--mount type=volume,volume-opt=…`, which the daemon creates on
+  the way), with one path allowed, the daemon's own socket under either of
+  its names (`/var/run/docker.sock`, `/run/docker.sock`), which the agent's
+  container is given and which leads back to the policy;
 - a namespace of the server: `--pid`, `--net`, `--ipc`, `--userns`, `--uts`
   or `--cgroupns` set to `host`;
 - a capability beyond Docker's default set (`--cap-add SYS_ADMIN`, `ALL`), a
-  device, and `seccomp`, `apparmor` or `systempaths` set to `unconfined`
-  or `label=disable`;
+  device, `seccomp` or `apparmor` set to `unconfined`, `label=disable`, and
+  `systempaths=unconfined` in the form it travels in: a `MaskedPaths` or
+  `ReadonlyPaths` list of any length, which replaces the daemon's default
+  set (null or absent keeps it);
 - a privileged command in a container (`docker exec --privileged`);
 - Swarm, and plugins.
 
@@ -4821,8 +4951,10 @@ these was tried through the daemon's socket and refused with `authorization
 denied by plugin …: request rejected by administrative policy`: `docker run
 --privileged`, `-v /:/host`, `--mount type=bind`, `--volumes-from`,
 `--pid=host`, `--net=host`, `--ipc=host`, `--cap-add SYS_ADMIN`, `--cap-add
-ALL`, `--device`, `--security-opt seccomp=unconfined`, `docker exec
---privileged`, `docker volume create -o type=none -o o=bind -o device=/`,
+ALL`, `--device`, `--security-opt seccomp=unconfined`, `--security-opt
+systempaths=unconfined`, `docker exec --privileged`, `docker volume create -o
+type=none -o o=bind -o device=/`, `--mount
+type=volume,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/`,
 `docker swarm init`, `docker plugin ls`. `scripts/test-docker-authz.sh`
 installs the plugin in a daemon of its own, runs everything an installation
 does through it — the agent never asks for any of the above, so everything
@@ -4841,7 +4973,7 @@ so nothing legitimate is refused by that.
 agent alone: your own `docker run --privileged` on the server is refused,
 and so is a bind mount of your own — a CA file or a `config.json` in
 `compose.override.yml` — until its path is added to `allowed_binds` in the
-policy. `docker plugin` commands are refused too, so to change or remove the
+policy, and so is a volume of your own created with `-o`. `docker plugin` commands are refused too, so to change or remove the
 plugin, take it out of `daemon.json` and send the daemon `HUP` first. A
 policy file that is missing or unreadable makes the plugin allow every
 request; it refuses nothing by accident, and protects nothing by accident
@@ -4936,9 +5068,12 @@ $ shipwick doctor
 
 The agent's log says it at every start, and the `memory` alert is not raised
 on such a server: there is no limit for a replica to come close to. A
-rootful daemon whose kernel offers no memory controller reports itself the
-same way and is answered the same way, without the word "rootless"; no such
-server was at hand to run it on.
+rootful daemon whose kernel offers no memory controller is reported the same
+way on the deployment and in `shipwick status`; `shipwick server status`
+leaves out "rootless", and `shipwick doctor` points at the kernel instead of
+at delegation ("Its kernel offers Docker no cgroup controller for them;
+docker info on the server says which"). No such server was at hand to run it
+on.
 
 **The address of a client.** Rootless Docker's default port forwarding
 hands every connection to the proxy from one address, the gateway of the
@@ -5053,8 +5188,7 @@ Someone without a matching rule who signs in is refused with a sentence
 they can forward to whoever administers the server:
 
 ```
-grace@example.com signed in, and no rule on this server gives that address a role.
-An admin grants one with: shipwick access grant grace@example.com --role read
+grace@example.com signed in, and no rule on this server gives that address a role. An admin grants one with: shipwick access grant grace@example.com --role read
 ```
 
 The agent takes the address from the provider's ID token, and only one the
@@ -5260,15 +5394,16 @@ make test-dashboard     # dashboard: typecheck, unit tests, production build
 make lint
 ```
 
-Without `make` (Windows), the targets are one-liners — see the [Makefile](Makefile).
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs all of the above,
-plus `govulncheck`, `shellcheck`, image builds and cross-compilation.
+Without `make` (Windows), the targets are one-liners — see the [Makefile](../Makefile).
+CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) runs all of the
+above except `test-full-disk`, plus `govulncheck`, `shellcheck`, image builds
+and cross-compilation.
 
 How the engine is tested is worth knowing before changing it: the deployment
 engine talks to Docker and Caddy through two small interfaces, and the tests
 drive it with in-memory fakes and a **synthetic clock** — the supervisor's
 entire backoff schedule, twelve simulated minutes, runs in milliseconds. Every
-behavior claimed in this README (zero-downtime switch, rollback, crash-loop
+behavior claimed in this handbook (zero-downtime switch, rollback, crash-loop
 backoff, reconciliation) has a test that would fail without it; the numbers
 quoted were additionally measured against a real Docker and Caddy.
 

@@ -3,7 +3,7 @@
 #
 # A built frontend needs no container: name the folder instead of an image and
 # Caddy serves it as it is. Only `name`, `static` and `domain` then apply, with
-# `aliases` and `redirects`; run the build before `shipwick deploy`.
+# `aliases`, `redirects`, `path` and `proxy`; run the build before `shipwick deploy`.
 #   name: web
 #   static: dist/
 #   domain: example.com
@@ -35,7 +35,7 @@ image: ghcr.io/company/my-api:1.4.2
 
 # The port your application listens on inside the container. It is never
 # published on the host; the reverse proxy reaches it over a private network.
-# Required when `domain` or `health` is set.
+# Required when `domain` or `health.path` is set.
 port: 8080
 
 # Public hostname. Shipwick configures Caddy to serve it over HTTPS.
@@ -208,6 +208,9 @@ deploy:
 #   options:
 #     gelf-address: udp://logs.example.com:12201
 #     tag: "{{.Name}}"
+# With splunk, the token is a credential: never handed out again, and best
+# kept as a secret on the server (shipwick secret set SPLUNK_TOKEN).
+#     splunk-token: ${SPLUNK_TOKEN}
 
 # Run from the new image, with the env above, after the pull and before any
 # replica of the new version starts — database migrations. A non-zero exit

@@ -26,7 +26,7 @@ machine.
 ```text
 agent/cmd/shipwick-agent    entrypoint: wiring, signals, graceful shutdown
 agent/internal/config      environment variables, API token and encryption key resolution
-agent/internal/store       SQLite: applications, deployments, replicas, events, tokens, job runs, metric samples
+agent/internal/store       SQLite: applications, deployments, replicas, events, tokens, job runs, metric samples, and every table below under "The store"
 agent/internal/docker      Docker Engine API wrapper (never shells out)
 agent/internal/health      the HTTP and TCP health probes
 agent/internal/proxy       Caddy: config rendering, admin API client
@@ -34,14 +34,19 @@ agent/internal/certs       checks on certificates the operator supplies
 agent/internal/notify      webhook notifications: queue, formats, signing
 agent/internal/backup      where backups are kept: the directory, the S3 client, encryption on the way
 agent/internal/disk        how full the disk under the data directory is
+agent/internal/memory      what the kernel says about the server's memory
+agent/internal/kernel      the kernel's limits a server full of containers runs into
+agent/internal/updates     the daily question to GitHub about a newer release
 agent/internal/oidc        signing in: the provider's endpoints and keys, the code exchange, ID token verification
 agent/internal/deploy      deployment engine: state machine, supervisor, operations, views
 agent/internal/api         REST API: routing, auth, error envelope
 pkg/spec                   deploy.yaml parser + validator   (shared with the CLI)
 pkg/api                    API wire types                   (shared with the CLI)
-pkg/cron                   five-field cron schedules        (shared with the CLI)
+pkg/cron                   five-field cron schedules        (used through pkg/spec)
 pkg/backupfile             the encrypted backup format      (shared with the CLI)
 pkg/cloudflare             Cloudflare's address ranges      (shared with the CLI)
+pkg/outbound               the proxy and the certificate authorities of outbound requests (shared with the CLI)
+pkg/version                the build version                (shared with the CLI)
 cli/cmd/shipwick          CLI entrypoint
 cli/internal/commands      cobra command tree, error rendering
 cli/internal/client        agent API client
@@ -69,7 +74,11 @@ The engine reaches the outside world through three interfaces:
 `deploy.Runtime` (Docker) and `deploy.Proxy` (Caddy), defined where they are
 consumed, and `notify.Notifier` (the webhook). They exist for one reason — to
 test the engine, failure paths especially, without a Docker daemon, a Caddy or
-a chat service — and they are the only interfaces in the codebase.
+a chat service. `deploy.CloudflareVerifier` exists for the same reason. The
+other interfaces in the engine (`imageSaver`, `volumeRemover`, `sinceFollower`,
+`logReader`, `proxyNetworks`, `proxyErrorFollower`, `nonRootChecker`) are
+optional capabilities of the runtime, each checked with a type assertion where
+it is used, so that a fake need not implement what its test does not need.
 
 ## Deployment lifecycle
 
@@ -281,9 +290,21 @@ built on a developer's machine and asks for `shipwick deploy` from the project
 again. The same host tells the agent which uploads to accept: an archive for
 `my-api` must carry exactly one image tagged `shipwick.local/my-api:<tag>`, so
 no upload can plant an image in another application's name; anything else is
-refused and untagged again. deploy.yaml validation enforces the same rule from
-the other side — next to `build`, only a `shipwick.local` image — and a
-redeploy with an image from elsewhere is refused.
+refused. Refusing is not enough on its own, because the daemon applies an
+archive's tags as it loads it: an archive tagged with another application's
+image name has already moved that tag to the uploaded image by the time the
+agent sees the tag, and untagging it then would leave the other application's
+image without a name. So the agent asks the daemon which image every tag
+names before the load (`GET /images/json`), and after a refused load points
+each tag the load moved back at the image it named (`POST /images/<id>/tag`)
+and removes what arrived by its ID. Buffering the archive to read its
+manifest first would avoid the moment in which the tag names the wrong image,
+at the price of up to 4 GB of disk per upload; the moment is one Docker call
+long, and the tag is one no deployment names by chance. deploy.yaml validation
+enforces the rule from the other side — next to `build`, only a
+`shipwick.local` image, and only the application's own: an image built for
+one application runs for that application alone — and a redeploy is held to
+the same.
 
 Local images live in Docker's store like pulled ones, so image pruning treats
 them alike: the active image and the rollback target stay, older ones go. A
@@ -687,6 +708,23 @@ Design points:
   applications before, and in 3.8 s and 3.2 s after: at those sizes the pass
   fit in its second already, and what the change buys there is the
   processor. The numbers are in the handbook, *What one server carries*.
+- **One read per tick** (`store.ActiveDeployments`). The database is read
+  the same way: the applications, the active deployment of each and its
+  replicas in one transaction of three statements, at the top of the tick
+  and again where the routes are computed, instead of each application's
+  deployment and replicas by themselves — seven statements per application
+  per tick, as it was. The driver parses a statement every time it runs,
+  prepared or not, and the deployment's SELECT is the longest the agent has:
+  with 100 applications a tick spent a third of its own processor time
+  parsing it. An application is still read again under its lock, and so
+  are its replicas, which a deployment that finished between the list and
+  the lock has changed; its deployment is taken from the tick's read when
+  the application still points at the same one, because nothing the tick
+  reads of a deployment record ever changes. Measured on the in-memory
+  stand-ins for Docker and the proxy, so without Docker's share, a tick over
+  100 applications of two replicas took 10.9 ms of the agent's processor
+  time and takes 5.0; the numbers are in the handbook, *What one server
+  carries*.
 
 What the supervisor sees and does is recorded as application events
 (`GET /applications/:name/events`, shown by `shipwick status`), capped at the
@@ -785,7 +823,7 @@ any other, owned by `_agent` instead of an application.
 | **The database is copied with `VACUUM INTO`, before the backup is recorded.** | A copy of a file in use, and of the write-ahead log next to it, may not open. And a copy that held its own backup as `running` would, once restored, take it for one an agent died over and remove its files: the files it was just restored from. |
 | **A bucket is marked with the installation that writes to it** (`_agent/installation`, a random name kept in the database), and another installation is refused. Before its first backup an agent also moves its run ids past the highest one any destination holds. | Run ids name directories and keys, and a database knows only the ids it handed out. A reinstalled server counts from 1 again; a restored database has forgotten what came after it. Either would write its run 7 over the run 7 in the bucket — and would do it in the week somebody needs that one. For the same reason nothing is removed from a bucket before it is known to be this installation's. |
 | **Backups are recorded by application name, not by reference.** | Deleting an application keeps its volumes on purpose; its backups are the other half of that. |
-| **Verification is a job-labelled container on scratch volumes**, `shipwick_<app>_<volume>_verify_<run>`, held to the health check by the code path a deployment uses. | Everything that manages replicas already skips job containers, so it gets no route, no service name, and no supervisor; `Recover` removes one an agent died over, and a sweep at start removes its volumes. The application's lock is held only to decide what to verify with: the container runs next to the application, not instead of it. |
+| **Verification is a job-labelled container on scratch volumes**: the container `shipwick_<app>_job_backup.verify_<run>` on the volumes `shipwick_<app>_<volume>_verify_<run>`, held to the health check by the code path a deployment uses. | Everything that manages replicas already skips job containers, so it gets no route, no service name, and no supervisor; `Recover` removes one an agent died over, and a sweep at start removes its volumes. The application's lock is held only to decide what to verify with: the container runs next to the application, not instead of it. |
 
 **The encrypted format** (`pkg/backupfile`), in full. A file is a 33-byte
 header followed by chunks:
@@ -1703,8 +1741,8 @@ up -d` starts it that way. The supervisor's tick looks at the proxy
 container's networks every 30 seconds, in the list the daemon returns
 anyway (`ContainerList` carries `NetworkSettings.Networks`; no new call,
 nothing for the socket proxy's allow-list), and keeps the ones missing:
-`GET /server` carries them as `proxy.networks_missing`, present only when
-there are any, like `plain_lookups`; the log gets one line when the answer
+`GET /server` carries them as `proxy.networks_missing`, `[]` when there are
+none; the log gets one line when the answer
 changes; `doctor` makes it a problem with the `--force-recreate` command. A
 runtime without the method, and a proxy that is not a container, have
 nothing to say.
@@ -1754,7 +1792,8 @@ authority issues for `*.localhost` live twelve hours and would be expiring
 from birth. Either way it is past the point where Caddy renews (a third of
 the lifetime), so it means renewal is failing, and it is one of the few
 things worth a notification: `certificate.expiring` when the state is
-entered and once more at 3 days. An agent restart forgets that it has
+entered and once more at 3 days — a quarter of the first window, for a
+certificate too short-lived for 14 days. An agent restart forgets that it has
 warned, and warns again.
 
 The list of applications carries a summary of both this and the alerts
@@ -1811,8 +1850,8 @@ detail's `certificates[].failure`, the `obtaining` message, and so
 `certificate_problem` and `shipwick status` — and once into the application's
 events per reason, not per attempt: CertMagic retries for a month. A
 real Caddy was not run against an authority to produce the test log; the
-lines in `testdata/caddy_tls_errors.log` were written from CertMagic 0.25.6's
-and acmez 3.1.7's log calls, which the test file names.
+lines in `testdata/caddy_tls_errors.log` were written from CertMagic 0.25's
+and acmez 3.1's log calls, which the test file names.
 
 ### The Cloudflare token, checked
 
@@ -1979,6 +2018,28 @@ cross-compilation, no CGO). WAL mode, foreign keys on, and a **single
 connection**: the agent's write volume is tiny, and serializing access rules
 out `SQLITE_BUSY` and lock-upgrade deadlocks by construction.
 
+One connection means every query waits for the one before it, so what a
+query costs is paid by whoever is next in line — the supervisor's tick as
+much as a request. Three things follow for how queries are written, each
+measured against a database of the size a busy year makes it
+(`agent/internal/store`, `BenchmarkYearOldDatabase`: 3,660 deployments,
+57,580 events, 403,200 samples, 100,000 audit entries; the handbook has the
+numbers). The driver parses every statement it runs — a prepared statement
+is parsed again at each execution — so a loop that reads one row per
+application costs its statements, not its rows, and what is read for every
+application is read in one statement (`ActiveDeployments`). A query that
+starts from the applications and looks the rest up by key stays cheap for
+ever; the same join written from the deployments' side walked the whole
+history, which a year of daily deployments makes 3,660 rows long. And a
+DELETE by time alone over the samples reads every row of a week, 130 ms of
+the connection every hour, where the index on `(application_id, at)` finds
+what is due per application in a fraction of a millisecond, so the prunes
+go application by application. An application's deployments are listed
+newest first by `sequence`, which the index on `(application_id, sequence)`
+walks backwards without sorting the application's whole history for a page
+of it; `sequence` grows with `id` within one application, so the order is
+the same.
+
 Tables: `applications`, `deployments`, `deployment_replicas`, `events`,
 `tokens`, `audit_log` (one row per request that changed something, kept for
 a year), `access_rules` and `sessions` (who may sign in as what, and who is
@@ -1993,8 +2054,10 @@ whose document referred to stored secrets: those values as the document
 wrote them, sealed; see [Configuration as the API](#configuration-as-the-api)),
 `backup_runs` (one row per backup, with what
 was done with it since), `backup_installation` (one row: the name this
-installation marks its bucket with) and `log_archives` (one row per ended
-run of a container whose output was kept; the lines are files, see
+installation marks its bucket with), `transfer_state` (a few rows of JSON
+read by the agent alone: the export last imported, the import that runs or
+ran last, the promotion that runs or ran last) and `log_archives` (one row
+per ended run of a container whose output was kept; the lines are files, see
 [The log archive](#the-log-archive)).
 Migrations are an append-only list tracked in `PRAGMA user_version`.
 An agent that finds a higher number than it has migrations stops: the
@@ -2167,8 +2230,9 @@ is unique, so this is one indexed query — and the row's hash is then compared
 in constant time as well, so the database's own comparison cannot be turned
 into a timing oracle.
 
-Token values are 32 random bytes in unpadded base64url behind the prefix
-`swk_`. The prefix carries no entropy; it is there so that a token is
+Token values are 32 random bytes behind the prefix `swk_`: in unpadded
+base64url for a token created through the API, in hex for the root token the
+agent generates on its first start. The prefix carries no entropy; it is there so that a token is
 recognisable in the places it must never be — a log line, a commit — and so
 that a leak scanner can grep for it.
 
@@ -3015,6 +3079,57 @@ Both ends print that file's SHA-256 to compare by eye. `--no-pull` proves
 nothing, by definition, and leaves `image-digests.txt` out of the bundle,
 which is how the installer knows to say so.
 
+## What 1.0 freezes
+
+From 1.0 on, three surfaces change only with a migration and a documented
+way to upgrade, and a CLI of one 1.x version works against an agent of any
+other. What they are, so that a change can be told from a refactoring:
+
+**`deploy.yaml` and `shipwick.yaml`.** The keys `pkg/spec` parses — the
+table in the handbook (§6) is the list — their units (`512mb`, `30s`, a
+cron expression in UTC), their defaults and bounds, and the rule that an
+unknown key is an error. `shipwick.yaml` is `apps`, each entry a complete
+deploy.yaml plus `after`. A key is added, never renamed or given another
+meaning; a key that goes is accepted and ignored for a major version, with a
+warning that names it.
+
+**The API.** Everything in `docs/api.md`: the paths under `/api/v1`, the
+envelope (`{"data"}` and `{"error": {code, message, details}}`, `details`
+always an object), the error codes in `pkg/api`, the shape of every answer
+with the types in `pkg/api/types.go` as the reference — snake_case, times
+in RFC 3339 UTC, a list `[]` when empty, an optional object `null` — and the
+query parameters (`limit` with its default and ceiling per endpoint, `before`
+an id, `since` a time or a span). A field is added, and an older client
+reads past it; a field is never renamed, retyped or removed. A new endpoint
+is answered `404 ENDPOINT_NOT_FOUND` by an older agent, which is how a
+newer CLI learns to say so or to fall back, and a newer agent answers an
+older CLI's requests as it always did. `GET /metrics` is the Prometheus
+text format, outside the envelope.
+
+**The data directory** (`SHIPWICK_DATA_DIR`, `/var/lib/shipwick`):
+
+| What | Where | Format |
+|---|---|---|
+| The database | `shipwick.db` (with SQLite's `-wal` and `-shm`) | The schema the migrations above make, 22 of them at 0.9; `PRAGMA user_version` says which. A release appends migrations and never edits one; an agent refuses a database with a higher number than it knows |
+| The encryption key | `encryption.key`, `0600`; `encryption.key.new` while a rotation is under way | 32 bytes. What it seals: `enc1:` + base64(nonce ‖ AES-256-GCM ciphertext), the name a value is bound to as additional data |
+| The root token's hash | `agent-token.sha256` | What `shipwick server status` on the server compares with |
+| The log archive | `logs/<application id>/<entry id>.log.gz` | The lines of one ended container, gzip, indexed by `log_archives` |
+| Backups and exports | `backups/<application>/<id>/`, `backups/_agent/<id>/` for the agent's state, `backups/_export/<id>/` for scheduled exports (elsewhere with `SHIPWICK_BACKUP_DIR`) | Tar archives, `.enc` when encrypted with `pkg/backupfile` (its header carries its own format number, 1) |
+| What a standby fetched | `standby/` | The export last taken from the bucket, as it was written |
+| Static uploads | `uploads/<application>/<digest>.tar` and `.json` | The folder as uploaded, until it is deployed |
+| The release check | `update-check.json` | The last answer GitHub gave |
+
+**An export** is one `pkg/backupfile` archive of a tar whose manifest,
+`export.json`, carries `format` (1), the version that wrote it and
+`requires`, the keys of the configuration a reader has to know; a reader
+refuses a format it does not have and a key it does not know, in words. An
+export written by 1.x is read by every later 1.x.
+
+What is not frozen: the CLI's human-readable output, the agent's log lines,
+the dashboard, the compose files' internals, and anything `docs/api.md`
+calls absent "from agents older than" some version, which stays optional
+for a client to read.
+
 ## Releases and packages
 
 **The agent asks about new releases; the dashboard does not.** The notice
@@ -3024,7 +3139,7 @@ the same firewall, the CLI a laptop on another network, and the agent is the
 one place that already has the operator's proxy and certificate authorities
 (`pkg/outbound`). So the agent asks, and `GET /server` carries the answer.
 
-It asks the website's `/releases/latest`, whose redirect names the release,
+It asks GitHub's `/releases/latest` page of the repository, whose redirect names the release,
 rather than the API: no limit of requests per address, which servers behind
 one address would share, and no body to parse. The request is a `HEAD` with
 the `User-Agent` `shipwick-agent` and nothing else. A version in it would
@@ -3060,6 +3175,21 @@ cosign and attestations, then: the first works without a GitHub account and
 on a file that was copied somewhere, the second answers "which run built
 this" with a link.
 
+**What the server pulls is held against `image-digests.txt`.** The release's
+compose file names its images by tag, and a tag is a name the registry can
+point anywhere: whoever may write to the packages moves it without the
+identity that signs a release, and a server that pulls the tag runs what it
+finds there, as root, with the Docker socket. So the installer, once the
+pull is done, compares each image's `RepoDigests` — the digest of the
+manifest list the tag pointed at — with the image's `index` line in the
+release's `image-digests.txt`, which `checksums.txt` lists and the signature
+covers; a bundle's images were already held against the same file. An image
+that does not match is untagged, the compose file that ran is put back and
+nothing is started. The alternative, a compose file pinned by digest when
+the release is published, would have the publish job rewrite the compose
+file and sum it again before signing, and would still leave an image of the
+operator's own (`SHIPWICK_AGENT_IMAGE` in `.env`) uncompared, as it is now.
+
 Bills of materials are SPDX. BuildKit writes SPDX for an image by itself
 and attaches it to the manifest list, where the image's signature covers it;
 choosing CycloneDX would have meant a second generator for the images or two
@@ -3083,10 +3213,14 @@ The cases differ in how strict they can be. `shipwick upgrade` and `shipwick
 server bundle` know the tag they asked for: they demand the certificate of
 exactly that tag, so an older signed release cannot be served as a newer
 one, and with cosign present they refuse a release from 0.8.0 on that has no
-signature. The installer run for `latest` does not know the tag; it accepts
-the workflow at any plain version tag, and it cannot tell a release from
-before 0.8.0 from one whose signature was removed, so a missing signature is
-a warning there. `SHIPWICK_REQUIRE_SIGNATURE=1` turns every case short of a
+signature. The installer run for `latest` learns the tag first — GitHub's
+redirect for `/releases/latest` names it, the one request the agent's daily
+question makes too — and demands that tag's certificate as well, so the
+files of an older, signed release put in the latest one's place do not pass;
+it is a bundle, whose release is only brought along, for which any plain
+version tag is accepted. The installer cannot tell a release from before
+0.8.0 from one whose signature was removed, so a missing signature is a
+warning there. `SHIPWICK_REQUIRE_SIGNATURE=1` turns every case short of a
 verified signature into a refusal, for installations that provision cosign
 first. On a server with no way out cosign cannot fetch Sigstore's keys, so
 a bundle's signature is checked where the bundle is made and only carried
@@ -3100,10 +3234,9 @@ artifact to build and verify. The script does only what the Unix one does
 for `--cli` — download, checksum, signature, put in place — plus the one
 thing Windows has no convention for: putting the directory on the user's
 `PATH`, which is a registry value under `HKCU\Environment` and a broadcast
-that tells Explorer. It differs from `install.sh` in resolving `latest` to a
-tag before it downloads anything — GitHub's redirect says which release that
-is — so that, like `shipwick upgrade`, it can demand the signature of
-exactly that tag instead of accepting the workflow at any version tag. Both
+that tells Explorer. Like `install.sh`, it resolves `latest` to a tag before
+it downloads anything, so that, like `shipwick upgrade`, it can demand the
+signature of exactly that tag. Both
 installers are files of the release, listed in `checksums.txt`, so the one
 that installed a release can be found and checked with it. `shipwick
 upgrade --version` exists for the same reason the installer has

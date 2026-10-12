@@ -81,6 +81,22 @@ func TestLoadImageRejectsWhatIsNotTheApplicationsArchive(t *testing.T) {
 		t.Error("a refused image must not stay")
 	}
 
+	// The refused tag exists already, as another application's image: it
+	// must still name what it named, and what arrived must be gone.
+	f.rt.AddLocalImage("shipwick.local/other:20260927-153000-a1b2")
+	before, _ := f.rt.ImageIDs(context.Background())
+	status, body = f.postArchive("/api/v1/applications/my-api/images", "application/x-tar", []byte("shipwick.local/other:20260927-153000-a1b2\n# other content\n"))
+	if status != http.StatusBadRequest {
+		t.Errorf("an existing tag of another application: status = %d, body = %s", status, body)
+	}
+	after, _ := f.rt.ImageIDs(context.Background())
+	if after["shipwick.local/other:20260927-153000-a1b2"] != before["shipwick.local/other:20260927-153000-a1b2"] {
+		t.Errorf("the other application's tag names %q, named %q before the refused upload", after["shipwick.local/other:20260927-153000-a1b2"], before["shipwick.local/other:20260927-153000-a1b2"])
+	}
+	if len(after) != len(before) {
+		t.Errorf("tags after the refused upload: %v, before: %v", after, before)
+	}
+
 	status, body = f.postArchive("/api/v1/applications/Not_Valid/images", "application/x-tar", []byte(localImage))
 	if status != http.StatusBadRequest {
 		t.Errorf("invalid name: status = %d, body = %s", status, body)

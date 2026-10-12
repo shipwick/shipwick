@@ -82,7 +82,7 @@ export function endedTone(entry: Ended): Tone {
   return endedBadly(entry) ? 'danger' : 'muted'
 }
 
-type Source = Pick<LogArchiveEntry, 'kind' | 'deployment' | 'replica' | 'job' | 'run_id'>
+type Source = Pick<LogArchiveEntry, 'kind' | 'sequence' | 'replica' | 'job' | 'run_id'>
 
 /** Whose output it is: "#3 replica 2", "run 12 of nightly-report", "run 4, a command", "run 9, the pre-deploy command". */
 export function outputOf(entry: Source): string {
@@ -92,7 +92,7 @@ export function outputOf(entry: Source): string {
     if (entry.job === 'pre-deploy') return `${run}, the pre-deploy command`
     return entry.job ? `${run} of ${entry.job}` : run
   }
-  return entry.deployment > 0 ? `#${entry.deployment} replica ${entry.replica}` : `replica ${entry.replica}`
+  return entry.sequence > 0 ? `#${entry.sequence} replica ${entry.replica}` : `replica ${entry.replica}`
 }
 
 /** "153 lines", "1 line", "last 2,000 lines", "no output". */
@@ -108,8 +108,8 @@ export function entrySubject(entry: Source & Pick<LogArchiveEntry, 'version'>): 
     const text = outputOf(entry)
     return text.charAt(0).toUpperCase() + text.slice(1)
   }
-  if (entry.deployment === 0) return `Replica ${entry.replica}`
-  return `Replica ${entry.replica} of #${entry.deployment}${entry.version ? ` (${entry.version})` : ''}`
+  if (entry.sequence === 0) return `Replica ${entry.replica}`
+  return `Replica ${entry.replica} of #${entry.sequence}${entry.version ? ` (${entry.version})` : ''}`
 }
 
 /** "Replica 2 of #3 (1.4.2) · crashed (exit 1) · 5m ago · 153 lines": an entry in one line. */
@@ -183,7 +183,8 @@ export interface LogGroup {
   key: string
   container: string
   archiveId: number | null
-  deployment: number
+  /** The deployment's sequence; 0 when it is gone. */
+  sequence: number
   replica: number
   job: string
   runId: number | null
@@ -202,7 +203,7 @@ export function groupMatches(lines: readonly LogMatch[]): LogGroup[] {
     const key = line.archive_id === null ? `c:${line.container}` : `a:${line.archive_id}`
     let group = groups.get(key)
     if (!group) {
-      group = { key, container: line.container, archiveId: line.archive_id, deployment: line.deployment, replica: line.replica, job: line.job, runId: line.run_id, lines: [] }
+      group = { key, container: line.container, archiveId: line.archive_id, sequence: line.sequence, replica: line.replica, job: line.job, runId: line.run_id, lines: [] }
       groups.set(key, group)
     }
     group.lines.push(line)
@@ -211,9 +212,9 @@ export function groupMatches(lines: readonly LogMatch[]): LogGroup[] {
 }
 
 /** What a group of matches is the output of: "replica 3 of #2", "run 12 of nightly-report". */
-export function groupSource(group: Pick<LogGroup, 'deployment' | 'replica' | 'job' | 'runId'>): string {
-  if (group.runId !== null || group.job !== '') return outputOf({ kind: 'run', deployment: group.deployment, replica: 0, job: group.job, run_id: group.runId })
-  return group.deployment > 0 ? `replica ${group.replica} of #${group.deployment}` : `replica ${group.replica}`
+export function groupSource(group: Pick<LogGroup, 'sequence' | 'replica' | 'job' | 'runId'>): string {
+  if (group.runId !== null || group.job !== '') return outputOf({ kind: 'run', sequence: group.sequence, replica: 0, job: group.job, run_id: group.runId })
+  return group.sequence > 0 ? `replica ${group.replica} of #${group.sequence}` : `replica ${group.replica}`
 }
 
 export type SearchWindow = '' | '1h' | '24h' | '7d' | 'custom'

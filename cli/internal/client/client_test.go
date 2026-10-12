@@ -124,6 +124,43 @@ func TestNotAShipwickAgent(t *testing.T) {
 	}
 }
 
+// Go follows a redirect to the same host on any port and any scheme with the
+// Authorization header still on it. The agent never redirects, so one is not
+// the agent, and the token stays where it was saved to go.
+func TestARedirectIsNotFollowedAndTheTokenStaysHome(t *testing.T) {
+	var elsewhere *http.Request
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere = r.Clone(context.Background())
+		fmt.Fprint(w, `{"data": []}`)
+	}))
+	t.Cleanup(other.Close)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusFound)
+	})
+
+	_, err := c.Applications(context.Background())
+	if elsewhere != nil {
+		t.Fatalf("the redirect was followed, with Authorization %q", elsewhere.Header.Get("Authorization"))
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusFound {
+		t.Fatalf("err = %#v", err)
+	}
+	for _, want := range []string{"redirect", other.URL + "/api/v1/applications", "not followed", "token"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message should say %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Errorf("the message carries the token: %v", err)
+	}
+
+	// The stream client, which the long calls and followed logs use, the same.
+	if err := c.Delete(context.Background(), "my-api"); err == nil || elsewhere != nil {
+		t.Errorf("Delete followed the redirect: err = %v", err)
+	}
+}
+
 func TestDeleteHandlesNoContent(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	if err := c.Delete(context.Background(), "my-api"); err != nil {

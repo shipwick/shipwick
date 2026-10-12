@@ -1020,7 +1020,7 @@ function seed() {
       app.containers = makeContainers(app, active).map(c => ({ ...c, state: 'created', started_at: null, health: active.spec.health ? 'unknown' : '' }))
     }
     standbyPull.last_at = ago(47 * MINUTE)
-    standbyPull.last_export = 42
+    standbyPull.last_export_id = 42
   }
 
   if (!BEFORE_06) seedAudit()
@@ -1068,13 +1068,13 @@ function isHealthy(c) {
 
 const isStaticSpec = sp => Boolean(sp?.static)
 
-/** What GET /server says about applications without a memory limit: the running ones, by name, and nothing when there are none. */
+/** What GET /server says about applications without a memory limit: the running ones, by name; [] when there are none. */
 function unlimitedMemory() {
   const names = [...apps.values()].filter((app) => {
     const active = app.active_deployment_id ? deployments.get(app.active_deployment_id) : null
     return active && app.desired_state === 'running' && !isStaticSpec(active.spec) && !(active.spec.resources?.memory_bytes > 0)
   }).map(app => app.name).sort()
-  return names.length ? { unlimited_memory: names } : {}
+  return { unlimited_memory: names }
 }
 
 function appSummary(app) {
@@ -1102,8 +1102,8 @@ function appSummary(app) {
     image: active ? active.image : '',
     version: active ? active.version : '',
     domain: active ? active.spec.domain ?? '' : '',
-    ...(active?.spec.aliases?.length ? { aliases: active.spec.aliases } : {}),
-    ...(active?.spec.redirects?.length ? { redirects: active.spec.redirects } : {}),
+    aliases: active?.spec.aliases ?? [],
+    redirects: active?.spec.redirects ?? [],
     ...(active?.spec.path ? { path: active.spec.path } : {}),
     replicas: { desired, running, healthy },
     deploying: Boolean(flying),
@@ -1653,7 +1653,7 @@ function addArchive(app, { kind = 'replica', deployment = null, replica = 0, job
     application: app.name,
     kind,
     deployment_id: deployment?.id ?? null,
-    deployment: deployment?.sequence ?? 0,
+    sequence: deployment?.sequence ?? 0,
     version: deployment?.version ?? '',
     replica,
     job,
@@ -1856,14 +1856,14 @@ function searchLogs(app, { text, since, until, deployment, replica, run, limit, 
       if (deployment !== 0 && c.deployment_id !== deployment) continue
       const d = deployments.get(c.deployment_id)
       const from = archivedUntil.get(c.name) ?? ''
-      sources.push({ key: `r${c.deployment_id}-${c.replica}`, meta: { archive_id: null, deployment_id: d?.id ?? null, deployment: d?.sequence ?? 0, job: '', run_id: null }, lines: (logBuffers.get(app.name) ?? []).filter(line => line.container === c.name && line.time > from) })
+      sources.push({ key: `r${c.deployment_id}-${c.replica}`, meta: { archive_id: null, deployment_id: d?.id ?? null, sequence: d?.sequence ?? 0, job: '', run_id: null }, lines: (logBuffers.get(app.name) ?? []).filter(line => line.container === c.name && line.time > from) })
     }
   }
   for (const entry of logArchive.filter(e => e.application === app.name).sort((a, b) => b.id - a.id)) {
     if (replica !== 0 && entry.replica !== replica) continue
     if (deployment !== 0 && entry.deployment_id !== deployment) continue
     if (run !== 0 && entry.run_id !== run) continue
-    sources.push({ key: `a${entry.id}`, meta: { archive_id: entry.id, deployment_id: entry.deployment_id, deployment: entry.deployment, job: entry.job, run_id: entry.run_id }, lines: entry.output })
+    sources.push({ key: `a${entry.id}`, meta: { archive_id: entry.id, deployment_id: entry.deployment_id, sequence: entry.sequence, job: entry.job, run_id: entry.run_id }, lines: entry.output })
   }
 
   let at = 0
@@ -1972,8 +1972,8 @@ function metrics(app) {
     replicas = replicas.map(r => ({ ...r, cpu_percent: everything.cpu, memory_bytes: everything.memory }))
   }
   return {
-    // Present only where Docker applies less than it was asked for.
-    ...(UNENFORCED.length > 0 ? { unenforced_limits: UNENFORCED } : {}),
+    // Names what Docker applies less than it was asked for; [] where it applies everything.
+    unenforced_limits: UNENFORCED,
     application: app.name,
     collected_at: iso(Date.now()),
     cpu_percent: round1(replicas.reduce((sum, r) => sum + r.cpu_percent, 0)),
@@ -1989,7 +1989,7 @@ function metrics(app) {
 // fly and deterministic per bucket, so a refresh redraws the same past.
 // ---------------------------------------------------------------------------
 
-const HISTORY_WINDOWS = { '1h': [HOUR, 30 * SECOND, '30s'], '24h': [DAY, 5 * MINUTE, '5m'], '7d': [7 * DAY, HOUR, '1h'] }
+const HISTORY_WINDOWS = { '1h': [HOUR, 30 * SECOND], '24h': [DAY, 5 * MINUTE], '7d': [7 * DAY, HOUR] }
 
 /** A stable pseudo-random number in [0, 1) for a (string, number) pair. */
 function noise(key, n) {
@@ -2000,7 +2000,7 @@ function noise(key, n) {
 
 function metricsHistory(app, since) {
   const active = requireActive(app)
-  const [windowMs, stepMs, step] = HISTORY_WINDOWS[since]
+  const [windowMs, stepMs] = HISTORY_WINDOWS[since]
   const now = Date.now()
   const start = now - windowMs
   const limits = active.spec.resources
@@ -2037,7 +2037,7 @@ function metricsHistory(app, since) {
   return {
     application: app.name,
     since: iso(start),
-    step,
+    step_seconds: stepMs / SECOND,
     series,
     limits: { cpu: limits.cpu || 0, memory_bytes: limits.memory_bytes || 0 },
   }
@@ -3196,7 +3196,7 @@ function traffic(app, since) {
         addTraffic(step, minute)
       }
       if (step.requests === 0) continue
-      points.push({ t: iso(t), ...step })
+      points.push({ at: iso(t), ...step })
       addTraffic(totals, step)
     }
   }
@@ -3451,7 +3451,7 @@ const EXPORTS = '_export'
 const EXPORT_KEEP = 3
 const STANDBY_APPLICATIONS = ['postgres', 'shop', 'docs']
 /** How the scheduled fetch from the bucket is doing; only a standby has one. */
-const standbyPull = { schedule: '15 * * * *', last_at: null, last_export: 0, last_error: '' }
+const standbyPull = { schedule: '15 * * * *', last_at: null, last_export_id: 0, last_error: '' }
 /** The import that is running or ran last; kept in memory, so null until one has run. */
 let lastImport = null
 
@@ -4159,7 +4159,7 @@ async function handle(req, res) {
         ...(BEFORE_08 ? {} : { swap_bytes: process.env.MOCK_NO_SWAP === '1' ? 0 : 2 * 1024 ** 3, ...unlimitedMemory() }),
         applications: apps.size,
         containers: [...apps.values()].reduce((n, a) => n + a.containers.filter(c => c.state === 'running').length, 0),
-        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }), ...(PLAIN_PROXY ? { plain_lookups: true } : {}), ...(PROXY_ENABLED && NETWORKS_MISSING.length > 0 ? { networks_missing: NETWORKS_MISSING } : {}) },
+        proxy: { enabled: PROXY_ENABLED, reachable: PROXY_ENABLED, error: '', routes: PROXY_ENABLED ? routes : 0, ...(OLD_AGENT ? {} : { dns_challenge: DNS_CHALLENGE }), ...(PLAIN_PROXY ? { plain_lookups: true } : {}), ...(BEFORE_09 ? {} : { networks_missing: PROXY_ENABLED ? NETWORKS_MISSING : [] }) },
         token: who,
         notifications: { webhook: WEBHOOK },
         ...(OLD_AGENT ? {} : { dashboard_url: DASHBOARD_URL, alerts: activeAlerts(), disk: diskUsage(), backups: backupStatus() }),
@@ -4725,9 +4725,9 @@ async function handle(req, res) {
       if (!IS_STANDBY) throw new HttpError(409, 'STANDBY_NOT_CONFIGURED', 'this agent has no bucket to fetch exports from: set SHIPWICK_BACKUP_S3_* and SHIPWICK_BACKUP_PASSPHRASE to those of the server it stands by for, and SHIPWICK_STANDBY_SCHEDULE')
       requireNoImport()
       requireNoPromotion()
-      standbyPull.last_export += 1
+      standbyPull.last_export_id += 1
       standbyPull.last_at = iso(Date.now())
-      const run = startImport({ source: `export #${standbyPull.last_export} from the bucket`, stopped: true, overwrite: true })
+      const run = startImport({ source: `export #${standbyPull.last_export_id} from the bucket`, stopped: true, overwrite: true })
       return sendJSON(res, 202, run, { location: '/api/v1/import' })
     }
 

@@ -105,6 +105,12 @@ function certificateFailure(host: string) {
   const certificate = certificateOf.value.get(host)
   return certificate ? certificateFailureLine(certificate) : null
 }
+// In the script, not in the template: vue-tsc from 3.3.12 comments out part
+// of a component's props in the code it checks, and a `//` inside the
+// expression breaks that comment, after which the v-for's variable is gone.
+function redirectNote(target: string | null) {
+  return `Answered with a redirect to https://${target}, also while the application is stopped`
+}
 
 // --- live numbers -------------------------------------------------------------
 
@@ -219,7 +225,7 @@ const recentDeployments = computed(() => (deployments.data.value ?? []).slice(0,
               >{{ entry.address }}<UiIcon name="external" :size="12" /><span class="sr-only">(opens in a new tab)</span></UiTooltip>
               <!-- A wildcard is a pattern, not an address: there is nothing to open. -->
               <UiTooltip v-else class="mono break-all" :text="certificateTitle(entry.host) ?? 'Every name one label below is served alike'">{{ entry.address }}</UiTooltip>
-              <UiTooltip v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :text="`Answered with a redirect to https://${entry.target}, also while the application is stopped`">→ {{ entry.target }}</UiTooltip>
+              <UiTooltip v-if="entry.kind === 'redirect'" class="mono text-fg-muted" :text="redirectNote(entry.target)">→ {{ entry.target }}</UiTooltip>
               <span v-else-if="entry.kind === 'alias'" class="text-xs text-fg-subtle">alias</span>
               <StatusBadge v-if="certificateBadge(entry.host)" v-bind="certificateBadge(entry.host)!" :detail="certificateOf.get(entry.host)?.message || undefined" :raw="certificateOf.get(entry.host)?.status" />
               <!-- The last failure the proxy logged for this hostname's certificate: the cause in the agent's words, the proxy's own behind it. -->

@@ -286,7 +286,7 @@ func TestTheLastImportAndTheLastPullSurviveARestart(t *testing.T) {
 		t.Errorf("the last import after a restart = %+v, %v; want %+v", after, ok, before)
 	}
 	standby, _ := b.engine.Standby(ctx)
-	if standby.Pull == nil || standby.Pull.LastExport == 0 || standby.Pull.LastExport != pulled.Pull.LastExport ||
+	if standby.Pull == nil || standby.Pull.LastExportID == 0 || standby.Pull.LastExportID != pulled.Pull.LastExportID ||
 		standby.Pull.LastAt == nil || !standby.Pull.LastAt.Equal(*pulled.Pull.LastAt) || standby.Pull.LastError != "" {
 		t.Errorf("pull after a restart = %+v, want %+v", standby.Pull, pulled.Pull)
 	}

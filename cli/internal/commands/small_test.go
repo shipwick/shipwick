@@ -89,7 +89,7 @@ func TestServerInstallRunsSSHWithoutAShell(t *testing.T) {
 	f.env = map[string]string{cliconfig.EnvConfig: config}
 
 	out, _, err := f.run(t.TempDir(), "server", "install", "root@203.0.113.10",
-		"--agent-domain", "Agent.Example.com", "--dashboard-domain", "dashboard.example.com", "--context", "prod")
+		"--agent-domain", "Agent.Example.com", "--dashboard-domain", "dashboard.example.com", "--name", "prod")
 	if err != nil {
 		t.Fatalf("server install: %v\n%s", err, out)
 	}

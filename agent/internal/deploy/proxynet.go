@@ -3,7 +3,6 @@ package deploy
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -91,5 +90,5 @@ func (e *Engine) checkProxyNetworks(ctx context.Context, now time.Time) {
 func (e *Engine) missingProxyNetworks() []string {
 	e.proxyNets.mu.Lock()
 	defer e.proxyNets.mu.Unlock()
-	return slices.Clone(e.proxyNets.missing)
+	return append([]string{}, e.proxyNets.missing...)
 }

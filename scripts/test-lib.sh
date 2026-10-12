@@ -1,7 +1,8 @@
 #!/bin/sh
-# What test-socket-proxy.sh and test-rootless.sh share: a Docker daemon of
-# its own in a container, the images and the CLI built from this checkout and
-# put into it, and the compose files started there. Sourced, not run.
+# What test-socket-proxy.sh, test-rootless.sh, test-docker-authz.sh and
+# test-package.sh share: a Docker daemon of its own in a container, the
+# images and the CLI built from this checkout and put into it, and the
+# compose files started there. Sourced, not run.
 #
 # Nothing touches the containers, images or networks of the Docker it is
 # started from, apart from the one container named $name and, unless images

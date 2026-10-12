@@ -37,7 +37,7 @@ func (c *Client) UploadStatic(ctx context.Context, name string, archive io.Reade
 		return api.StaticUpload{}, &UnreachableError{URL: c.base.String(), Err: err}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return api.StaticUpload{}, decodeError(resp)
 	}
 	var envelope api.Response[api.StaticUpload]

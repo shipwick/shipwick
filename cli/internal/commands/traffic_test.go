@@ -182,7 +182,7 @@ func TestTrafficRequestsFollowedPrintsEachRequestOnce(t *testing.T) {
 	// The agent going away is what ends the follow in this test.
 	ft.fail = &api.Error{Code: api.CodeTrafficUnavailable, Message: "the proxy's access log cannot be read"}
 
-	out, _, err := f.run(t.TempDir(), "traffic", "my-api", "--requests", "-f")
+	out, _, err := f.run(t.TempDir(), "traffic", "my-api", "--requests", "--follow")
 	if err == nil {
 		t.Fatal("the follow should end with the agent's error")
 	}
@@ -206,7 +206,7 @@ func TestTrafficRefusesFlagsThatDoNotGoTogether(t *testing.T) {
 		want string
 	}{
 		{[]string{"traffic", "--since", "2h"}, "--since must be 1h, 24h or 7d"},
-		{[]string{"traffic", "my-api", "-f"}, "--follow goes with --requests"},
+		{[]string{"traffic", "my-api", "--follow"}, "--follow goes with --requests"},
 		{[]string{"traffic", "--requests"}, "--requests needs an application"},
 		{[]string{"traffic", "my-api", "--requests", "-n", "500"}, "--tail must be between 1 and 200"},
 		{[]string{"traffic", "My_Api"}, "name"},

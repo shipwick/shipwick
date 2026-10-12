@@ -112,7 +112,7 @@ const gone = computed(() => props.entry !== null && error.value?.code === 'NOT_F
           <span>{{ linesKept(e) }}<template v-if="e.lines > 0">, {{ formatBytes(e.bytes) }}</template></span>
           <template v-if="e.deployment_id !== null">
             <span class="text-fg-faint" aria-hidden="true">·</span>
-            <NuxtLink :to="`/deployments/${e.deployment_id}`" class="link">deployment #{{ e.deployment }}</NuxtLink>
+            <NuxtLink :to="`/deployments/${e.deployment_id}`" class="link">deployment #{{ e.sequence }}</NuxtLink>
           </template>
           <span class="text-fg-faint" aria-hidden="true">·</span>
           <span class="mono break-all">{{ e.container }}</span>

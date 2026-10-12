@@ -8,7 +8,7 @@ const at = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
 const history: MetricsHistory = {
   application: 'my-api',
   since: at(0),
-  step: '30s',
+  step_seconds: 30,
   series: [
     {
       replica: 1,
@@ -26,14 +26,14 @@ const history: MetricsHistory = {
 }
 
 describe('parseStep', () => {
-  it('reads the agent\'s step strings', () => {
-    expect(parseStep('30s', '1h')).toBe(30_000)
-    expect(parseStep('5m', '24h')).toBe(300_000)
-    expect(parseStep('1h', '7d')).toBe(3_600_000)
+  it('turns the agent\'s step_seconds into milliseconds', () => {
+    expect(parseStep(30, '1h')).toBe(30_000)
+    expect(parseStep(300, '24h')).toBe(300_000)
+    expect(parseStep(3600, '7d')).toBe(3_600_000)
   })
-  it('falls back to the range\'s own step for anything unreadable', () => {
-    expect(parseStep('soon', '24h')).toBe(300_000)
-    expect(parseStep('0s', '1h')).toBe(30_000)
+  it('falls back to the range\'s own step for anything that is not a positive number', () => {
+    expect(parseStep(Number.NaN, '24h')).toBe(300_000)
+    expect(parseStep(0, '1h')).toBe(30_000)
   })
   it('knows the accepted ranges', () => {
     expect(isMetricsRange('24h')).toBe(true)

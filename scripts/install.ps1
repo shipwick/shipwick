@@ -279,8 +279,9 @@ function Find-OtherShipwick([string]$Installed) {
 
 function Install-Shipwick([string]$Version, [string]$Destination) {
     $ErrorActionPreference = 'Stop'
-    # Invoke-WebRequest's progress bar makes a download take minutes under
-    # Windows PowerShell.
+    # Invoke-WebRequest's progress bar slows a download under Windows
+    # PowerShell: the 14 MB binary of 0.9.1 took ten seconds with it and
+    # under one without, measured twice each on one machine with 5.1.
     $ProgressPreference = 'SilentlyContinue'
     # Windows PowerShell on an older Windows offers TLS 1.0 by default, which
     # GitHub refuses. Added, never taken away.

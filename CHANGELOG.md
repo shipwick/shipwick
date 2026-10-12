@@ -8,6 +8,171 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- `shipwick backups rm`, `shipwick registry logout` and `shipwick access
+  revoke` ask before they act, as the other commands that remove something
+  do; `--yes`/`-y` skips the question, and without a terminal it is required.
+- `shipwick server status` says when the CLI and the agent are of different
+  minor versions, and which of the two to upgrade.
+- `shipwick server configure` and the installer accept `SHIPWICK_BACKUP_DIR`,
+  which `install.sh --help` now lists; until now it had to be set in `.env`
+  by hand.
+- The installer retries a download from GitHub (three retries: `curl --retry 3`,
+  `wget --tries=3`) before it gives up.
+
+### Changed
+
+- **Five fields of the API are renamed, so that the same thing has the same
+  name everywhere.** A CLI of 0.9 against this agent does not fail; it reads
+  the old name, finds nothing and shows what it shows for nothing:
+  - `GET /applications/:name/metrics/history`: `step` (`"30s"`) → `step_seconds`
+    (`30`), like `step_seconds` of the traffic history. No CLI reads it.
+  - `GET /applications/:name/traffic`: a point's `t` → `at`, like a point of
+    the metrics history. No CLI reads it.
+  - `GET /standby`: `pull.last_export` → `pull.last_export_id`, like every other
+    id. A 0.9 `shipwick standby` prints "export #0 imported …".
+  - `GET /applications/:name/logs/archive` and `…/logs/search`: `deployment`
+    (the deployment's number in the history) → `sequence`, the name it has on a
+    deployment. A 0.9 `shipwick logs --list` names an entry "replica 2" instead
+    of "#3 replica 2", and `--search` "#0 replica 2".
+- A redeploy or rollback body over its 4 KB limit, and a secret, a registry
+  credential, a certificate or a sign-in body over theirs, are answered `413`
+  like every other body over its limit, instead of `400`; the message names
+  the limit.
+- `shipwick traffic --requests` follows with `--follow` only: `-f` was
+  `--follow` here and `--file` everywhere else but `logs`. `shipwick audit`'s
+  `--lines` is `--tail`, the name `logs` and `traffic` give it; `-n` is
+  unchanged.
+- `shipwick server install --context <name>` is `--name <name>`: the global
+  `--context` was shadowed by it.
+- `GET /applications/:name/config` writes `security` after `resources`, where
+  `shipwick init` writes it.
+- The build block of `deploy.yaml` refuses a key it does not know, with the
+  line, as every other block does; `dockerfil: x` was dropped without a word
+  and the default Dockerfile built.
+- The messages of `build.dockerfile` say that it is relative to the context,
+  which it is, not to deploy.yaml.
+- `shipwick validate` shows a redirect's target with the application's `path`,
+  as the agent routes it.
+- The CLI has a sentence for `TOKEN_EXISTS` and `FOREIGN_BUCKET` that says what
+  to do next.
+- `shipwick server configure` names what it accepts when it refuses a setting:
+  what `install.sh --help` lists, and the two hostnames.
+- An import that skips an application whose image the old server could not
+  write out names `shipwick backup` and `shipwick restore` for its volumes;
+  it named two commands that do not exist.
+- `packaging/winget/update-manifests.sh` reads a relative `SHIPWICK_CHECKSUMS`
+  from where it is run, as its comment and README promised.
+
+- **A list in an API answer is `[]` when there is nothing in it, never
+  absent.** `aliases` and `redirects` of an application, `unlimited_memory`
+  and `proxy.networks_missing` of `GET /server` and `unenforced_limits` of
+  an application's metrics were left out when they were empty; they are
+  now `[]`, like every other list. A client that read their absence as
+  "none" reads the same thing; one that read it as "an older agent" can
+  now tell the two apart.
+
+- The release and CI workflows use every action at a commit, with the
+  version as a comment, instead of at a tag that its owner can move.
+- **The agent spends half the processor time it did on watching
+  applications.** Every second the supervisor read each application's
+  deployment and its replicas from the database one by one, seven
+  statements per application, and parsing those statements was most of
+  what a pass cost; it reads them all in one go now. Measured without
+  Docker's share, on the agent's in-memory stand-ins (handbook §10, *What
+  one server carries*): a pass over 100 applications of two replicas took
+  10.9 ms of processor time and takes 5.0; `GET /applications` with 100
+  applications cost the agent 2.4 ms and costs 1.2, `GET /server` 2.2 ms
+  and 1.0. On a database with a year of daily deployments the same read
+  took 5.4 ms and takes 0.56.
+- The hourly pruning of resource and traffic samples goes application by
+  application along the index, instead of reading every row of the week:
+  with 40 replicas, 6 ms instead of 123 for an hour's rows, and 0.1 ms
+  instead of 123 when there is nothing to remove.
+- `GET /deployments?application=` sorts no more than the page it answers: an
+  application deployed every day for a year is listed in 0.44 ms instead of
+  1.3, and the lookup of its last superseded deployment in 0.1 ms instead
+  of 1.3.
+
+### Fixed
+
+- **The authorization policy (`configs/docker-authz.rego`) refused a volume
+  made of a directory of the server at `docker volume create`, but not the
+  same volume asked for inline on a container's mount (`--mount
+  type=volume,volume-opt=o=bind,volume-opt=device=/`), which the daemon
+  creates on the way; and it refused `systempaths=unconfined` as a
+  `SecurityOpt` string, which no client sends — the docker command and the
+  API send it as an empty `MaskedPaths` and `ReadonlyPaths`.** Now a
+  `containers/create` whose mount carries volume driver options, or whose
+  `MaskedPaths` or `ReadonlyPaths` is a list, is refused;
+  `scripts/test-docker-authz.sh` tries both.
+- **A basic-auth username was handed to Caddy as free text and read as a
+  placeholder:** `{env.HOME}` was replaced by the proxy's environment before
+  the comparison, and `{env.UNSET}` made the proxy refuse the configuration,
+  so the rollout failed. The username is now escaped like a header value, and
+  `deploy.yaml` refuses braces in one and says why.
+- **An image upload could take another application's image tag away.** An
+  archive sent to `POST /applications/<a>/images` that was tagged with
+  another application's image name — a `deploy` token limited to `a` could
+  send one — was refused, as it should be, but Docker had already moved the
+  tag to the uploaded image when it was loaded, and the refusal untagged it:
+  the other application's image was left without its name, and its next
+  redeploy, rollback or replica recreation failed with "is not on this
+  server". The images of the proxy and of the agent could be untagged the
+  same way. The agent now notes which image every tag names before it loads
+  an archive and, when it refuses what arrived, points each tag the load
+  moved back at the image it named and removes the uploaded image by its ID.
+  Behind the socket proxy this is one more call, `POST /images/<id>/tag`;
+  take the `compose.socket-proxy.yml` of this version.
+- **The Splunk logging token was stored and returned in clear.**
+  `logging.options.splunk-token` is a credential, and it was the one in
+  `deploy.yaml` that was not treated as one: every token that could read an
+  application saw it in `GET /applications/<name>` and in the deployment's
+  record, and it sat unencrypted in the agent's database file. It is now
+  masked as `********` wherever a configuration is handed out, encrypted at
+  rest like an `env` value, may be written as `${NAME}` and filled in from
+  the stored secrets like an `env` value, and the mask is refused as a value
+  as it is elsewhere. A deployment recorded before this release still holds
+  the token in clear until the application is deployed again: run
+  `shipwick deploy` (or `shipwick redeploy`) once for each application that
+  ships logs to Splunk, and rotate the token if it may have been read.
+- **A `deploy` token limited to one application could run another
+  application's locally built image.** `image: shipwick.local/<other>:<tag>`
+  in `deploy.yaml`, or the same image given to `redeploy`, started the image
+  another application's project had sent to the server, with this
+  application's environment. An image under `shipwick.local` must now be the
+  application's own; the refusal names the application it belongs to.
+- **The installer compares the images it pulls with the release's digests.**
+  A networked install or upgrade pulled the release's tags and ran what the
+  registry served under them; the release's signed `image-digests.txt` was
+  held only against a bundle's images. Now, after the pull, each image's
+  digest is compared with that file: an image that is not the release's is
+  removed again, the compose file that ran is put back and the installer
+  stops with the installation as it was. Images of your own, named in `.env`,
+  are not compared, and the output says so. Releases before 0.7.0 published
+  no digests: the installer says so and goes on, or stops under
+  `SHIPWICK_REQUIRE_SIGNATURE=1`.
+- **The installer resolves `latest` to a release before it downloads
+  anything.** Every file was fetched through GitHub's `latest` redirect
+  separately, and the signature was accepted from any release's tag — so two
+  files could come from two releases, and an older, signed release's files
+  put in the latest one's place would have verified. `latest` is now one
+  lookup, and everything is fetched and verified as that release's, as
+  `install.ps1` and `shipwick upgrade` already did.
+- **The CLI no longer follows a redirect from the agent's URL.** Go sends the
+  `Authorization` header along to the same host on any port or scheme, so a
+  proxy in front of the agent could have sent the token on over plain HTTP.
+  A redirect is now an error that names where it pointed and says that the
+  token was not sent there.
+- The API's and the dashboard's hostnames answer with
+  `Strict-Transport-Security: max-age=31536000`, so a browser that has seen
+  them once does not ask over plain HTTP first. An application's hostnames
+  are its own to set, through `proxy.headers`.
+- A header value or redirect target with a `\}` in it reached the client
+  without the backslash: the proxy drops it as it does the one in `\{`. Both
+  braces are now escaped for the proxy.
+
 ## [0.9.1] - 2026-10-11
 
 ### Fixed

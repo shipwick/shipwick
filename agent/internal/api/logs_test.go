@@ -77,7 +77,7 @@ func TestLogArchiveEndpoints(t *testing.T) {
 		t.Fatalf("entries, newest first: %+v", entries)
 	}
 	e := entries[1]
-	if e.Application != "my-api" || e.Kind != api.LogKindReplica || e.Reason != api.LogReasonReplaced || e.Deployment != 1 || e.Version != "1.4.2" ||
+	if e.Application != "my-api" || e.Kind != api.LogKindReplica || e.Reason != api.LogReasonReplaced || e.Sequence != 1 || e.Version != "1.4.2" ||
 		e.Container != "shipwick_my-api_1_1" || e.Lines != 3 || e.Truncated {
 		t.Errorf("entry: %+v", e)
 	}
@@ -127,10 +127,10 @@ func TestLogSearchEndpoint(t *testing.T) {
 	if len(result.Lines) != 4 || result.Next != "" || result.Sources != 4 || result.Bytes == 0 {
 		t.Fatalf("result: %s", body)
 	}
-	if live := result.Lines[0]; live.Message != "listening again" || live.ArchiveID != nil || live.Deployment != 2 || live.Replica != 2 {
+	if live := result.Lines[0]; live.Message != "listening again" || live.ArchiveID != nil || live.Sequence != 2 || live.Replica != 2 {
 		t.Errorf("first line, of a running replica: %+v", live)
 	}
-	if kept := result.Lines[3]; kept.Message != "listening" || kept.ArchiveID == nil || *kept.ArchiveID != 1 || kept.Deployment != 1 || kept.Replica != 1 {
+	if kept := result.Lines[3]; kept.Message != "listening" || kept.ArchiveID == nil || *kept.ArchiveID != 1 || kept.Sequence != 1 || kept.Replica != 1 {
 		t.Errorf("last line, of the archive: %+v", kept)
 	}
 	for _, field := range []string{`"archive_id":null`, `"archive_id":1`, `"deployment_id":2`, `"run_id":null`, `"job":""`, `"stream":"stdout"`, `"container":"shipwick_my-api_2_1"`, `"next":""`} {

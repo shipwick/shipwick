@@ -322,7 +322,14 @@ func (s *Store) listDeployments(ctx context.Context, q querier, f DeploymentFilt
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
-	query += " ORDER BY d.id DESC"
+	// Newest first. Within one application the sequence grows with the id,
+	// and the index on (application_id, sequence) walks it backwards without
+	// sorting the application's whole history for a page of it.
+	if f.Application != "" {
+		query += " ORDER BY d.sequence DESC"
+	} else {
+		query += " ORDER BY d.id DESC"
+	}
 	if f.Limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, f.Limit)

@@ -117,10 +117,28 @@ func TestTextIsNeverReadAsAPlaceholderOfTheProxy(t *testing.T) {
 		StaticFallback: "{env.HOME}.html",
 	}})
 	for _, want := range []string{
-		`"X-Leak":["\\{env.HOME} \\{file./data/caddy/key}"]`,
-		`"Report-To":["\\{\"group\":\"default\"}"]`,
-		`"Location":["/\\{env.HOME}?x=\\{env.PATH}"]`,
-		`"uri":"/\\{env.HOME}.html"`,
+		`"X-Leak":["\\{env.HOME\\} \\{file./data/caddy/key\\}"]`,
+		`"Report-To":["\\{\"group\":\"default\"\\}"]`,
+		`"Location":["/\\{env.HOME\\}?x=\\{env.PATH\\}"]`,
+		`"uri":"/\\{env.HOME\\}.html"`,
+	} {
+		if !strings.Contains(got[0].Handle, want) {
+			t.Errorf("handle lacks %s:\n%s", want, got[0].Handle)
+		}
+	}
+}
+
+// The proxy reads \{ and \} as the brace alone: a value that holds either
+// has to be escaped once more, or it reaches the client short of a backslash.
+func TestABackslashBeforeABraceSurvivesTheRoundTrip(t *testing.T) {
+	got := renderedRoutes(t, []Route{{
+		Domain: "example.com", Backends: web8080,
+		Headers: map[string]string{"X-Close": `a\}b`, "X-Open": `a\{b`, "X-Plain": "a}b"},
+	}})
+	for _, want := range []string{
+		`"X-Close":["a\\\\}b"]`,
+		`"X-Open":["a\\\\{b"]`,
+		`"X-Plain":["a\\}b"]`,
 	} {
 		if !strings.Contains(got[0].Handle, want) {
 			t.Errorf("handle lacks %s:\n%s", want, got[0].Handle)
@@ -159,6 +177,15 @@ func TestBasicAuthAsksTheAccountsOfTheLongestPath(t *testing.T) {
 		`]},` + encodeJSON
 	if !strings.HasPrefix(got[0].Handle, want) {
 		t.Errorf("handle = %s\nwant it to start with %s", got[0].Handle, want)
+	}
+}
+
+func TestABasicAuthUsernameIsNeverAPlaceholder(t *testing.T) {
+	// A specification stored before usernames with braces were refused: the
+	// proxy must compare the text as written, not what {env.HOME} stands for.
+	got := renderedRoutes(t, []Route{{Domain: "example.com", Backends: web8080, BasicAuth: []BasicAuth{{Username: "{env.HOME}", Hash: "$2a$10$x"}}}})
+	if want := `"accounts":[{"password":"$2a$10$x","username":"\\{env.HOME\\}"}]`; !strings.Contains(got[0].Handle, want) {
+		t.Errorf("handle = %s\nwant it to contain %s", got[0].Handle, want)
 	}
 }
 

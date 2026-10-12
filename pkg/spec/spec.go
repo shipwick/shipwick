@@ -179,9 +179,10 @@ type Logging struct {
 
 // Redacted returns a copy that is safe to expose through the API: environment
 // variable names are kept, their values are masked, and so are the passwords
-// of the proxy block.
+// of the proxy block and the credentials among the logging options.
 func (a App) Redacted() App {
 	a.Proxy = a.Proxy.redacted()
+	a.Logging = a.Logging.redacted()
 	if len(a.Env) == 0 {
 		return a
 	}

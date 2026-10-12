@@ -87,10 +87,19 @@ deny contains "another container's volumes" if {
 }
 
 # A volume made of a directory of the server (`-o type=none -o o=bind
-# -o device=/`) is that directory under a volume's name.
+# -o device=/`) is that directory under a volume's name. A container's mount
+# can carry the same options (`--mount type=volume,volume-opt=o=bind,…`), and
+# the daemon then creates the volume on the way, with no request of its own
+# for the policy to see. The agent creates its volumes first, without options.
 deny contains "a volume made of a directory of the server" if {
 	creating_volume
 	count(input.Body.DriverOpts) > 0
+}
+
+deny contains "a volume made of a directory of the server" if {
+	creating_container
+	some m in host.Mounts
+	count(object.get(m, ["VolumeOptions", "DriverConfig", "Options"], {})) > 0
 }
 
 deny contains "a namespace of the server" if {
@@ -133,6 +142,17 @@ deny contains "a container without Docker's confinement" if {
 	creating_container
 	some opt in host.SecurityOpt
 	regex.match(`^((seccomp|apparmor|systempaths)[=:]unconfined|label[=:]disable)$`, opt)
+}
+
+# `systempaths=unconfined` does not arrive as that string: the docker command
+# sends it as an empty MaskedPaths and an empty ReadonlyPaths, and any list
+# given in either replaces the daemon's default set (/proc/kcore,
+# /proc/sysrq-trigger, /proc/sys, /sys/firmware, …). Absent or null means
+# that set, which is all the agent ever asks for.
+deny contains "a container without Docker's confinement" if {
+	creating_container
+	some field in ["MaskedPaths", "ReadonlyPaths"]
+	is_array(host[field])
 }
 
 deny contains "a privileged command in a container" if {

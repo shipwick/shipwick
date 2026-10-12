@@ -54,6 +54,8 @@ type Fake struct {
 	containers map[string]*docker.Container
 	specs      map[string]docker.ContainerSpec
 	local      map[string]bool
+	ids        map[string]string // the ID each tag names, see fake_images.go
+	images     map[string]bool   // the IDs that exist, tagged or not
 	pulled     []string
 	starts     map[string]int
 	ips        map[string]string // stable per container, like a user-defined network
@@ -135,6 +137,8 @@ func New() *Fake {
 		containers:  map[string]*docker.Container{},
 		specs:       map[string]docker.ContainerSpec{ProxyID: {}}, // the proxy's own files, see fake_proxy.go
 		local:       map[string]bool{},
+		ids:         map[string]string{},
+		images:      map[string]bool{},
 		starts:      map[string]int{},
 		ips:         map[string]string{},
 		renaming:    map[string]bool{},
@@ -150,11 +154,12 @@ func New() *Fake {
 	}
 }
 
-// AddLocalImage marks an image as present in the local image store.
+// AddLocalImage marks an image as present in the local image store, with the
+// ID a save and a load of it would give it (see fake_images.go).
 func (f *Fake) AddLocalImage(image string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.local[image] = true
+	f.addImage(image, imageID([]byte(image+"\n")))
 }
 
 // Crash simulates the container's process dying.
@@ -218,7 +223,7 @@ func (f *Fake) PullImage(ctx context.Context, image string, auth *docker.Registr
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pulled = append(f.pulled, image)
-	f.local[image] = true
+	f.addImage(image, imageID([]byte(image+"\n")))
 	return nil
 }
 
@@ -569,7 +574,9 @@ func (f *Fake) StoppedAt(name string) time.Time {
 }
 
 // RemoveImage forgets a local image, unless a container — running or not —
-// still uses it, like the real daemon without --force.
+// still uses it, like the real daemon without --force. Given a tag it untags,
+// and the image goes with its last tag; given an ID it removes the image,
+// unless more than one tag still names it, which the daemon refuses as well.
 func (f *Fake) RemoveImage(_ context.Context, image string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -577,15 +584,30 @@ func (f *Fake) RemoveImage(_ context.Context, image string) error {
 		f.namelessRemovals++
 		return docker.ErrImageNotFound
 	}
+	byID := isImageID(image)
 	for _, c := range f.containers {
-		if c.Image == image {
+		if c.Image == image || byID && f.ids[c.Image] == image {
 			return docker.ErrImageInUse
 		}
+	}
+	if byID {
+		if !f.images[image] {
+			return docker.ErrImageNotFound
+		}
+		if len(f.refsOf(image)) > 1 {
+			return docker.ErrImageInUse
+		}
+		for _, ref := range f.refsOf(image) {
+			f.dropRef(ref)
+		}
+		delete(f.images, image)
+		f.removedImages = append(f.removedImages, image)
+		return nil
 	}
 	if !f.local[image] {
 		return docker.ErrImageNotFound
 	}
-	delete(f.local, image)
+	f.dropRef(image)
 	f.removedImages = append(f.removedImages, image)
 	return nil
 }

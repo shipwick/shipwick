@@ -497,7 +497,7 @@ func (im *importRun) importApplication(ctx context.Context, xr *exportReader, na
 	if entry.Image != nil {
 		if !entry.Image.Included {
 			if here, err := e.rt.ImageExists(ctx, app.Image); err != nil || !here {
-				return api.ImportAppSkipped, fmt.Sprintf("its image was built by shipwick deploy and could not be written out by the old server (%s). Deploy it to this server from its project with shipwick deploy, stop it, and bring its volumes over with shipwick volumes backup and shipwick volumes restore", entry.Image.Reason), nil
+				return api.ImportAppSkipped, fmt.Sprintf("its image was built by shipwick deploy and could not be written out by the old server (%s). Deploy it to this server from its project with shipwick deploy, stop it, and bring its volumes over with shipwick backup and shipwick restore", entry.Image.Reason), nil
 			}
 		} else {
 			member, err := xr.stream(exportImageMember(name))

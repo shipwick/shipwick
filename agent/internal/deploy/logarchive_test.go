@@ -91,7 +91,7 @@ func TestReplacedReplicaLeavesItsLastLinesInTheArchive(t *testing.T) {
 	}
 	e := entries[0]
 	if e.Kind != api.LogKindReplica || e.Reason != api.LogReasonReplaced || e.Replica != 1 || e.Container != old.Name ||
-		e.DeploymentID == nil || *e.DeploymentID != v1.ID || e.Deployment != v1.Sequence || e.Version != v1.Version {
+		e.DeploymentID == nil || *e.DeploymentID != v1.ID || e.Sequence != v1.Sequence || e.Version != v1.Version {
 		t.Errorf("entry does not say what it is the output of: %+v", e)
 	}
 	if e.Lines != 2 || e.Bytes != int64(len("listening on :8080")+len("GET /orders 500")) || e.StoredBytes == 0 || e.Truncated {
@@ -253,7 +253,7 @@ func TestFailedDeploymentLeavesTheOutputOfItsReplicas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Reason != api.LogReasonDeploymentFailed || entries[0].ExitCode == nil || *entries[0].ExitCode != 1 || entries[0].Deployment != d.Sequence {
+	if len(entries) != 1 || entries[0].Reason != api.LogReasonDeploymentFailed || entries[0].ExitCode == nil || *entries[0].ExitCode != 1 || entries[0].Sequence != d.Sequence {
 		t.Fatalf("entries of the failed deployment = %+v", entries)
 	}
 	wantLines(t, "failed replica", h.output("my-api", entries[0].ID), "Error: DATABASE_URL is not set")

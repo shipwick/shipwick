@@ -74,7 +74,7 @@ build: .                  # built on your machine and sent to the server; no reg
 port: 3000
 domain: api.example.com   # served over HTTPS, certificate included
 health:
-  path: /health           # traffic moves over only once this answers 200
+  path: /health           # traffic moves over only once this answers 2xx
 ```
 
 **4. Deploy:**
@@ -103,7 +103,7 @@ changed, a few kilobytes for a code change.
 
 Already have an image in a registry? Name it instead of building:
 `image: ghcr.io/company/my-api:1.4.2`. A private registry needs
-`shipwick registry login ghcr.io` once.
+`shipwick registry login ghcr.io --username <name>` once.
 
 **5. Look at it:**
 

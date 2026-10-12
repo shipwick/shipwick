@@ -150,10 +150,10 @@ func TestRequestsAreCountedPerApplicationAndMinute(t *testing.T) {
 	if got.StepSeconds != 60 || len(got.Points) != 2 {
 		t.Fatalf("step = %d, points = %+v; want two one-minute buckets", got.StepSeconds, got.Points)
 	}
-	if p := got.Points[0]; !p.T.Equal(tr.minute) || p.Requests != 4 || p.Status5xx != 1 {
+	if p := got.Points[0]; !p.At.Equal(tr.minute) || p.Requests != 4 || p.Status5xx != 1 {
 		t.Errorf("first point = %+v, want the four requests of %s", p, tr.minute)
 	}
-	if p := got.Points[1]; !p.T.Equal(tr.minute.Add(time.Minute)) || p.Requests != 1 {
+	if p := got.Points[1]; !p.At.Equal(tr.minute.Add(time.Minute)) || p.Requests != 1 {
 		t.Errorf("second point = %+v", p)
 	}
 }

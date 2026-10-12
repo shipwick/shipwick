@@ -61,7 +61,7 @@ func (c *Client) Restore(ctx context.Context, name, volume string, archive io.Re
 		return &UnreachableError{URL: c.base.String(), Err: err}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return decodeError(resp)
 	}
 	return nil

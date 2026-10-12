@@ -158,10 +158,10 @@ export interface Application {
   image: string
   version: string
   domain: string
-  /** Further hostnames served exactly like `domain`; absent when there are none. */
-  aliases?: string[]
-  /** Hostnames answered with a redirect to `domain`; absent when there are none. */
-  redirects?: string[]
+  /** Further hostnames served exactly like `domain`; [] when there are none. */
+  aliases: string[]
+  /** Hostnames answered with a redirect to `domain`; [] when there are none. */
+  redirects: string[]
   /** The part of `domain` and the aliases the application serves ("/api"); absent when it serves all of it. */
   path?: string
   replicas: ReplicaCount
@@ -533,9 +533,9 @@ export interface ProxyStatus {
   /**
    * The installation's networks the proxy's container is not attached to
    * (`shipwick`, `shipwick-services`, `shipwick-control`), looked at every 30
-   * seconds. Present only when there are any, and never on agents before 0.9.
+   * seconds. [] when there are none.
    */
-  networks_missing?: string[]
+  networks_missing: string[]
 }
 
 /** A line of a followed log that is not a log line: the agent's clock, sent after 20 seconds without a line. From 0.9. */
@@ -585,8 +585,8 @@ export interface Server {
   memory_bytes: number
   /** How much swap the server has; 0 is none. Absent where the agent cannot tell, and on agents before 0.8. */
   swap_bytes?: number
-  /** The running applications without a memory limit. Absent when there are none, and on agents before 0.8. */
-  unlimited_memory?: string[]
+  /** The running applications without a memory limit; [] when there are none. */
+  unlimited_memory: string[]
   applications: number
   containers: number
   /** The reverse proxy in front of the applications; `enabled` is false when none is configured. */
@@ -787,9 +787,9 @@ export interface ApplicationMetrics {
    * The limits Docker on this server does not apply: the limits above are
    * then what deploy.yaml asks for and nothing holds a replica to. With both
    * listed the usage is that of everything the daemon runs, not the replica's.
-   * Absent where Docker applies them, and on agents before 0.8.
+   * [] where Docker applies them.
    */
-  unenforced_limits?: (ResourceLimit | string)[]
+  unenforced_limits: (ResourceLimit | string)[]
 }
 
 /** Accepted values of `since` on the metrics history endpoint. */
@@ -821,8 +821,8 @@ export interface MetricsHistory {
   application: string
   /** Start of the window (RFC 3339). */
   since: string
-  /** Bucket width chosen by the agent: "30s", "5m" or "1h". */
-  step: string
+  /** Bucket width chosen by the agent, in seconds: 30, 300 or 3600. */
+  step_seconds: number
   /** One entry per replica that has at least one sample in the window, ordered by replica. */
   series: MetricsSeries[]
   limits: MetricsLimits
@@ -1034,7 +1034,7 @@ export interface TrafficCounts {
 
 export interface TrafficPoint extends TrafficCounts {
   /** Start of the step. */
-  t: string
+  at: string
 }
 
 /** GET /applications/:name/traffic: what the proxy's access log says about the application's requests. */
@@ -1217,7 +1217,7 @@ export interface StandbyPull {
   schedule: string
   last_at: string | null
   /** The export imported last; 0 when there has been none. */
-  last_export: number
+  last_export_id: number
   last_error: string
 }
 
@@ -1336,7 +1336,7 @@ export interface LogArchiveEntry {
   /** Null once the deployment is gone from the history. */
   deployment_id: number | null
   /** The deployment's sequence (#N); 0 when it is gone. */
-  deployment: number
+  sequence: number
   /** "" when the deployment is gone. */
   version: string
   /** 0 for a run. */
@@ -1377,7 +1377,8 @@ export interface LogMatch extends LogLine {
   /** Null for a line read from a container that exists. */
   archive_id: number | null
   deployment_id: number | null
-  deployment: number
+  /** The deployment's sequence (#N); 0 when it is gone. */
+  sequence: number
   job: string
   run_id: number | null
 }

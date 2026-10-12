@@ -31,7 +31,7 @@ func (c *Client) Audit(ctx context.Context, query AuditQuery) (api.AuditPage, er
 		return api.AuditPage{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return api.AuditPage{}, decodeError(resp)
 	}
 	var page api.AuditPage

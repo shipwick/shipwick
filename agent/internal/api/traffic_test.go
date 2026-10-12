@@ -101,7 +101,7 @@ func TestTrafficEndpoint(t *testing.T) {
 	if totals != want {
 		t.Errorf("totals = %+v, want %+v", totals, want)
 	}
-	if p := got.Points[0]; !p.T.Equal(minute.Add(-20*time.Minute)) || p.Requests != 10 || p.Status5xx != 1 || p.P95Ms == 0 {
+	if p := got.Points[0]; !p.At.Equal(minute.Add(-20*time.Minute)) || p.Requests != 10 || p.Status5xx != 1 || p.P95Ms == 0 {
 		t.Errorf("first point = %+v, want the oldest minute", p)
 	}
 
@@ -121,8 +121,8 @@ func TestTrafficEndpoint(t *testing.T) {
 			t.Errorf("points miss %q in %s", field, body)
 		}
 	}
-	if _, ok := raw.Data.Points[0]["t"]; !ok || !strings.Contains(string(body), `"step_seconds":60`) {
-		t.Errorf("points carry t, and the step is given in seconds: %s", body)
+	if _, ok := raw.Data.Points[0]["at"]; !ok || !strings.Contains(string(body), `"step_seconds":60`) {
+		t.Errorf("points carry at, and the step is given in seconds: %s", body)
 	}
 
 	// Wider windows are served in wider buckets, and stay small.

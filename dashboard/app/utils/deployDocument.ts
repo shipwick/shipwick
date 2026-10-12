@@ -24,10 +24,18 @@ function maskedAccount(field: string): number {
   return match ? Number(match[1]) : -1
 }
 
-/** What a masked field is, in words: "LOG_LEVEL", "the password of account 1 under proxy.basic_auth". */
+/** The option a masked logging credential is: "splunk-token" for `logging.options.splunk-token`; "" for any other field. */
+function maskedLogOption(field: string): string {
+  const match = /^logging\.options\.([a-z][a-z0-9-]*)$/.exec(field)
+  return match ? match[1]! : ''
+}
+
+/** What a masked field is, in words: "LOG_LEVEL", "the password of account 1 under proxy.basic_auth", "splunk-token under logging.options". */
 export function maskedLabel(field: string): string {
   const variable = maskedVariable(field)
   if (variable) return variable
+  const option = maskedLogOption(field)
+  if (option) return `${option} under logging.options`
   const account = maskedAccount(field)
   return account >= 0 ? `the password of account ${account + 1} under proxy.basic_auth` : field
 }
@@ -40,6 +48,8 @@ export function maskedLabel(field: string): string {
 export function maskedSecretName(field: string): string {
   const variable = maskedVariable(field)
   if (variable) return variable
+  const option = maskedLogOption(field)
+  if (option) return option.toUpperCase().replace(/-/g, '_')
   const account = maskedAccount(field)
   if (account < 0) return ''
   return account === 0 ? 'PROXY_PASSWORD' : `PROXY_PASSWORD_${account + 1}`
@@ -53,8 +63,8 @@ const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&
  * beyond recognition answers false, and the agent says what it finds.
  */
 export function stillMasked(text: string, field: string): boolean {
-  const variable = maskedVariable(field)
-  if (variable) return new RegExp(`(^|[\\s{,"'])${escapeRegExp(variable)}["']?[ \\t]*:[ \\t]*["']?\\*{8}`, 'm').test(text)
+  const key = maskedVariable(field) || maskedLogOption(field)
+  if (key) return new RegExp(`(^|[\\s{,"'])${escapeRegExp(key)}["']?[ \\t]*:[ \\t]*["']?\\*{8}`, 'm').test(text)
   const account = maskedAccount(field)
   if (account < 0) return false
   const passwords = [...text.matchAll(/(^|[\s{,"'-])password["']?[ \t]*:[ \t]*(.*)$/gm)]

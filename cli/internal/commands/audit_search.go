@@ -66,7 +66,7 @@ The server keeps the trail for a year. Reading it needs admin.`,
 				return err
 			}
 			if f.format != "" || f.output != "" {
-				if cmd.Flags().Changed("lines") || cmd.Flags().Changed("before") {
+				if cmd.Flags().Changed("tail") || cmd.Flags().Changed("before") {
 					return errors.New("an export is everything that matches, not a page: leave -n and --before out, and narrow it with --since, --app, --actor, --action or --outcome")
 				}
 				return c.auditExport(cmd, query, f)
@@ -129,7 +129,7 @@ The server keeps the trail for a year. Reading it needs admin.`,
 	cmd.Flags().StringArrayVar(&f.actions, "action", nil, "only this action, or with a dot at its end this family of actions (token.); repeat for several")
 	cmd.Flags().StringArrayVar(&f.outcomes, "outcome", nil, "only what ended this way: ok, refused or failed; several separated by commas")
 	cmd.Flags().StringVar(&f.since, "since", "", "how far back: days or hours (7d, 24h) or a date (2026-09-01)")
-	cmd.Flags().IntVarP(&f.limit, "lines", "n", 50, "how many entries, newest first")
+	cmd.Flags().IntVarP(&f.limit, "tail", "n", 50, "how many entries, newest first")
 	cmd.Flags().Int64Var(&f.before, "before", 0, "continue with the entries older than the one with this id")
 	cmd.Flags().StringVar(&f.format, "format", "", "write out everything that matches instead of a page: csv or json (one entry per line)")
 	cmd.Flags().StringVarP(&f.output, "output", "o", "", "the file to write the export to (default: standard output)")

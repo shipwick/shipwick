@@ -90,7 +90,7 @@ agent's memory only.`,
 	}
 	cmd.Flags().StringVar(&since, "since", "1h", "how far back to look: 1h, 24h or 7d")
 	cmd.Flags().BoolVar(&requests, "requests", false, "list the most recent requests instead of the totals")
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "with --requests: keep printing new requests")
+	cmd.Flags().BoolVar(&follow, "follow", false, "with --requests: keep printing new requests")
 	cmd.Flags().IntVarP(&tail, "tail", "n", 50, "with --requests: how many to show")
 	return cmd
 }

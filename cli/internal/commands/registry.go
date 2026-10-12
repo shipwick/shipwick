@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -126,7 +128,8 @@ func (c *cli) registryListCommand() *cobra.Command {
 }
 
 func (c *cli) registryLogoutCommand() *cobra.Command {
-	return &cobra.Command{
+	var yes bool
+	cmd := &cobra.Command{
 		Use:   "logout <registry>",
 		Short: "Remove a registry credential; images already on the server stay",
 		Args:  cobra.ExactArgs(1),
@@ -134,6 +137,16 @@ func (c *cli) registryLogoutCommand() *cobra.Command {
 			registry, err := api.NormalizeRegistry(args[0])
 			if err != nil {
 				return err
+			}
+			if !yes {
+				if !isTerminal(c.in) {
+					return errors.New("refusing to log out without confirmation; pass --yes")
+				}
+				c.ui.Printf("Log out of %s? The server pulls from there without a credential from now on. [y/N] ", registry)
+				answer, _ := bufio.NewReader(c.in).ReadString('\n')
+				if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+					return errors.New("cancelled")
+				}
 			}
 			cl, err := c.connect()
 			if err != nil {
@@ -150,6 +163,8 @@ func (c *cli) registryLogoutCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation")
+	return cmd
 }
 
 // agentKeyVariable is the variable the agent's key is set with when it is

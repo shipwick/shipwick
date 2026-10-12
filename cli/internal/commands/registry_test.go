@@ -178,7 +178,7 @@ func TestRegistryLogout(t *testing.T) {
 	a := newRegistryAgent(t)
 	a.registries = []api.Registry{{Registry: "ghcr.io", Username: "octocat"}}
 
-	out, _, err := a.run(t.TempDir(), "registry", "logout", "GHCR.io")
+	out, _, err := a.run(t.TempDir(), "registry", "logout", "GHCR.io", "--yes")
 	if err != nil || !strings.Contains(out, "Logged out of ghcr.io") {
 		t.Errorf("logout: %v\n%s", err, out)
 	}
@@ -186,7 +186,7 @@ func TestRegistryLogout(t *testing.T) {
 		t.Errorf("removed = %v", a.removed)
 	}
 
-	_, _, err = a.run(t.TempDir(), "registry", "logout", "quay.io")
+	_, _, err = a.run(t.TempDir(), "registry", "logout", "quay.io", "--yes")
 	if got := Render(err); !strings.Contains(got, "no credential is stored for quay.io") || !strings.Contains(got, "shipwick registry ls") {
 		t.Errorf("unexpected rendering: %s", got)
 	}

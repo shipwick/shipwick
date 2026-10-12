@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"strings"
@@ -161,7 +162,8 @@ func (c *cli) accessGrantCommand() *cobra.Command {
 }
 
 func (c *cli) accessRevokeCommand() *cobra.Command {
-	return &cobra.Command{
+	var yes bool
+	cmd := &cobra.Command{
 		Use:   "revoke <address | *@domain | group:name | name:value>",
 		Short: "Remove a rule; sessions that rested on it end at once",
 		Args:  cobra.ExactArgs(1),
@@ -169,6 +171,9 @@ func (c *cli) accessRevokeCommand() *cobra.Command {
 			kind, subject, err := api.ParseAccessSubject(args[0])
 			if err != nil {
 				return err
+			}
+			if !yes && !isTerminal(c.in) {
+				return errors.New("refusing to revoke without confirmation; pass --yes")
 			}
 			cl, err := c.connect()
 			if err != nil {
@@ -182,6 +187,14 @@ func (c *cli) accessRevokeCommand() *cobra.Command {
 				if r.Kind != kind || r.Subject != subject {
 					continue
 				}
+				// Asked once the rule is known: the question names what goes.
+				if !yes {
+					c.ui.Printf("Revoke the %s rule for %s? Whoever signed in through it is signed out. [y/N] ", r.Role, r.Who())
+					answer, _ := bufio.NewReader(c.in).ReadString('\n')
+					if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+						return errors.New("cancelled")
+					}
+				}
 				if err := cl.RevokeAccess(cmd.Context(), r.ID); err != nil && !client.IsCode(err, api.CodeNotFound) {
 					return err
 				}
@@ -192,6 +205,8 @@ func (c *cli) accessRevokeCommand() *cobra.Command {
 			return fmt.Errorf("there is no rule for %s\n\nList the rules with: shipwick access ls", args[0])
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation")
+	return cmd
 }
 
 func (c *cli) accessSessionsCommand() *cobra.Command {

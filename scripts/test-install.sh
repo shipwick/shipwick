@@ -79,6 +79,28 @@ trap cleanup EXIT
 
 fail() { echo "FAIL ($image): $*" >&2; exit 1; }
 
+# retry COMMAND... — up to three times, with a pause between. For what pulls
+# from a registry or a package mirror, which fails now and then for no
+# reason of this checkout's; a failure that stays is still a failure.
+retry() {
+    n=0
+    until "$@"; do
+        n=$((n + 1))
+        [ "$n" -lt 3 ] || return 1
+        echo "   ($1 $2 failed, attempt $n of 3; again in 10 seconds)" >&2
+        sleep 10
+    done
+}
+
+# ordinal VERSION — a number that orders releases; "latest" is after them all.
+ordinal() {
+    if [ "$1" = latest ]; then
+        echo 99999999
+    else
+        echo "${1#v}" | awk -F'[.-]' '{ print $1 * 10000 + $2 * 100 + $3 }'
+    fi
+}
+
 # on_server SCRIPT — runs SCRIPT with the server's own sh.
 on_server() { docker exec -e VERSION="$VERSION" "$server" sh -c "$1"; }
 
@@ -105,6 +127,13 @@ expect() { # expect TEXT — the last run of the installer said TEXT
 for image in "$@"; do
     echo "== $image, Shipwick $VERSION, Docker from $DAEMON_IMAGE"
     cleanup
+
+    # Pulled before anything is created from them, so that a pull that fails
+    # can be tried again without a container half made.
+    retry docker pull --quiet "$DAEMON_IMAGE" >/dev/null || fail "could not pull $DAEMON_IMAGE"
+    [ -z "$CLIENT_IMAGE" ] || retry docker pull --quiet "$CLIENT_IMAGE" >/dev/null || fail "could not pull $CLIENT_IMAGE"
+    [ -z "$COSIGN" ] || retry docker pull --quiet "$COSIGN_IMAGE" >/dev/null || fail "could not pull $COSIGN_IMAGE"
+    retry docker pull --quiet "$image" >/dev/null || fail "could not pull $image"
 
     docker run -d --privileged --name "$daemon" -e DOCKER_TLS_CERTDIR= "$DAEMON_IMAGE" >/dev/null
     i=0
@@ -134,16 +163,16 @@ for image in "$@"; do
     fi
     # A server has a way to download; the smallest images have none. Where
     # the image brings one, it is the one tested: BusyBox wget on Alpine.
-    on_server '
-        if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then exit 0; fi
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null 2>&1
-        elif command -v dnf >/dev/null 2>&1; then
-            dnf install -y -q curl >/dev/null
+    if ! on_server 'command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1'; then
+        if on_server 'command -v apt-get >/dev/null 2>&1'; then
+            retry on_server 'apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null 2>&1' \
+                || fail "could not install curl"
+        elif on_server 'command -v dnf >/dev/null 2>&1'; then
+            retry on_server 'dnf install -y -q curl >/dev/null' || fail "could not install curl"
         else
-            echo "this image has neither curl nor wget, and no package manager this test knows" >&2
-            exit 1
-        fi' || fail "could not install curl"
+            fail "this image has neither curl nor wget, and no package manager this test knows"
+        fi
+    fi
     tar -C scripts -cf - install.sh | docker cp - "$server:/"
 
     install "a new server"
@@ -152,6 +181,12 @@ for image in "$@"; do
     expect "Installed the shipwick CLI to /usr/local/bin/shipwick"
     expect "shipwick on this server is signed in"
     [ -z "$COSIGN" ] || expect "The release is signed by the release workflow"
+    # Resolved once, before the first download; and from 0.7.0 on, what was
+    # pulled is held against the release's digests. A tag re-pointed at
+    # another image cannot be staged here: the pull takes the registry's
+    # answer, so that branch is read, not run.
+    [ "$VERSION" != latest ] || expect "The latest release is v"
+    [ "$(ordinal "$VERSION")" -lt "$(ordinal v0.7.0)" ] || expect "The images are the ones the release published"
 
     # shellcheck disable=SC2016  # expanded by the shell of the server
     on_server '

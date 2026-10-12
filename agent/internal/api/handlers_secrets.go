@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 
 	"github.com/shipwick/shipwick/pkg/api"
@@ -50,9 +49,8 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, err.Error(), nil)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSecretBody))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "request body is too large or unreadable", nil)
+	body, ok := readBody(w, r, maxSecretBody)
+	if !ok {
 		return
 	}
 	var req api.SetSecretRequest

@@ -39,6 +39,44 @@ var logAddressOptions = map[string]struct {
 // application gets to name.
 var logFileOptions = []string{"syslog-tls-ca-cert", "syslog-tls-cert", "syslog-tls-key", "splunk-cafile", "splunk-capath"}
 
+// LogSecretOptions are the logging options whose value is a credential. One
+// is treated like an env value: masked wherever the API hands a spec out,
+// sealed at rest, and open to a ${NAME} the agent fills in from its secrets.
+// Splunk's HEC token is the one; the other drivers on the list take their
+// credentials from the daemon or from files, which are refused above.
+var LogSecretOptions = []string{"splunk-token"}
+
+// SecretLogOptions names the options of a.Logging that are credentials and
+// are set, in a fixed order.
+func (a App) SecretLogOptions() []string {
+	if a.Logging == nil {
+		return nil
+	}
+	var names []string
+	for _, name := range LogSecretOptions {
+		if _, ok := a.Logging.Options[name]; ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// redacted returns a copy of l with its credentials masked; l is left alone.
+func (l *Logging) redacted() *Logging {
+	if l == nil || len(l.Options) == 0 {
+		return l
+	}
+	out := *l
+	out.Options = make(map[string]string, len(l.Options))
+	for k, v := range l.Options {
+		if slices.Contains(LogSecretOptions, k) {
+			v = redactedValue
+		}
+		out.Options[k] = v
+	}
+	return &out
+}
+
 // validateLogging checks the logging driver and its options.
 func (r raw) validateLogging(verr *ValidationError) *Logging {
 	if r.Logging == nil {

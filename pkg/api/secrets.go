@@ -32,7 +32,8 @@ func ValidateSecretValue(value string) error {
 	case value == "":
 		return fmt.Errorf("the value is empty")
 	case len(value) > MaxSecretValueBytes:
-		return fmt.Errorf("the value is too large (%d KB, max %d KB)", len(value)/1024, MaxSecretValueBytes/1024)
+		// The limit, not the size: nothing computed from the value is said.
+		return fmt.Errorf("the value is too large (max %d KB)", MaxSecretValueBytes/1024)
 	case strings.ContainsRune(value, 0):
 		return fmt.Errorf("the value must not contain NUL bytes")
 	}

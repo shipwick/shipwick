@@ -24,7 +24,8 @@ The browser never talks to the agent and never holds the token:
 - `POST /api/session {token}` verifies the token against the agent
   (`GET /api/v1/server`) and stores it in an **httpOnly, SameSite=Strict**
   cookie (`Secure` when the request came over https). `DELETE` clears it,
-  `GET` answers `{authenticated}`.
+  `GET` answers `{authenticated, servers}`: the servers by name and whether
+  this browser is signed in to each.
 - `/api/agent/**` is a reverse proxy to `${SHIPWICK_AGENT_URL}/api/v1/**`
   (`/api/servers/<name>/agent/**` when several servers are configured, see
   below). It reads the token from the cookie, adds `Authorization: Bearer …`
@@ -33,9 +34,10 @@ The browser never talks to the agent and never holds the token:
   pass through untouched; response bodies are piped, never buffered, so
   `logs?follow=true` (NDJSON) arrives line by line and a volume archive
   streams to the browser's download (the agent's `Content-Disposition` names
-  the file). A `PUT` body (a volume archive, or a secret's value) is streamed
-  to the agent as it arrives; the agent's limits apply, and the proxy waits for
-  the answer only once the last byte has been sent. The dashboard uploads
+  the file). A `PUT` body (a volume archive, or a secret's value) and the body
+  of `POST /import` (an export, with its passphrase in `X-Shipwick-Passphrase`)
+  are streamed to the agent as they arrive; the agent's limits apply, and the
+  proxy waits for the answer only once the last byte has been sent. The dashboard uploads
   neither static folders nor images: `shipwick deploy` does that.
 
 Why a proxy rather than calling the agent from the browser: the agent token is
@@ -51,7 +53,8 @@ server. Nitro serves the static app, the session routes and the proxy.
 ```text
 app/
   pages/            index (Overview), applications/ (the list; [name].vue is the frame of an
-                    application's page and [name]/ its tabs), deployments/, logs/, servers.vue and
+                    application's page and [name]/ its tabs), deploy (a deploy.yaml typed or
+                    pasted), deployments/, logs/, servers.vue and
                     servers/ (the server's page and its tabs), volumes/, certificates/,
                     settings/ (secrets, registries, access), login
   components/       hand-rolled UI: UiButton, UiDialog (native <dialog>), UiTabs, UiTooltip, StatusBadge, FindingList, LiveAnnouncer,
@@ -64,7 +67,7 @@ app/
                     (+ useAccess: the token's role and its applications), useApplication
                     (what the application page shares with its tabs), useAnnounce (what a
                     screen reader is told), useFocusTrap, useRovingFocus, useFocusWhenShown,
-                    useTooltip
+                    useTooltip, useTraffic, useStandbyWaiting
   middleware/       auth.global (which server an address is about, and whether it is signed
                     in), moved.global (addresses that moved)
   plugins/          server-links.client (with several servers, every link names its server),
@@ -78,7 +81,9 @@ app/
                     deployDocument (a pasted deploy.yaml), network, limits (what Docker does
                     not enforce), focus (roving focus, the
                     focus trap), announce (what is news for a screen reader), tooltip (when
-                    one shows, where it goes, a button that is off for a reason)
+                    one shows, where it goes, a button that is off for a reason), alerts,
+                    backups, certificates, cloudflare, logArchive, logResume, logs, probe,
+                    registries, traffic, transfer, updates, wiring
   types/api.ts      wire types, mirroring pkg/api/types.go and pkg/spec/spec.go
   assets/css/       design tokens (light/dark), Tailwind v4 theme
 server/
@@ -86,12 +91,18 @@ server/
   api/agent/[...path].ts, api/servers/[server]/agent/[...path].ts
                     the streaming reverse proxy (utils/proxy.ts)
   api/auth.get.ts   whether the agent offers a sign-in through a provider
+  api/export.post.ts, api/export/[ticket].get.ts (and the same under api/servers/[server]/)
+                    the two-step export download (utils/downloads.ts)
   routes/auth/      login and callback: the dashboard's half of an OpenID Connect sign-in
   utils/agent.ts    agent client (node:http), cookie options, CSRF check, error envelope
   utils/agents.ts   SHIPWICK_AGENTS; forwarded.ts: the browser's address; signin.ts: PKCE,
-                    the sign-in cookie, what a failed sign-in says
+                    the sign-in cookie, what a failed sign-in says; signinAgent.ts: the
+                    agent's GET /auth; tokenCheck.ts: what the agent's answer to a sign-in
+                    means; timeouts.ts: how long each request may take; uploads.ts: lifts
+                    Node's request timeout while a file streams
 mock/agent.mjs      dependency-free mock of the agent API, for development (yaml.mjs reads
-                    the deploy.yaml it is sent, security.mjs its security block, faults.mjs
+                    the deploy.yaml it is sent, security.mjs its security block, document.mjs
+                    writes the document of what runs with its masked values, faults.mjs
                     answers for a silent Docker and a full disk)
 tests/              vitest unit tests
 ```
@@ -110,8 +121,9 @@ internet access and makes no request to any third party.
   moved (`/tokens`, `/secrets`, `/registries`) are redirected by
   `middleware/moved.global.ts`, query included.
 - **An application's page** is a frame (`pages/applications/[name].vue`: name,
-  status, the actions, the tabs) around one page per tab: Overview, Metrics,
-  Logs, Deployments, Jobs, Backups, Configuration. The frame polls the
+  status, the actions, the tabs) around one page per tab: Overview, Metrics
+  (Traffic for a static application), Logs, Deployments, Jobs, Backups,
+  Configuration. The frame polls the
   application, its deployments and its events and follows a deployment in
   flight; the tabs read them through `useApplication()`. A tab an application
   cannot have (Logs and Jobs for a static one, Backups without volumes) is not
@@ -157,7 +169,7 @@ internet access and makes no request to any third party.
   the browser while the page is open. `NOT_DEPLOYED` (no active deployment) is
   shown as "Nothing is deployed", not as an error.
 - **History** (`metrics/history?since=1h|24h|7d`) is drawn as the agent
-  returns it: one line per replica, the agent's `step`, a dashed line at the
+  returns it: one line per replica, the agent's `step_seconds`, a dashed line at the
   per-replica limit (`limits.cpu × 100` for CPU), and a gap wherever a bucket
   has no sample; nothing is zero-filled or interpolated. Refreshed every 30
   seconds, the sampling interval. Replica n keeps series color n, as in the
@@ -257,8 +269,11 @@ internet access and makes no request to any third party.
   navigation, a list on the overview and on the page of the application they
   are about.
 - **Export and standby.** *Export to backups* (`POST /exports`) and the list of
-  exports; the export file itself is downloaded with `shipwick export`, which
-  asks for its passphrase. A server that holds applications imported stopped,
+  exports. *Download an export* asks for the passphrase twice and fetches the
+  file through the dashboard's server in two requests (`POST /api/export`
+  answers a ticket, `GET /api/export/<ticket>` is the download; the file is
+  piped, never held). An export is imported with `POST /import`, one upload
+  streamed to the agent as it arrives. A server that holds applications imported stopped,
   or fetches exports on a schedule, shows a Standby panel: what waits, the
   scheduled fetch, *Import newest now* (`POST /standby/pull`, followed with
   `GET /import`) and *Promote*, confirmed by typing `promote`, which answers
@@ -317,7 +332,9 @@ internet access and makes no request to any third party.
   to the Registries page.
 - **The server-side proxy** gives the agent 60 seconds to answer, except
   where it waits itself: stopping and deleting an application (replicas get
-  their `deploy.stop_timeout`), promoting a standby, and archives.
+  their `deploy.stop_timeout`), promoting a standby, importing an export,
+  starting an export, and archives (every `PUT`, and a backup's or a volume's
+  archive).
 - **`429 RATE_LIMITED`** (too many failed authentications from the dashboard
   server's address) reads "Too many failed attempts from this address; try
   again in a minute", on the login page and wherever an error is shown, and is
@@ -338,6 +355,12 @@ internet access and makes no request to any third party.
   enforced", and no usage is drawn against it, live or in the history. With
   both listed the usage is the daemon's own and is not shown at all. An agent
   that does not send `docker` is never read as enforcing.
+- **A list is never absent.** `aliases` and `redirects` of an application,
+  `unlimited_memory` and `proxy.networks_missing` of `GET /server` and
+  `unenforced_limits` of a sample are `[]` when there is nothing in them,
+  like every other list; the types in `app/types/api.ts` say so (no `?`), and
+  the mock answers the same. The `MOCK_AGENT=…` modes below leave out what
+  that agent did not have, as the real one did.
 - **`open_to_applications`** is a warning row on the server's page, only when
   the agent sends it.
 - **`503 RUNTIME_UNAVAILABLE` and `507 DISK_FULL`** are shown with the agent's
@@ -488,7 +511,7 @@ use.
 | Variable | Default | |
 |---|---|---|
 | `SHIPWICK_AGENT_URL` | `http://127.0.0.1:9000` | Base URL of the agent, as seen **from the dashboard server**. Read at runtime. (`NUXT_AGENT_URL` works too.) |
-| `SHIPWICK_AGENTS` | — | Several servers: `name=URL` pairs separated by commas or spaces, `production=http://agent:9000,staging=https://agent.staging.example.com`. Names are lowercase letters, digits and dashes; at most 20. Set, it replaces `SHIPWICK_AGENT_URL`. |
+| `SHIPWICK_AGENTS` | — | Several servers: `name=URL` pairs separated by commas or spaces, `production=http://agent:9000,staging=https://agent.staging.example.com`. Names are lowercase letters, digits and dashes, at most 40 characters; at most 20 servers. Set, it replaces `SHIPWICK_AGENT_URL`. |
 | `SHIPWICK_COOKIE_SECURE` | auto | `true`/`false` to force the cookie's `Secure` flag. Auto: on when the request is https, directly or via `X-Forwarded-Proto`. |
 | `HOST`, `PORT` | `0.0.0.0`, `3000` | Listen address of the production server (Nitro). |
 
@@ -621,8 +644,10 @@ the real agent, so the log viewer's reconnect can be seen.
 |---|---|
 | `MOCK_ROLE=read\|deploy\|admin` | The role of `MOCK_TOKEN` (default `admin`, signed in as `root`); endpoints above it answer `403 FORBIDDEN` with `{role, required}`, exactly as the agent's role table. Use it to see the dashboard as a read-only or deploy-only token |
 | `MOCK_WEBHOOK=1` | `server.notifications.webhook` is true |
-| `MOCK_NO_PROXY=1` | `server.proxy.enabled` is false, and deploying an application with a domain records the "No reverse proxy is configured, so … is not being served" `warn` step |
+| `MOCK_NO_PROXY=1` | `server.proxy.enabled` is false, and deploying an application with a domain records the "No reverse proxy is configured, so … is not being served" `warn` step; every hostname's certificate is `unknown`, no probe is recorded, and traffic is `409 TRAFFIC_UNAVAILABLE` |
 | `MOCK_NO_TRAFFIC=1` | Traffic and requests answer `409 TRAFFIC_UNAVAILABLE` (`MOCK_NO_PROXY=1` does too) |
+| `MOCK_PLAIN_PROXY=1` | `server.proxy.plain_lookups` is true: the proxy is not Shipwick's image of this version |
+| `MOCK_NO_SWAP=1` | `server.swap_bytes` is 0: a server without swap |
 | `MOCK_ALERTS=none\|warning\|critical` | The alerts of `GET /server`: none, two warnings (the default), or those plus a critical `disk` and a critical `unhealthy` alert with the disk at 97% |
 | `MOCK_KEY_ENV=1` | The encryption key is "in the environment": `POST /server/rotate-key` answers the new key once, then `409 KEY_ROTATION_PENDING` |
 | `MOCK_NO_PASSPHRASE=1` | Backups are not encrypted and the agent's state is not backed up: `POST /server/backups` and `POST /exports` answer `409 BACKUPS_NOT_ENCRYPTED` |
@@ -634,7 +659,7 @@ the real agent, so the log viewer's reconnect can be seen.
 | `MOCK_OLD_AGENT=1` | Answers like an agent before 0.5: the endpoints it added are `404 ENDPOINT_NOT_FOUND` and the fields it added are absent |
 | `MOCK_AGENT=0.5` | Answers like an agent before 0.6: no audit trail, no limits or expiry on tokens (`POST /tokens` refuses the fields as unknown), no promotion record (the request is held), no sign-in, no `init` |
 | `MOCK_LIMIT=my-api,web` | With `MOCK_ROLE=deploy`: `MOCK_TOKEN` is limited to these applications; changing another is `403 TOKEN_LIMITED` |
-| `MOCK_EXPIRES=9d` | `MOCK_TOKEN` expires that long after the mock started (`s`, `m`, `h`, `d`), then answers `401 TOKEN_EXPIRED`; `expired` for one that has already. Not for the root token (`MOCK_ROLE` unset) |
+| `MOCK_EXPIRES=9d` | `MOCK_TOKEN` expires that long after the mock started (`s`, `m`, `h`, `d`), then answers `401 TOKEN_EXPIRED`; `expired` for one that has already. Not for the root token (`MOCK_ROLE` unset or `admin`) |
 | `MOCK_NETWORK=1` | `network` on `GET /server` says a proxy the Docker daemon lacks, authorities of its own, the system's resolver and an ACME directory |
 | `MOCK_ADOPT=foreign` | `POST /server/backups/adopt` answers `409 FOREIGN_BUCKET` |
 | `MOCK_PROMOTING=1` | With `MOCK_STANDBY=1`: a promotion is running when the mock starts, twenty seconds an application |
@@ -785,14 +810,17 @@ it does not buffer responses, or followed logs will arrive in bursts.
   sign-in and sign-out) must carry `X-Shipwick-Request: 1`, which the app's
   fetch wrapper (and the restore upload) always sends. A cross-origin page cannot add a custom header without
   a CORS preflight, and the server never grants one. `Sec-Fetch-Site`, where
-  the browser sends it, must be `same-origin`. `SameSite=Strict` is the second
+  the browser sends it, must be `same-origin` (or `none`, a navigation the
+  person started). `SameSite=Strict` is the second
   layer. With `curl`, add `-H 'X-Shipwick-Request: 1'`.
 - **The proxy is not an open relay.** The target host comes only from
   `SHIPWICK_AGENT_URL` or `SHIPWICK_AGENTS`; a request chooses among the
   configured names and never supplies an address. Only `GET`, `HEAD`, `POST`, `PUT`, `DELETE` are
   accepted; the path must stay under `/api/v1/` and each segment must match
-  `[A-Za-z0-9._~-]` (no `..`, no encoded slashes). Only `Accept`,
-  `Content-Type` and, for an upload, `Content-Length` are forwarded to the
+  `[A-Za-z0-9._~-]`, with a `*.` prefix allowed for a wildcard certificate and
+  a `:port` suffix for a registry (no `..`, no encoded slashes). Only
+  `Accept`, `Content-Type` and, for a streamed upload, `Content-Length` — plus
+  `X-Shipwick-Passphrase` on `POST /import` alone — are forwarded to the
   agent: the browser's cookies never are. `X-Forwarded-For` is set by the
   proxy itself, for the agent's audit trail: the last entry of the header a
   reverse proxy in front of the dashboard sent, when the connection comes
@@ -800,8 +828,9 @@ it does not buffer responses, or followed logs will arrive in bursts.
   otherwise the connection's own address — a header a browser sends directly
   is ignored. A dashboard reached directly on a private network cannot tell
   the two apart; put it behind the proxy. `POST` bodies over 128 KB are
-  refused; a `PUT` body (a volume archive, a secret's value) is streamed
-  through and bounded by the agent's own limits.
+  refused, except `POST /import`, which — like every `PUT` body (a volume
+  archive, a secret's value) — is streamed through and bounded by the agent's
+  own limits.
 - **The token is never logged**, by the proxy or the session routes; upstream
   errors are reported by their error code, never by serializing the request.
 - **A 401 from the agent ends the session**: the proxy clears the cookie and

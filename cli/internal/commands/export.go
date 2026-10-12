@@ -564,7 +564,7 @@ func (c *cli) standbyStatus(ctx context.Context) error {
 			c.ui.Println(line)
 			c.ui.Failure("The last import failed %s: %s", ui.RelativeTime(deref(p.LastAt), c.now()), p.LastError)
 		case p.LastAt != nil:
-			c.ui.Println(fmt.Sprintf("%s; export #%d imported %s", line, p.LastExport, ui.RelativeTime(*p.LastAt, c.now())))
+			c.ui.Println(fmt.Sprintf("%s; export #%d imported %s", line, p.LastExportID, ui.RelativeTime(*p.LastAt, c.now())))
 		default:
 			c.ui.Println(line + "; none imported yet")
 		}

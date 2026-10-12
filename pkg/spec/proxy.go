@@ -197,6 +197,8 @@ func validateBasicAuth(verr *ValidationError, pr proxyRaw, appPath string) []Bas
 			verr.add(field+".username", fmt.Sprintf("is too long (%d characters)", len(a.Username)), fmt.Sprintf("at most %d", MaxUsernameBytes))
 		case strings.Contains(a.Username, ":") || hasControl(a.Username):
 			verr.add(field+".username", fmt.Sprintf("invalid value %q: must not contain a colon or control characters", a.Username), "admin")
+		case strings.ContainsAny(a.Username, "{}"):
+			verr.add(field+".username", fmt.Sprintf("invalid value %q: must not contain braces, which the proxy would read as a placeholder", a.Username), "admin")
 		case seen[account]:
 			verr.add(field+".username", fmt.Sprintf("%q is listed twice for the same path", a.Username), "one entry for each user of a path")
 		}

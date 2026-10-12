@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -306,9 +305,8 @@ func (s *Server) acceptDeployment(w http.ResponseWriter, d store.Deployment) {
 // and leaves v untouched. Unknown fields are rejected: a typo like "imgae"
 // must not silently redeploy the old image.
 func (s *Server) decodeOptionalBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "request body is too large or unreadable", nil)
+	body, ok := readBody(w, r, 4096)
+	if !ok {
 		return false
 	}
 	if len(bytes.TrimSpace(body)) == 0 {

@@ -51,11 +51,10 @@ func (s *Store) AddTrafficSamples(ctx context.Context, samples []TrafficSample) 
 // PruneTrafficSamples removes every sample of a minute before the given time
 // and reports how many.
 func (s *Store) PruneTrafficSamples(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM traffic_samples WHERE at < ?`, formatTime(before))
+	n, err := s.pruneSamplesOf(ctx, "traffic_samples", before)
 	if err != nil {
 		return 0, fmt.Errorf("prune traffic samples: %w", err)
 	}
-	n, _ := res.RowsAffected()
 	return n, nil
 }
 

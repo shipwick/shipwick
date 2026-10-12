@@ -344,20 +344,16 @@ func (e *Engine) checkMemory(ctx context.Context, now time.Time) {
 		e.dropAlerts(func(key alertKey) bool { return key.kind == api.AlertMemory })
 		return
 	}
-	apps, err := e.store.ListApplications(ctx)
+	active, err := e.store.ActiveDeployments(ctx)
 	if err != nil {
 		e.log.Warn("alerts: list applications", "error", err)
 		return
 	}
 	limited := map[alertKey]bool{}
-	for _, app := range apps {
-		if app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
+	for _, app := range active.Applications {
+		d, ok := active.Deployments[app.ID]
+		if !ok || app.DesiredState != api.DesiredRunning {
 			continue
-		}
-		d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
-		if err != nil {
-			e.log.Warn("alerts: load active deployment", "app", app.Name, "error", err)
-			return
 		}
 		limit := d.Spec.Resources.MemoryBytes
 		if limit <= 0 || d.StaticDigest != "" {

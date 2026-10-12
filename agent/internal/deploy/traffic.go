@@ -298,7 +298,7 @@ func (e *Engine) recordAccess(ctx context.Context, line []byte, now time.Time) {
 // deployments, and forgets what is remembered of applications that are gone.
 func (e *Engine) refreshTrafficOwners(ctx context.Context, now time.Time) {
 	t := e.traffic
-	apps, err := e.store.ListApplications(ctx)
+	active, err := e.store.ActiveDeployments(ctx)
 	if err != nil {
 		// The old table serves until the next attempt.
 		e.log.Warn("traffic: list applications", "error", err)
@@ -308,14 +308,11 @@ func (e *Engine) refreshTrafficOwners(ctx context.Context, now time.Time) {
 		return
 	}
 	owners := map[string][]trafficOwner{}
-	exists := make(map[int64]bool, len(apps))
-	for _, app := range apps {
+	exists := make(map[int64]bool, len(active.Applications))
+	for _, app := range active.Applications {
 		exists[app.ID] = true
-		if app.ActiveDeploymentID == nil {
-			continue
-		}
-		d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
-		if err != nil {
+		d, ok := active.Deployments[app.ID]
+		if !ok {
 			continue
 		}
 		owner := trafficOwner{appID: app.ID, path: strings.TrimRight(d.Spec.Path, "/")}
@@ -565,7 +562,7 @@ func (e *Engine) trafficAt(ctx context.Context, name string, window, step time.D
 	var totals trafficCounts
 	for _, start := range starts {
 		totals.add(buckets[start])
-		out.Points = append(out.Points, api.TrafficPoint{T: time.Unix(start, 0).UTC(), TrafficCounts: buckets[start].view()})
+		out.Points = append(out.Points, api.TrafficPoint{At: time.Unix(start, 0).UTC(), TrafficCounts: buckets[start].view()})
 	}
 	out.Totals = totals.view()
 	return out, nil

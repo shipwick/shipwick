@@ -85,6 +85,11 @@ type Runtime interface {
 	// FollowOutput streams the lines a container writes to standard output
 	// from `since` on, until it stops. The proxy's access log is read with it.
 	FollowOutput(ctx context.Context, id string, since time.Time, emit func(line []byte)) error
+	// ImageIDs maps every tag the daemon has to the ID of the image it names;
+	// TagImage points a tag at an image, moving it if it exists. A refused
+	// upload is undone with the two: see LoadImage in localimages.go.
+	ImageIDs(ctx context.Context) (map[string]string, error)
+	TagImage(ctx context.Context, id, ref string) error
 }
 
 type Options struct {

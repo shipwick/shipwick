@@ -402,8 +402,10 @@ func under(path string) []string {
 // literal keeps the proxy from reading text as its own placeholders: a header
 // value such as {env.HOME} or {file./data/…} would be filled in from the
 // proxy's own environment and files, and those hold the certificates' keys.
+// Both braces are escaped: the proxy drops the backslash of \} as it does
+// that of \{, so a value written with one would lose it on the way out.
 func literal(s string) string {
-	return strings.ReplaceAll(s, "{", `\{`)
+	return strings.NewReplacer("{", `\{`, "}", `\}`).Replace(s)
 }
 
 // responseHeaders sets headers when the response is written, not before:
@@ -456,7 +458,9 @@ func gateFor(r Route) any {
 		path := r.BasicAuth[i].Path
 		var accounts []any
 		for ; i < len(r.BasicAuth) && r.BasicAuth[i].Path == path; i++ {
-			accounts = append(accounts, obj{"username": r.BasicAuth[i].Username, "password": r.BasicAuth[i].Hash})
+			// Free text like a header value: the proxy's own placeholders
+			// would be filled in before the comparison.
+			accounts = append(accounts, obj{"username": literal(r.BasicAuth[i].Username), "password": r.BasicAuth[i].Hash})
 		}
 		route := obj{
 			"group": "accounts",

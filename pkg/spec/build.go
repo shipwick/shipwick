@@ -3,6 +3,7 @@ package spec
 import (
 	"fmt"
 	"path"
+	"reflect"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -29,6 +30,21 @@ func LocalImagePrefix(app string) string {
 	return LocalImageHost + "/" + app + ":"
 }
 
+// ValidateLocalImage refuses a local image that is another application's. A
+// shipwick.local image is on the server because that application's project
+// sent it, and a token limited to one application must not get to run what
+// was built for another; an image from a registry is anyone's to name.
+func ValidateLocalImage(image, app string) error {
+	if !IsLocalImage(image) || strings.HasPrefix(image, LocalImagePrefix(app)) {
+		return nil
+	}
+	owner := strings.TrimPrefix(image, LocalImageHost+"/")
+	if i := strings.IndexAny(owner, ":@"); i >= 0 {
+		owner = owner[:i]
+	}
+	return fmt.Errorf("%s was built for %s and runs for %s alone; run shipwick deploy from that project to deploy it, or name an image of %s", image, owner, owner, app)
+}
+
 // buildRaw accepts `build: .` and `build: {context: ., dockerfile: Dockerfile}`.
 type buildRaw struct {
 	Context    string `yaml:"context"`
@@ -44,6 +60,11 @@ func (b *buildRaw) UnmarshalYAML(node *yaml.Node) error {
 		b.Context = node.Value
 		return nil
 	case yaml.MappingNode:
+		// As strict as the document around it: `dockerfil: x` must not be
+		// dropped in silence and build the default Dockerfile.
+		if unknown := unknownKeys(node, reflect.TypeOf(b)); len(unknown) > 0 {
+			return &yaml.TypeError{Errors: unknown}
+		}
 		type plain buildRaw
 		return node.Decode((*plain)(b))
 	}
@@ -66,14 +87,14 @@ func (r raw) validateBuild(verr *ValidationError) *Build {
 	if context == "" {
 		context = "."
 	}
-	cleaned, err := validateBuildPath(context)
+	cleaned, err := validateBuildPath(context, "deploy.yaml", "the directory of deploy.yaml")
 	if err != nil {
 		verr.add("build.context", err.Error(), ". for the directory of deploy.yaml, or a folder in it such as api")
 	}
 	b.Context = cleaned
 
 	if dockerfile := strings.TrimSpace(r.Build.Dockerfile); dockerfile != "" {
-		cleaned, err := validateBuildPath(dockerfile)
+		cleaned, err := validateBuildPath(dockerfile, "the context", "the context")
 		if err != nil {
 			verr.add("build.dockerfile", err.Error(), "Dockerfile, or a file in the context such as docker/Dockerfile.prod")
 		}
@@ -93,17 +114,20 @@ func (r raw) validateBuild(verr *ValidationError) *Build {
 
 // validateBuildPath accepts a relative path inside the project and returns it
 // cleaned, with forward slashes: what `docker build` takes on every platform.
-func validateBuildPath(p string) (string, error) {
+// relativeTo and inside name, for the messages, what the path is relative to
+// and what it must stay in: deploy.yaml and its directory for the context,
+// the context for the Dockerfile.
+func validateBuildPath(p, relativeTo, inside string) (string, error) {
 	if strings.ContainsAny(p, "\x00\r\n") {
 		return "", fmt.Errorf("invalid value %q: must not contain control characters", p)
 	}
 	slashed := strings.ReplaceAll(p, `\`, "/")
 	if strings.HasPrefix(slashed, "/") || strings.HasPrefix(slashed, "~") || isDrivePath(slashed) {
-		return "", fmt.Errorf("invalid value %q: must be relative to deploy.yaml", p)
+		return "", fmt.Errorf("invalid value %q: must be relative to %s", p, relativeTo)
 	}
 	cleaned := path.Clean(slashed)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("invalid value %q: must stay inside the directory of deploy.yaml", p)
+		return "", fmt.Errorf("invalid value %q: must stay inside %s", p, inside)
 	}
 	return cleaned, nil
 }

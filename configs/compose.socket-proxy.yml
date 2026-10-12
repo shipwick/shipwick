@@ -80,6 +80,7 @@ services:
       #   exec/<id>/start            the same: this starts what the line above prepared
       #   images/create              pulling an image; nothing is ever imported or built
       #   images/load                an image the CLI built and sent; an import
+      #   images/<id>/tag            a tag a refused upload moved, pointed back at its image
       #   networks/create            the two networks, at the first start
       #   networks/<name>/connect, disconnect   a replica's names on the services network
       #   volumes/create             an application's volumes
@@ -89,6 +90,7 @@ services:
         |exec/[a-f0-9]+/start\
         |images/create\
         |images/load\
+        |images/.+/tag\
         |networks/create\
         |networks/[a-zA-Z0-9_.-]+/(connect|disconnect)\
         |volumes/create)"

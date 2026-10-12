@@ -89,6 +89,9 @@ func (c *cli) serverCommand() *cobra.Command {
 				fields = append(fields, [2]string{"Log archive", describeLogArchive(*info.LogArchive)})
 			}
 			c.ui.Fields(fields)
+			if gap := c.versionGap(info.AgentVersion); gap != "" {
+				c.ui.Println(gap)
+			}
 			c.printAlerts(info.Alerts)
 			return nil
 		},

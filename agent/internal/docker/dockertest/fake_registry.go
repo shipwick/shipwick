@@ -96,5 +96,5 @@ func (f *Fake) RegistryLogin(_ context.Context, auth docker.RegistryAuth) error 
 func (f *Fake) PruneImage(image string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.local, image)
+	f.dropRef(image)
 }

@@ -580,7 +580,7 @@ func TestAScheduledExportGoesToTheBucketAndAStandbyImportsTheNewest(t *testing.T
 		t.Error("the standby's database is running, or does not hold the data")
 	}
 	standby, _ := b.engine.Standby(ctx)
-	if standby.Pull == nil || standby.Pull.LastExport != runs[0].ID || standby.Pull.LastError != "" || standby.Pull.Schedule != "*/15 * * * *" {
+	if standby.Pull == nil || standby.Pull.LastExportID != runs[0].ID || standby.Pull.LastError != "" || standby.Pull.Schedule != "*/15 * * * *" {
 		t.Errorf("pull = %+v", standby.Pull)
 	}
 

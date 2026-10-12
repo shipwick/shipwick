@@ -60,22 +60,18 @@ func (e *Engine) startSampler() {
 // application, in one transaction, and once an hour drops what is older than
 // the retention period. Time is a parameter so tests can drive it.
 func (e *Engine) sample(ctx context.Context, now time.Time) {
-	apps, err := e.store.ListApplications(ctx)
+	active, err := e.store.ActiveDeployments(ctx)
 	if err != nil {
 		e.log.Warn("sampler: list applications", "error", err)
 		return
 	}
 	var rows []store.MetricSample
-	for _, app := range apps {
-		if app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
+	for _, app := range active.Applications {
+		d, ok := active.Deployments[app.ID]
+		if !ok || app.DesiredState != api.DesiredRunning {
 			continue
 		}
-		replicas, err := e.store.ListReplicas(ctx, *app.ActiveDeploymentID)
-		if err != nil {
-			e.log.Warn("sampler: list replicas", "app", app.Name, "error", err)
-			continue
-		}
-		for _, r := range replicas {
+		for _, r := range active.Replicas[d.ID] {
 			cur, err := e.rt.Stats(ctx, r.ContainerID, false)
 			if err != nil || cur.Read.IsZero() {
 				continue // not running, or just gone: nothing to record
@@ -143,7 +139,7 @@ func (e *Engine) MetricsHistory(ctx context.Context, name string, window, step t
 	out := api.MetricsHistory{
 		Application: name,
 		Since:       since,
-		Step:        shortDuration(step),
+		StepSeconds: int(step / time.Second),
 		Series:      []api.MetricsSeries{},
 		Limits:      api.MetricsLimits{CPU: d.Spec.Resources.CPU, MemoryBytes: d.Spec.Resources.MemoryBytes},
 	}

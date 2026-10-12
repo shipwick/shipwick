@@ -119,7 +119,7 @@ func logArchiveView(application string, a store.LogArchive) api.LogArchiveEntry 
 		Application:  application,
 		Kind:         a.Kind,
 		DeploymentID: a.DeploymentID,
-		Deployment:   a.Sequence,
+		Sequence:     a.Sequence,
 		Version:      a.Version,
 		Replica:      a.Replica,
 		Job:          a.Job,
@@ -261,7 +261,7 @@ func (e *Engine) SearchLogs(ctx context.Context, name string, q LogSearch) (api.
 				return result, err
 			}
 			for _, line := range found {
-				result.Lines = append(result.Lines, api.LogMatch{LogLine: line, DeploymentID: &d.ID, Deployment: d.Sequence})
+				result.Lines = append(result.Lines, api.LogMatch{LogLine: line, DeploymentID: &d.ID, Sequence: d.Sequence})
 			}
 			if more {
 				result.Next = searchCursor{live: true, replica: r.Index, before: found[len(found)-1].Time}.String()
@@ -305,7 +305,7 @@ func (e *Engine) SearchLogs(ctx context.Context, name string, q LogSearch) (api.
 		}
 		for _, line := range found {
 			id := a.ID
-			result.Lines = append(result.Lines, api.LogMatch{LogLine: line, ArchiveID: &id, DeploymentID: a.DeploymentID, Deployment: a.Sequence, Job: a.Job, RunID: a.RunID})
+			result.Lines = append(result.Lines, api.LogMatch{LogLine: line, ArchiveID: &id, DeploymentID: a.DeploymentID, Sequence: a.Sequence, Job: a.Job, RunID: a.RunID})
 		}
 		if next >= 0 {
 			result.Next = searchCursor{entry: a.ID, line: next}.String()

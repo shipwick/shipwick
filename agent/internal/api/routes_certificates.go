@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -52,9 +51,8 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 // replacing what is there. The key is in the body and nowhere else
 // afterwards: not in the log, not in the response, not in any error.
 func (s *Server) handleSetCertificate(w http.ResponseWriter, r *http.Request, hostname string) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCertificateBody))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, api.CodeInvalidRequest, "request body is too large or unreadable", nil)
+	body, ok := readBody(w, r, maxCertificateBody)
+	if !ok {
 		return
 	}
 	var req api.SetCertificateRequest

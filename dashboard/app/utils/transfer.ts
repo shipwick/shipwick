@@ -159,7 +159,7 @@ export function pollRetryable(error: { status: number, code: string }): boolean 
 export function describePull(pull: StandbyPull, now: number = Date.now()): string {
   const schedule = describeSchedule(pull.schedule)
   if (!pull.last_at) return `${schedule}, nothing fetched yet`
-  const which = pull.last_export > 0 ? ` (export #${pull.last_export})` : ''
+  const which = pull.last_export_id > 0 ? ` (export #${pull.last_export_id})` : ''
   return `${schedule}, last ${formatRelativeTime(pull.last_at, now)}${which}`
 }
 

@@ -43,7 +43,7 @@ func TestMetricsHistoryEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", status, body)
 	}
 	h := decode[api.MetricsHistory](t, body)
-	if h.Application != "my-api" || h.Step != "30s" || h.Limits.CPU != 1 || h.Limits.MemoryBytes != 512<<20 {
+	if h.Application != "my-api" || h.StepSeconds != 30 || h.Limits.CPU != 1 || h.Limits.MemoryBytes != 512<<20 {
 		t.Errorf("unexpected history: %+v", h)
 	}
 	if since := now.Sub(h.Since); since < 59*time.Minute || since > 61*time.Minute {
@@ -64,7 +64,7 @@ func TestMetricsHistoryEndpoint(t *testing.T) {
 		Data map[string]json.RawMessage `json:"data"`
 	}
 	json.Unmarshal(body, &raw)
-	for _, field := range []string{"application", "since", "step", "series", "limits"} {
+	for _, field := range []string{"application", "since", "step_seconds", "series", "limits"} {
 		if _, ok := raw.Data[field]; !ok {
 			t.Errorf("missing field %q in %s", field, body)
 		}
@@ -78,12 +78,12 @@ func TestMetricsHistoryEndpoint(t *testing.T) {
 
 	// A wider window is served in coarser buckets.
 	_, body = f.do("GET", "/api/v1/applications/my-api/metrics/history?since=24h", "")
-	if h := decode[api.MetricsHistory](t, body); h.Step != "5m" || len(h.Series[0].Points) < 2 || len(h.Series[0].Points) > 3 {
-		t.Errorf("24h: step=%s points=%d; ten minutes of samples make two or three 5m buckets", h.Step, len(h.Series[0].Points))
+	if h := decode[api.MetricsHistory](t, body); h.StepSeconds != 300 || len(h.Series[0].Points) < 2 || len(h.Series[0].Points) > 3 {
+		t.Errorf("24h: step=%d points=%d; ten minutes of samples make two or three 5m buckets", h.StepSeconds, len(h.Series[0].Points))
 	}
 	_, body = f.do("GET", "/api/v1/applications/my-api/metrics/history?since=7d", "")
-	if h := decode[api.MetricsHistory](t, body); h.Step != "1h" || len(h.Series[0].Points) < 2 {
-		t.Errorf("7d: step=%s points=%d; the two-day-old sample is in the week", h.Step, len(h.Series[0].Points))
+	if h := decode[api.MetricsHistory](t, body); h.StepSeconds != 3600 || len(h.Series[0].Points) < 2 {
+		t.Errorf("7d: step=%d points=%d; the two-day-old sample is in the week", h.StepSeconds, len(h.Series[0].Points))
 	}
 }
 

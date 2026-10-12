@@ -26,7 +26,7 @@ var installerVariables = []string{
 	"SHIPWICK_WEBHOOK_URL", "SHIPWICK_WEBHOOK_SECRET",
 	"SHIPWICK_CLOUDFLARE_API_TOKEN",
 	"SHIPWICK_ALERT_MEMORY_PERCENT", "SHIPWICK_ALERT_DISK_PERCENT",
-	"SHIPWICK_BACKUP_PASSPHRASE",
+	"SHIPWICK_BACKUP_DIR", "SHIPWICK_BACKUP_PASSPHRASE",
 	"SHIPWICK_BACKUP_S3_ENDPOINT", "SHIPWICK_BACKUP_S3_BUCKET", "SHIPWICK_BACKUP_S3_ACCESS_KEY_ID", "SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY", "SHIPWICK_BACKUP_S3_REGION", "SHIPWICK_BACKUP_S3_PREFIX",
 	"SHIPWICK_EXPORT_SCHEDULE", "SHIPWICK_EXPORT_KEEP",
 	"SHIPWICK_STANDBY_SCHEDULE",
@@ -71,7 +71,7 @@ func parseEnvChanges(assignments, unset []string) ([]envChange, error) {
 		case name == "SHIPWICK_ENCRYPTION_KEY":
 			return errors.New("SHIPWICK_ENCRYPTION_KEY is replaced with: shipwick server rotate-key")
 		case !variableName.MatchString(name) || !configurable(name):
-			return fmt.Errorf("%s is not a setting of the agent; the settings are the variables of the handbook's table (Installation), which the installer also lists with --help", name)
+			return fmt.Errorf("%s is not a setting of the agent; the settings are the ones install.sh --help lists, and the two hostnames", name)
 		case seen[name]:
 			return fmt.Errorf("%s is given twice", name)
 		}

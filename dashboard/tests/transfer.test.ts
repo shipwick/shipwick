@@ -66,7 +66,7 @@ describe('an import that is over', () => {
 
 describe('the standby', () => {
   const empty: Standby = { applications: [], records: [], pull: null }
-  const pull = { schedule: '15 * * * *', last_at: '2026-03-01T04:15:11Z', last_export: 42, last_error: '' }
+  const pull = { schedule: '15 * * * *', last_at: '2026-03-01T04:15:11Z', last_export_id: 42, last_error: '' }
 
   it('is one when it holds stopped applications or fetches exports on a schedule', () => {
     expect(isStandby(empty)).toBe(false)
@@ -77,8 +77,8 @@ describe('the standby', () => {
 
   it('describes the scheduled fetch and what it imported last', () => {
     expect(describePull(pull, now)).toBe('hourly at :15, last 14m ago (export #42)')
-    expect(describePull({ ...pull, last_at: null, last_export: 0 }, now)).toBe('hourly at :15, nothing fetched yet')
-    expect(describePull({ ...pull, schedule: '0 5 * * *', last_export: 0 }, now)).toBe('daily at 05:00 UTC, last 14m ago')
+    expect(describePull({ ...pull, last_at: null, last_export_id: 0 }, now)).toBe('hourly at :15, nothing fetched yet')
+    expect(describePull({ ...pull, schedule: '0 5 * * *', last_export_id: 0 }, now)).toBe('daily at 05:00 UTC, last 14m ago')
   })
 
   it('tells started from ready after a promotion', () => {

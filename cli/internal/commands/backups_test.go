@@ -362,11 +362,11 @@ func TestBackupsDownloadWritesOneArchivePerVolume(t *testing.T) {
 
 func TestBackupsRm(t *testing.T) {
 	f := newBackupAgent(t, backupRun(13, api.BackupSucceeded, time.Hour))
-	out, _, err := f.run(t.TempDir(), "backups", "rm", "db", "13")
+	out, _, err := f.run(t.TempDir(), "backups", "rm", "db", "13", "--yes")
 	if err != nil || !strings.Contains(out, "✓ Removed backup #13 of db") || f.called() != "DELETE /api/v1/applications/db/backups/13" {
 		t.Fatalf("backups rm: %v\n%s\n%s", err, out, f.called())
 	}
-	if _, _, err := f.run(t.TempDir(), "backups", "rm", "db", "thirteen"); err == nil {
+	if _, _, err := f.run(t.TempDir(), "backups", "rm", "db", "thirteen", "--yes"); err == nil {
 		t.Error("an id that is not a number was accepted")
 	}
 }

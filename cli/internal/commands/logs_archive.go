@@ -33,9 +33,9 @@ func (a *archiveFlags) register(cmd *cobra.Command) {
 	cmd.Flags().BoolVarP(&a.previous, "previous", "p", false, "show the output of the last container that ended: the one that crashed, or was replaced")
 	cmd.Flags().BoolVar(&a.list, "list", false, "list what is kept of ended containers and runs")
 	cmd.Flags().Int64Var(&a.id, "id", 0, "show one entry of --list")
-	cmd.Flags().IntVar(&a.deployment, "deployment", 0, "only the output of this deployment (its #number in `shipwick status`), kept or current")
+	cmd.Flags().IntVar(&a.deployment, "deployment", 0, "only the output of this deployment (its #number in shipwick status), kept or current")
 	cmd.Flags().IntVar(&a.replica, "replica", 0, "only the output of this replica")
-	cmd.Flags().Int64Var(&a.run, "run", 0, "show the output of this run of a job or a command (its id in `shipwick jobs`)")
+	cmd.Flags().Int64Var(&a.run, "run", 0, "show the output of this run of a job or a command (its id in shipwick jobs)")
 	cmd.Flags().StringVar(&a.search, "search", "", "show the lines that contain this text, whatever its case, kept or current")
 	cmd.Flags().StringVar(&a.since, "since", "", "only lines from then on, kept or current: 30m, 2h, 7d, a date or a time in RFC 3339")
 	cmd.Flags().StringVar(&a.until, "until", "", "only lines up to then; takes what --since takes")
@@ -201,10 +201,10 @@ func entrySource(e api.LogArchiveEntry) string {
 		}
 		return fmt.Sprintf("run %d of %s", id, e.Job)
 	}
-	if e.Deployment == 0 {
+	if e.Sequence == 0 {
 		return fmt.Sprintf("replica %d", e.Replica)
 	}
-	return fmt.Sprintf("#%d replica %d", e.Deployment, e.Replica)
+	return fmt.Sprintf("#%d replica %d", e.Sequence, e.Replica)
 }
 
 // describeEnd says why the container of an entry ended.
@@ -371,7 +371,7 @@ func (c *cli) queryLogs(ctx context.Context, cl *client.Client, name string, q c
 // matchSource names where a found line comes from: an entry of the archive,
 // by its id, or a container that exists.
 func matchSource(m api.LogMatch) string {
-	what := fmt.Sprintf("#%d replica %d", m.Deployment, m.Replica)
+	what := fmt.Sprintf("#%d replica %d", m.Sequence, m.Replica)
 	if m.RunID != nil {
 		what = fmt.Sprintf("run %d of %s", *m.RunID, m.Job)
 	}

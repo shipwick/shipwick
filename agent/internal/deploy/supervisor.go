@@ -116,17 +116,25 @@ func (s *supervisor) tick(ctx context.Context, now time.Time) {
 		return
 	}
 	snap := newContainerSnapshot(listed)
-	apps, err := s.e.store.ListApplications(ctx)
+	state, err := s.e.store.ActiveDeployments(ctx)
 	if err != nil {
 		s.logErr(ctx, "list applications", err)
 		return
 	}
+	apps := state.Applications
 
 	active := map[int64]bool{}
 	for _, app := range apps {
 		if app.ActiveDeploymentID != nil && app.DesiredState == api.DesiredRunning {
 			active[*app.ActiveDeploymentID] = true
 		}
+	}
+	// The deployments as read with the list, by ID: a record is immutable
+	// in everything the supervisor reads of it, so an application that still
+	// points at the same deployment under its lock needs no second read.
+	snap.deployments = make(map[int64]store.Deployment, len(state.Deployments))
+	for _, d := range state.Deployments {
+		snap.deployments[d.ID] = d
 	}
 	// Before the applications, not after: a replica this tick recreates has
 	// bookkeeping the list predates, and forgetting it would route to the
@@ -200,16 +208,21 @@ func (s *supervisor) syncProxy(ctx context.Context, snap *containerSnapshot) {
 // caller holds the application's lock; the containers were listed before it
 // was taken, so a deployment that finished in between has replicas the list
 // does not have and retired ones it still has. Docker is asked by ID about
-// both before anything is concluded (see snapshot.go).
+// both before anything is concluded (see snapshot.go). The application is
+// read again under the lock, and so are its replicas, which a deployment that
+// finished in between has changed; its deployment is taken from the tick's
+// read when it is still the same one.
 func (s *supervisor) superviseApp(ctx context.Context, now time.Time, app store.Application, snap *containerSnapshot) {
 	app, err := s.e.store.GetApplication(ctx, app.Name)
 	if err != nil || app.ActiveDeploymentID == nil || app.DesiredState != api.DesiredRunning {
 		return
 	}
-	d, err := s.e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
-	if err != nil {
-		s.logErr(ctx, "load active deployment", err)
-		return
+	d, known := snap.deployments[*app.ActiveDeploymentID]
+	if !known {
+		if d, err = s.e.store.GetDeployment(ctx, *app.ActiveDeploymentID); err != nil {
+			s.logErr(ctx, "load active deployment", err)
+			return
+		}
 	}
 	if d.StaticDigest != "" {
 		return // the proxy serves it from a folder: no replicas to keep alive

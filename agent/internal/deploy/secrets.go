@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -113,12 +114,16 @@ func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (resolved spe
 	if app.Proxy != nil {
 		accounts = app.Proxy.BasicAuth
 	}
-	values := make([]string, 0, len(app.Env)+len(accounts))
+	logSecrets := app.SecretLogOptions()
+	values := make([]string, 0, len(app.Env)+len(accounts)+len(logSecrets))
 	for _, value := range app.Env {
 		values = append(values, value)
 	}
 	for _, a := range accounts {
 		values = append(values, a.Password)
+	}
+	for _, name := range logSecrets {
+		values = append(values, app.Logging.Options[name])
 	}
 
 	var names []string
@@ -199,6 +204,15 @@ func (e *Engine) resolveSecrets(ctx context.Context, app spec.App) (resolved spe
 			}
 		}
 		app.Proxy = &proxy
+	}
+
+	if len(logSecrets) > 0 {
+		logging := *app.Logging
+		logging.Options = maps.Clone(app.Logging.Options)
+		for _, name := range logSecrets {
+			logging.Options[name], _ = fill(logging.Options[name], MissingSecret{Field: "logging.options." + name})
+		}
+		app.Logging = &logging
 	}
 
 	if len(missing) > 0 {

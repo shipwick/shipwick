@@ -136,13 +136,13 @@ func TestAccessRevokeFindsTheRuleByWhoItIsFor(t *testing.T) {
 		{ID: 4, Kind: api.AccessGroup, Subject: "ada@example.com", Role: api.RoleRead},
 		{ID: 7, Kind: api.AccessEmail, Subject: "ada@example.com", Role: api.RoleAdmin},
 	}
-	out, _, err := a.run(t.TempDir(), "access", "revoke", "ADA@example.com")
+	out, _, err := a.run(t.TempDir(), "access", "revoke", "ADA@example.com", "--yes")
 	if err != nil || len(a.revoked) != 1 || a.revoked[0] != "7" {
 		t.Fatalf("access revoke: %v, revoked %v\n%s", err, a.revoked, out)
 	}
 	assertInOrder(t, out, []string{"Revoked the rule for ada@example.com", "signed out with their next request"})
 
-	_, _, err = a.run(t.TempDir(), "access", "revoke", "group:nobody")
+	_, _, err = a.run(t.TempDir(), "access", "revoke", "group:nobody", "--yes")
 	if got := Render(err); got != "Error: there is no rule for group:nobody\n\nList the rules with: shipwick access ls" || len(a.revoked) != 1 {
 		t.Errorf("a rule that is not there: %q, revoked %v", got, a.revoked)
 	}
@@ -190,7 +190,7 @@ func TestAccessSaysWhenTheAgentHasNoSignIn(t *testing.T) {
 	t.Cleanup(old.Close)
 	a := &fakeAgent{t: t, srv: old}
 	want := "Error: the agent is older than this shipwick and has no sign-in: it accepts tokens only\n\nCompare versions with: shipwick server status"
-	for _, args := range [][]string{{"access", "ls"}, {"access", "grant", "ada@example.com", "--role", "read"}, {"access", "revoke", "ada@example.com"},
+	for _, args := range [][]string{{"access", "ls"}, {"access", "grant", "ada@example.com", "--role", "read"}, {"access", "revoke", "ada@example.com", "--yes"},
 		{"access", "sessions"}, {"access", "signout", "ada@example.com"}} {
 		if _, _, err := a.run(t.TempDir(), args...); Render(err) != want {
 			t.Errorf("%v:\n got %q\nwant %q", args, Render(err), want)

@@ -84,10 +84,10 @@ func TestSearchFindsTextInTheArchiveAndInTheRunningReplicasWhateverItsCase(t *te
 	}
 
 	live, kept := result.Lines[0], result.Lines[3]
-	if live.ArchiveID != nil || live.DeploymentID == nil || *live.DeploymentID != v2.ID || live.Deployment != v2.Sequence || live.Replica != 2 || live.Time.IsZero() || live.Stream != "stdout" {
+	if live.ArchiveID != nil || live.DeploymentID == nil || *live.DeploymentID != v2.ID || live.Sequence != v2.Sequence || live.Replica != 2 || live.Time.IsZero() || live.Stream != "stdout" {
 		t.Errorf("a line of a running replica: %+v", live)
 	}
-	if kept.ArchiveID == nil || *kept.DeploymentID != v1.ID || kept.Deployment != v1.Sequence || kept.Replica != 1 || kept.Container == "" || kept.Time.IsZero() {
+	if kept.ArchiveID == nil || *kept.DeploymentID != v1.ID || kept.Sequence != v1.Sequence || kept.Replica != 1 || kept.Container == "" || kept.Time.IsZero() {
 		t.Errorf("a line of the archive: %+v", kept)
 	}
 }

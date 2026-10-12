@@ -26,7 +26,7 @@ import (
 // anything is sent to the server.
 type installOptions struct {
 	agentDomain, dashboardDomain string
-	context                      string
+	name                         string // the context the server is saved as
 	version                      string
 }
 
@@ -190,7 +190,7 @@ token is unchanged then, and not printed again.`,
 	}
 	cmd.Flags().StringVar(&opts.agentDomain, "agent-domain", "", "hostname for the API, e.g. agent.example.com")
 	cmd.Flags().StringVar(&opts.dashboardDomain, "dashboard-domain", "", "hostname for the dashboard, e.g. dashboard.example.com")
-	cmd.Flags().StringVar(&opts.context, "context", "", "name to save the server under (default: its hostname)")
+	cmd.Flags().StringVar(&opts.name, "name", "", "name to save the server under as a context (default: its hostname)")
 	cmd.Flags().StringVar(&opts.version, "version", "", "release to install, e.g. v0.4.0 (default: the latest)")
 	return cmd
 }
@@ -296,7 +296,7 @@ func (c *cli) saveInstalledContext(t sshTarget, opts installOptions, token strin
 	if err != nil {
 		return err
 	}
-	name := opts.context
+	name := opts.name
 	if name == "" {
 		name = t.host
 	}

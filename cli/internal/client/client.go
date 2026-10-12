@@ -42,10 +42,17 @@ func New(baseURL, token string) (*Client, error) {
 	return &Client{
 		base:   u,
 		token:  token,
-		http:   &http.Client{Timeout: requestTimeout},
-		stream: &http.Client{},
+		http:   &http.Client{Timeout: requestTimeout, CheckRedirect: stayPut},
+		stream: &http.Client{CheckRedirect: stayPut},
 	}, nil
 }
+
+// stayPut keeps a redirect from being followed. The agent never answers with
+// one, so a redirect is something in front of it, and Go would send the
+// token along to the same host on any port and any scheme, plain HTTP
+// included — to a URL the user never saved. The response is returned as it
+// came, and decodeError says where it pointed.
+func stayPut(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // URL returns the agent's base URL.
 func (c *Client) URL() string { return c.base.String() }
@@ -177,7 +184,7 @@ func callVia[T any](ctx context.Context, c *Client, httpClient *http.Client, met
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return zero, decodeError(resp)
 	}
 	if resp.StatusCode == http.StatusNoContent {
@@ -232,6 +239,19 @@ func (c *Client) send(ctx context.Context, httpClient *http.Client, method, path
 }
 
 func decodeError(resp *http.Response) error {
+	if resp.StatusCode < 400 {
+		// A redirect, not followed (stayPut): the agent does not redirect, so
+		// something in front of it answered, and the token stays here.
+		agent := "the agent"
+		if resp.Request != nil && resp.Request.URL != nil {
+			agent += " at " + resp.Request.URL.Scheme + "://" + resp.Request.URL.Host
+		}
+		return &APIError{
+			Status:  resp.StatusCode,
+			Code:    api.CodeInternal,
+			Message: fmt.Sprintf("%s answered with a redirect (HTTP %d) to %s, which was not followed and did not receive the token: check the saved URL, and what proxy stands in front of the agent", agent, resp.StatusCode, resp.Header.Get("Location")),
+		}
+	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var envelope api.ErrorResponse
 	if err := json.Unmarshal(data, &envelope); err != nil || envelope.Error.Code == "" {

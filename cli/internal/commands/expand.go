@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -141,6 +142,10 @@ func (x *expander) walkRoot(n *yaml.Node) {
 			plain = x.walkEnv(value)
 			continue
 		}
+		if key == "logging" {
+			x.walkLogging(value)
+			continue
+		}
 		x.walk(value, key == "env")
 	}
 	if !many {
@@ -161,6 +166,25 @@ func (x *expander) walkEnv(n *yaml.Node) (plain []string) {
 		}
 	}
 	return plain
+}
+
+// walkLogging walks the logging block, whose secrets are the options
+// spec.LogSecretOptions names: the agent fills those in as it does env values.
+func (x *expander) walkLogging(n *yaml.Node) {
+	if n.Kind != yaml.MappingNode {
+		x.walk(n, false)
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key, value := n.Content[i].Value, n.Content[i+1]
+		if key != "options" || value.Kind != yaml.MappingNode {
+			x.walk(value, false)
+			continue
+		}
+		for j := 0; j+1 < len(value.Content); j += 2 {
+			x.walk(value.Content[j+1], slices.Contains(spec.LogSecretOptions, value.Content[j].Value))
+		}
+	}
 }
 
 // walkProxy walks the proxy block, whose one secret is the password of a

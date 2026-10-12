@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -75,8 +76,9 @@ func open(aead cipher.AEAD, name, stored string) (string, error) {
 }
 
 // sealSpec returns app with its secrets encrypted, ready to be stored: the
-// environment values and the basic-auth passwords of the proxy block. What
-// the caller holds is left alone: the engine still needs the values.
+// environment values, the basic-auth passwords of the proxy block and the
+// credentials among the logging options. What the caller holds is left
+// alone: the engine still needs the values.
 func (s *Store) sealSpec(app spec.App) (spec.App, error) {
 	if s.aead == nil {
 		return app, nil
@@ -104,7 +106,25 @@ func (s *Store) sealSpec(app spec.App) (spec.App, error) {
 		}
 		app.Proxy = &proxy
 	}
+	if secrets := app.SecretLogOptions(); len(secrets) > 0 {
+		logging := *app.Logging
+		logging.Options = maps.Clone(app.Logging.Options)
+		for _, name := range secrets {
+			sealed, err := seal(s.aead, logOptionName(name), logging.Options[name])
+			if err != nil {
+				return spec.App{}, err
+			}
+			logging.Options[name] = sealed
+		}
+		app.Logging = &logging
+	}
 	return app, nil
+}
+
+// logOptionName is what a credential among the logging options is sealed
+// under: its field in deploy.yaml.
+func logOptionName(option string) string {
+	return "logging.options." + option
 }
 
 // passwordName is what a basic-auth password is sealed under, in the place of
@@ -118,6 +138,9 @@ func passwordName(i int) string {
 func (s *Store) openSpec(app *spec.App) error {
 	if s.aead == nil {
 		return nil
+	}
+	if err := s.openLogging(app); err != nil {
+		return err
 	}
 	for name, value := range app.Env {
 		if !isSealed(value) {
@@ -142,6 +165,27 @@ func (s *Store) openSpec(app *spec.App) error {
 			return err
 		}
 		app.Proxy.BasicAuth[i].Password = plain
+	}
+	return nil
+}
+
+// openLogging decrypts, in place, the credentials among the logging options.
+// A value without the prefix was written by a release that stored them as
+// they were: it is read as it is and sealed by the next deployment of the
+// application, which the changelog asks for. There is no pass over old
+// records as there is for env: a token that happens to start with the prefix
+// could not be told from a sealed one, and the records are few.
+func (s *Store) openLogging(app *spec.App) error {
+	for _, name := range app.SecretLogOptions() {
+		value := app.Logging.Options[name]
+		if !isSealed(value) {
+			continue
+		}
+		plain, err := open(s.aead, logOptionName(name), value)
+		if err != nil {
+			return err
+		}
+		app.Logging.Options[name] = plain
 	}
 	return nil
 }

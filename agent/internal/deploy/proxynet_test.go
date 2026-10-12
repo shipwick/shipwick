@@ -72,7 +72,7 @@ func TestAProxyOutsideDockerHasNoNetworksToMiss(t *testing.T) {
 	}
 }
 
-func TestGetServerCarriesTheProxysNetworksAndTheKernelsLimitOnlyWhenThereIsSomethingToSay(t *testing.T) {
+func TestGetServerCarriesTheProxysNetworksAsAListAndTheKernelsLimitOnlyWhenItCanBeRead(t *testing.T) {
 	s, _ := newRouted(t)
 	s.deploy(web("web:1.0", 1))
 	s.advance(time.Second)
@@ -88,7 +88,9 @@ func TestGetServerCarriesTheProxysNetworksAndTheKernelsLimitOnlyWhenThereIsSomet
 		}
 		return string(data)
 	}
-	if got := marshal(); strings.Contains(got, "networks_missing") || strings.Contains(got, "kernel_limits") {
+	// Nothing is missing: the list is there and empty, like every list; the
+	// kernel's limit, which this engine cannot read, is not.
+	if got := marshal(); !strings.Contains(got, `"networks_missing":[]`) || strings.Contains(got, "kernel_limits") {
 		t.Errorf("nothing to say, yet: %s", got)
 	}
 

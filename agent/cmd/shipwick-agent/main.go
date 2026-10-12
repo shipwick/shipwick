@@ -176,12 +176,10 @@ func run() error {
 					return err
 				}
 			}
-			// Streaming: log following must not be buffered by the proxy.
-			opts.ExtraRoutes = append(opts.ExtraRoutes, proxy.Route{Domain: cfg.AgentDomain, Upstreams: []string{upstream}, Streaming: true})
+			opts.ExtraRoutes = append(opts.ExtraRoutes, ownRoute(cfg.AgentDomain, upstream))
 		}
 		if cfg.DashboardDomain != "" {
-			// Streaming for the same reason: the dashboard relays followed logs.
-			opts.ExtraRoutes = append(opts.ExtraRoutes, proxy.Route{Domain: cfg.DashboardDomain, Upstreams: []string{cfg.DashboardUpstream}, Streaming: true})
+			opts.ExtraRoutes = append(opts.ExtraRoutes, ownRoute(cfg.DashboardDomain, cfg.DashboardUpstream))
 		}
 		opts.ServerAddresses = serverAddresses(startCtx, log, opts.LookupHost, cfg.AgentDomain, cfg.DashboardDomain)
 	} else {

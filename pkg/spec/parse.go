@@ -228,6 +228,8 @@ func (r raw) validate() (App, error) {
 		}
 	} else if err := ValidateImage(app.Image); err != nil {
 		verr.add("image", err.Error(), "nginx:1.27, ghcr.io/company/my-api:1.4.2, ...")
+	} else if err := ValidateLocalImage(app.Image, app.Name); err != nil && namePattern.MatchString(app.Name) {
+		verr.add("image", err.Error(), LocalImagePrefix(app.Name)+"<tag>, which shipwick deploy fills in")
 	}
 
 	if r.Port != nil {

@@ -94,9 +94,9 @@ type Application struct {
 	Image     string       `json:"image"`
 	Version   string       `json:"version"`
 	Domain    string       `json:"domain"`
-	Aliases   []string     `json:"aliases,omitempty"`   // served like Domain
-	Redirects []string     `json:"redirects,omitempty"` // redirected to Domain
-	Path      string       `json:"path,omitempty"`      // the part of Domain and Aliases it serves; empty: all
+	Aliases   []string     `json:"aliases"`        // served like Domain; [] when there are none
+	Redirects []string     `json:"redirects"`      // redirected to Domain; [] when there are none
+	Path      string       `json:"path,omitempty"` // the part of Domain and Aliases it serves; empty: all
 	Replicas  ReplicaCount `json:"replicas"`
 	Deploying bool         `json:"deploying"`
 	// InFlightDeploymentID is the deployment to follow while Deploying is true.
@@ -265,9 +265,9 @@ type Server struct {
 	// than 0.8; zero is a server without swap.
 	SwapBytes *int64 `json:"swap_bytes,omitempty"`
 	// UnlimitedMemory names the running applications that have no memory
-	// limit: each may use whatever the server has. Absent when there are
-	// none, and from agents older than 0.8.
-	UnlimitedMemory []string `json:"unlimited_memory,omitempty"`
+	// limit: each may use whatever the server has. [] when there are none;
+	// absent from agents older than 0.8.
+	UnlimitedMemory []string `json:"unlimited_memory"`
 	// Backups is absent from agents older than scheduled backups.
 	Backups *BackupStatus `json:"backups,omitempty"`
 	// Network is absent from agents older than 0.6.
@@ -314,9 +314,9 @@ type ProxyStatus struct {
 	PlainLookups bool `json:"plain_lookups,omitempty"`
 	// NetworksMissing names the networks of the installation the proxy's
 	// container is not attached to: it then serves some applications and
-	// not others, or cannot reach the agent. Absent when it is on all of
-	// them, and from agents older than 0.9.
-	NetworksMissing []string `json:"networks_missing,omitempty"`
+	// not others, or cannot reach the agent. [] when it is on all of them;
+	// absent from agents older than 0.9.
+	NetworksMissing []string `json:"networks_missing"`
 }
 
 // Deployment kinds.
@@ -349,9 +349,9 @@ type Metrics struct {
 	Replicas         []ReplicaMetrics `json:"replicas"`
 	// UnenforcedLimits names the limits the server's Docker does not apply,
 	// as DockerStatus does: the limits above are then what deploy.yaml asks
-	// for and nothing holds the replicas to. Absent when Docker applies
-	// them, and from agents older than 0.8.
-	UnenforcedLimits []string `json:"unenforced_limits,omitempty"`
+	// for and nothing holds the replicas to. [] when Docker applies them;
+	// absent from agents older than 0.8.
+	UnenforcedLimits []string `json:"unenforced_limits"`
 }
 
 type ReplicaMetrics struct {
@@ -451,12 +451,13 @@ type NotificationStatus struct {
 }
 
 // MetricsHistory is the sampled resource usage of an application over a
-// window, aggregated into buckets of Step: the average CPU and the peak
-// memory of each replica per bucket. Buckets without a sample are absent.
+// window, aggregated into buckets of StepSeconds: the average CPU and the
+// peak memory of each replica per bucket. Buckets without a sample are
+// absent.
 type MetricsHistory struct {
 	Application string          `json:"application"`
-	Since       time.Time       `json:"since"` // start of the window
-	Step        string          `json:"step"`  // bucket width: "30s", "5m" or "1h"
+	Since       time.Time       `json:"since"`        // start of the window
+	StepSeconds int             `json:"step_seconds"` // bucket width: 30, 300 or 3600
 	Series      []MetricsSeries `json:"series"`
 	Limits      MetricsLimits   `json:"limits"`
 }
@@ -808,9 +809,9 @@ type TrafficCounts struct {
 	P99Ms     float64 `json:"p99_ms"`
 }
 
-// TrafficPoint is one bucket of a Traffic series; T is its start.
+// TrafficPoint is one bucket of a Traffic series; At is its start.
 type TrafficPoint struct {
-	T time.Time `json:"t"`
+	At time.Time `json:"at"`
 	TrafficCounts
 }
 
@@ -1073,10 +1074,10 @@ type StandbyApplication struct {
 
 // StandbyPull is how the scheduled import from the bucket is doing.
 type StandbyPull struct {
-	Schedule   string     `json:"schedule"`
-	LastAt     *time.Time `json:"last_at"`
-	LastExport int64      `json:"last_export"` // the export imported last; 0: none yet
-	LastError  string     `json:"last_error"`
+	Schedule     string     `json:"schedule"`
+	LastAt       *time.Time `json:"last_at"`
+	LastExportID int64      `json:"last_export_id"` // the export imported last; 0: none yet
+	LastError    string     `json:"last_error"`
 }
 
 // Statuses of one application of a promotion.
@@ -1317,11 +1318,11 @@ type LogArchiveEntry struct {
 	ID          int64  `json:"id"`
 	Application string `json:"application"`
 	Kind        string `json:"kind"`
-	// DeploymentID is the deployment the container belonged to, Deployment
-	// its number in the application's history (the #N of `shipwick status`)
-	// and Version its version; null, 0 and "" once the deployment is gone.
+	// DeploymentID is the deployment the container belonged to, Sequence its
+	// number in the application's history (the #N of `shipwick status`) and
+	// Version its version; null, 0 and "" once the deployment is gone.
 	DeploymentID *int64 `json:"deployment_id"`
-	Deployment   int    `json:"deployment"`
+	Sequence     int    `json:"sequence"`
 	Version      string `json:"version"`
 	// Replica is the replica's index; 0 for a run. Job and RunID are the
 	// job's name and the run for a run; "" and null for a replica.
@@ -1362,7 +1363,7 @@ type LogMatch struct {
 	// a container that exists.
 	ArchiveID    *int64 `json:"archive_id"`
 	DeploymentID *int64 `json:"deployment_id"`
-	Deployment   int    `json:"deployment"`
+	Sequence     int    `json:"sequence"`
 	Job          string `json:"job"`
 	RunID        *int64 `json:"run_id"`
 }

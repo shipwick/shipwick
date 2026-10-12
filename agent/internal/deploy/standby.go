@@ -284,7 +284,7 @@ func (e *Engine) pullStandby(ctx context.Context, onlyNew bool) (api.Import, err
 	}
 	t := e.transfer
 	t.mu.Lock()
-	seen := t.pull.LastExport == newest && t.pull.LastError == ""
+	seen := t.pull.LastExportID == newest && t.pull.LastError == ""
 	t.mu.Unlock()
 	if onlyNew && seen {
 		return api.Import{}, nil
@@ -320,7 +320,7 @@ func (e *Engine) notePull(export int64, final api.Import) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	defer func() { e.keep(store.TransferPull, t.pull) }()
-	t.pull.LastAt, t.pull.LastExport, t.pull.LastError = final.CompletedAt, export, ""
+	t.pull.LastAt, t.pull.LastExportID, t.pull.LastError = final.CompletedAt, export, ""
 	switch {
 	case final.Error != "":
 		t.pull.LastError = final.Error

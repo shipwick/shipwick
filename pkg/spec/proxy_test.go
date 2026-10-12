@@ -187,6 +187,8 @@ func TestProxyValidation(t *testing.T) {
 		{"no username", "proxy:\n  basic_auth:\n    - password: long enough\n", "proxy.basic_auth[0].username", "is required"},
 		{"colon in a username", "proxy:\n  basic_auth:\n    - username: \"a:b\"\n      password: long enough\n", "proxy.basic_auth[0].username", "colon"},
 		{"control character in a username", "proxy:\n  basic_auth:\n    - username: \"a\\tb\"\n      password: long enough\n", "proxy.basic_auth[0].username", "control characters"},
+		{"placeholder as a username", "proxy:\n  basic_auth:\n    - username: \"{env.HOME}\"\n      password: long enough\n", "proxy.basic_auth[0].username", "placeholder"},
+		{"one brace in a username", "proxy:\n  basic_auth:\n    - username: \"a}b\"\n      password: long enough\n", "proxy.basic_auth[0].username", "braces"},
 		{"no password", "proxy:\n  basic_auth:\n    - username: admin\n", "proxy.basic_auth[0].password", "is required"},
 		{"short password", "proxy:\n  basic_auth:\n    - username: admin\n      password: seven77\n", "proxy.basic_auth[0].password", "too short"},
 		{"password bcrypt would cut", "proxy:\n  basic_auth:\n    - username: admin\n      password: " + strings.Repeat("x", 73) + "\n", "proxy.basic_auth[0].password", "too long"},

@@ -7,7 +7,7 @@ const since = Date.parse('2026-03-01T09:00:00Z')
 
 function point(minute: number, requests: number, status5xx = 0, p95 = 40): TrafficPoint {
   return {
-    t: new Date(since + minute * MINUTE).toISOString(),
+    at: new Date(since + minute * MINUTE).toISOString(),
     requests,
     status_2xx: requests - status5xx,
     status_3xx: 0,
@@ -66,7 +66,7 @@ describe('toTrafficChart', () => {
   })
 
   it('drops a point that is not on the step grid rather than drawing it in the wrong place', () => {
-    const off = { ...point(0, 7), t: new Date(since + 20_000).toISOString() }
+    const off = { ...point(0, 7), at: new Date(since + 20_000).toISOString() }
     const chart = toTrafficChart(traffic([off, point(1, 5)]), '1h', since + 2 * MINUTE)
     expect(chart.requests.map(p => p.value)).toEqual([0, 5, 0])
   })

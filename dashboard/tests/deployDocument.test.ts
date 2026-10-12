@@ -60,6 +60,15 @@ describe('the values an agent did not hand out', () => {
     expect(stillMasked(DOCUMENT.replace('password: "********"', 'password: ${PROXY_PASSWORD}'), 'proxy.basic_auth[0].password')).toBe(false)
   })
 
+  it('knows a credential among the logging options as it knows a password', () => {
+    const text = 'logging:\n  driver: splunk\n  options:\n    splunk-token: "********" # not handed out\n    splunk-url: https://hec.example.com:8088\n'
+    expect(maskedLabel('logging.options.splunk-token')).toBe('splunk-token under logging.options')
+    expect(maskedSecretName('logging.options.splunk-token')).toBe('SPLUNK_TOKEN')
+    expect(stillMasked(text, 'logging.options.splunk-token')).toBe(true)
+    expect(stillMasked(text.replace('"********"', '${SPLUNK_TOKEN}'), 'logging.options.splunk-token')).toBe(false)
+    expect(remainingMasks(text, ['logging.options.splunk-token'])).toEqual(['logging.options.splunk-token'])
+  })
+
   it('is not fooled by a variable whose name ends in another one', () => {
     const text = 'env:\n  APP_LOG_LEVEL: "********"\n  LOG_LEVEL: info\n'
     expect(stillMasked(text, 'env.LOG_LEVEL')).toBe(false)

@@ -141,9 +141,10 @@ func (t routeTable) handle(pattern string, role api.Role, h http.HandlerFunc) {
 // authenticate requires "Authorization: Bearer <token>" and a token that may
 // use the endpoint (see authorize). The token is hashed before it is compared
 // or looked up (see identify), so neither its content nor its length leaks
-// through timing. An address that failed too often lately is refused before
-// its token is looked at (see ratelimit.go). The handler learns who called
-// through the context.
+// through timing. An address that failed too often lately is refused — once
+// its token has proved unknown, not before: a valid token is never refused,
+// so the lookup comes first and the limiter answers only a failure (see
+// ratelimit.go). The handler learns who called through the context.
 func (s *Server) authenticate(rt route, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		addr := clientAddress(r.RemoteAddr)

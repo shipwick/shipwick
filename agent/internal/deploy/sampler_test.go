@@ -150,7 +150,7 @@ func TestMetricsHistoryView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Application != "my-api" || h.Step != "30s" || h.Limits.CPU != 0.5 || h.Limits.MemoryBytes != 256<<20 {
+	if h.Application != "my-api" || h.StepSeconds != 30 || h.Limits.CPU != 0.5 || h.Limits.MemoryBytes != 256<<20 {
 		t.Errorf("unexpected history: %+v", h)
 	}
 	if len(h.Series) != 2 || h.Series[0].Replica != 1 || h.Series[1].Replica != 2 {
@@ -161,8 +161,8 @@ func TestMetricsHistoryView(t *testing.T) {
 			t.Errorf("replica %d has %d points, want 4", series.Replica, len(series.Points))
 		}
 	}
-	if h, _ := s.engine.MetricsHistory(ctx, "my-api", 24*time.Hour, 5*time.Minute); h.Step != "5m" || len(h.Series[0].Points) != 1 {
-		t.Errorf("aggregated into 5m buckets: step=%s points=%d", h.Step, len(h.Series[0].Points))
+	if h, _ := s.engine.MetricsHistory(ctx, "my-api", 24*time.Hour, 5*time.Minute); h.StepSeconds != 300 || len(h.Series[0].Points) != 1 {
+		t.Errorf("aggregated into 5m buckets: step=%d points=%d", h.StepSeconds, len(h.Series[0].Points))
 	}
 
 	if _, err := s.engine.MetricsHistory(ctx, "ghost", time.Hour, 30*time.Second); !errors.Is(err, store.ErrNotFound) {

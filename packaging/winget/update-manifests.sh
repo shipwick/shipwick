@@ -13,6 +13,11 @@
 set -eu
 
 REPO="shipwick/shipwick"
+# SHIPWICK_CHECKSUMS may be relative to where this is run from; resolved
+# before the directory changes.
+if [ -n "${SHIPWICK_CHECKSUMS:-}" ]; then
+    SHIPWICK_CHECKSUMS="$(cd "$(dirname "$SHIPWICK_CHECKSUMS")" && pwd)/$(basename "$SHIPWICK_CHECKSUMS")"
+fi
 cd "$(dirname "$0")"
 
 tag="${1:-}"

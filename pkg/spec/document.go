@@ -40,16 +40,20 @@ type References struct {
 	// the server's, and from deployments made before applications had
 	// secrets of their own.
 	Scoped []string `json:"scoped,omitempty"`
+	// Logging is by option name, for the credentials among logging.options
+	// (LogSecretOptions). Absent from deployments made before those were
+	// secrets.
+	Logging map[string]string `json:"logging,omitempty"`
 }
 
 // Empty reports whether nothing was referred to and nothing said to be plain.
 func (r References) Empty() bool {
-	return len(r.Env) == 0 && len(r.BasicAuth) == 0 && len(r.Plain) == 0
+	return len(r.Env) == 0 && len(r.BasicAuth) == 0 && len(r.Plain) == 0 && len(r.Logging) == 0
 }
 
 // ReferencesOf collects the references of a document that has not had them
-// filled in yet: every env value and basic-auth password with a placeholder
-// in it.
+// filled in yet: every env value, basic-auth password and secret logging
+// option with a placeholder in it.
 func ReferencesOf(a App) References {
 	var refs References
 	for name, value := range a.Env {
@@ -68,6 +72,14 @@ func ReferencesOf(a App) References {
 				}
 				refs.BasicAuth[i] = account.Password
 			}
+		}
+	}
+	for _, name := range a.SecretLogOptions() {
+		if value := a.Logging.Options[name]; hasPlaceholder(value) {
+			if refs.Logging == nil {
+				refs.Logging = map[string]string{}
+			}
+			refs.Logging[name] = value
 		}
 	}
 	return refs
@@ -99,6 +111,14 @@ func (r References) For(a App) References {
 			out.BasicAuth[i] = text
 		}
 	}
+	for _, name := range a.SecretLogOptions() {
+		if text := r.Logging[name]; hasPlaceholder(text) {
+			if out.Logging == nil {
+				out.Logging = map[string]string{}
+			}
+			out.Logging[name] = text
+		}
+	}
 	// A value with a reference in it is given back as the reference, whatever
 	// was said about it.
 	for _, name := range r.Plain {
@@ -115,6 +135,11 @@ func (r References) For(a App) References {
 		}
 	}
 	for _, text := range out.BasicAuth {
+		for _, name := range placeholderNames(text) {
+			referred[name] = true
+		}
+	}
+	for _, text := range out.Logging {
 		for _, name := range placeholderNames(text) {
 			referred[name] = true
 		}
@@ -160,6 +185,11 @@ func MaskedFields(a App) []string {
 		}
 	}
 	sort.Strings(fields)
+	for _, name := range a.SecretLogOptions() {
+		if a.Logging.Options[name] == Mask {
+			fields = append(fields, "logging.options."+name)
+		}
+	}
 	if a.Proxy != nil {
 		for i, account := range a.Proxy.BasicAuth {
 			if account.Password == Mask {
@@ -219,9 +249,6 @@ func Document(a App, refs References, escape bool) (text string, masked []string
 
 	if a.Init {
 		w.block(pair("init", boolean(true)))
-	}
-	if s := a.Security; s != nil {
-		w.block(pair("security", w.securityNodes(s)))
 	}
 	if a.Port != 0 {
 		w.block(pair("port", number(a.Port)))
@@ -294,6 +321,9 @@ func Document(a App, refs References, escape bool) (text string, masked []string
 		}
 		w.block(pair("resources", mapping(limits)))
 	}
+	if s := a.Security; s != nil {
+		w.block(pair("security", w.securityNodes(s)))
+	}
 
 	var storage []*yaml.Node
 	if len(a.Volumes) > 0 {
@@ -339,7 +369,18 @@ func Document(a App, refs References, escape bool) (text string, masked []string
 	if l := a.Logging; l != nil {
 		logging := pair("driver", w.str(l.Driver))
 		if len(l.Options) > 0 {
-			logging = append(logging, pair("options", w.strings(l.Options))...)
+			options := &yaml.Node{Kind: yaml.MappingNode}
+			for _, k := range sortedKeys(l.Options) {
+				value := w.str(l.Options[k])
+				if slices.Contains(LogSecretOptions, k) {
+					var isMasked bool
+					if value, isMasked = secret(refs.Logging[k]); isMasked {
+						masked = append(masked, "logging.options."+k)
+					}
+				}
+				options.Content = append(options.Content, pair(k, value)...)
+			}
+			logging = append(logging, pair("options", options)...)
 		}
 		w.block(pair("logging", mapping(logging)))
 	}

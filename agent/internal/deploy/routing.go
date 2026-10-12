@@ -472,10 +472,14 @@ func (e *Engine) listContainers(ctx context.Context) (map[string]docker.Containe
 }
 
 func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
-	apps, err := e.store.ListApplications(ctx)
+	// Every application's deployment and replicas in one read: the plans are
+	// computed twice a tick, and reading them one application at a time was
+	// most of what a tick cost (see store.ActiveDeployments).
+	active, err := e.store.ActiveDeployments(ctx)
 	if err != nil {
 		return nil, err
 	}
+	apps := active.Applications
 
 	e.mu.Lock()
 	overrides := make(map[string]routeOverride, len(e.routeOverrides))
@@ -492,12 +496,9 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
 			// A rollout is in charge and says exactly who serves.
 			plan.hosts, plan.members, plan.staticRoot = o.hosts, o.members, o.staticRoot
 		} else {
-			if app.ActiveDeploymentID == nil {
+			d, ok := active.Deployments[app.ID]
+			if !ok {
 				continue
-			}
-			d, err := e.store.GetDeployment(ctx, *app.ActiveDeploymentID)
-			if err != nil {
-				return nil, err
 			}
 			plan.hosts = hostnamesOf(d.Spec)
 			// A stopped application keeps its route — and with it its
@@ -507,11 +508,7 @@ func (e *Engine) routingPlans(ctx context.Context) ([]routingPlan, error) {
 			case d.StaticDigest != "":
 				plan.staticRoot = staticDir(app.Name, d.StaticDigest)
 			default:
-				replicas, err := e.store.ListReplicas(ctx, d.ID)
-				if err != nil {
-					return nil, err
-				}
-				for _, r := range replicas {
+				for _, r := range active.Replicas[d.ID] {
 					plan.members = append(plan.members, routeMember{replica: r, port: d.Spec.Port})
 				}
 			}
@@ -691,11 +688,11 @@ func (e *Engine) restartNameless(ctx context.Context, id string, timeout time.Du
 
 // ProxyStatus reports the proxy's state for the API.
 func (e *Engine) ProxyStatus() proxy.Status {
-	if e.opts.Proxy == nil {
-		return proxy.Status{}
+	var status proxy.Status
+	if e.opts.Proxy != nil {
+		status = e.opts.Proxy.Status()
+		status.DNSChallenge = e.opts.DNSChallenge
 	}
-	status := e.opts.Proxy.Status()
-	status.DNSChallenge = e.opts.DNSChallenge
 	status.NetworksMissing = e.missingProxyNetworks()
 	return status
 }

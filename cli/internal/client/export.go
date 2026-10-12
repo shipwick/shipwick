@@ -93,7 +93,7 @@ func (c *Client) Import(ctx context.Context, archive io.Reader, size int64, pass
 		return api.Import{}, &UnreachableError{URL: c.base.String(), Err: err}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return api.Import{}, decodeError(resp)
 	}
 	var envelope api.Response[api.Import]

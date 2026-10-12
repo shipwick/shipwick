@@ -279,6 +279,9 @@ func (e *Engine) Redeploy(ctx context.Context, name, image string) (store.Deploy
 		if err := spec.ValidateImage(image); err != nil {
 			return store.Deployment{}, &InvalidImageError{Reason: err.Error()}
 		}
+		if err := spec.ValidateLocalImage(image, name); err != nil {
+			return store.Deployment{}, &InvalidImageError{Reason: err.Error()}
+		}
 	}
 	return e.start(ctx, name, func(ctx context.Context) (origin, error) {
 		app, err := e.store.GetApplication(ctx, name)

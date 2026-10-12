@@ -109,7 +109,10 @@ SHIPWICK_AGENT_TOKEN or that same config; it is never accepted as a flag.
 
 Several servers are saved as contexts: "shipwick login --context staging" adds
 one, --context or SHIPWICK_CONTEXT selects one for a command, and "shipwick
-context use" changes the current one.`,
+context use" changes the current one.
+
+Every environment variable shipwick reads is listed in the CLI's README,
+under "Environment variables": github.com/shipwick/shipwick/tree/main/cli`,
 		Version:       version.Version,
 		SilenceUsage:  true, // a failed deploy is not a usage error
 		SilenceErrors: true, // main renders errors, see Render
@@ -420,6 +423,10 @@ Set ` + cliconfig.EnvToken + `, or save it with: shipwick login`
 			return "This agent has no Cloudflare API token to check.\n\nSet SHIPWICK_CLOUDFLARE_API_TOKEN in /opt/shipwick/.env on the server, then: cd /opt/shipwick && docker compose up -d"
 		case api.CodeCloudflareCheckedRecently:
 			return "The Cloudflare token was checked less than a minute ago; a check writes a DNS record in every zone, so the agent does not repeat it sooner.\n\nIts result is in: shipwick doctor"
+		case api.CodeTokenExists:
+			return "A token with that name exists already.\n\nSee the names in use with: shipwick token ls. To replace it, revoke it first: shipwick token revoke <name>"
+		case api.CodeForeignBucket:
+			return "Error: " + apiErr.Message + "\n\nNothing was adopted. The handbook's \"Restoring the agent's state\" says how to carry on as that installation; the prefix is set in /opt/shipwick/.env, then: cd /opt/shipwick && docker compose up -d"
 		}
 		return "Error: " + apiErr.Message
 	}
