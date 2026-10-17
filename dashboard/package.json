@@ -21,16 +21,16 @@
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
-    "nuxt": "^4.5.2",
-    "vue": "^3.5.43",
+    "nuxt": "^4.6.1",
+    "vue": "^3.5.44",
     "vue-router": "^5.3.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@types/node": "^24.19.0",
+    "@types/node": "^24.19.2",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.9.3",
-    "vitest": "^5.0.3",
-    "vue-tsc": "^3.3.11"
+    "vitest": "^5.0.4",
+    "vue-tsc": "^3.3.13"
   }
 }
