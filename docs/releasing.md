@@ -253,9 +253,9 @@ sh scripts/test-install.sh --cosign --version v0.8.0 debian:13
 Two package managers carry the CLI, and neither reads the GitHub release on
 its own:
 
-- **Homebrew**: `shipwick/homebrew-tap` checks for a new release once a day and
-  updates the formula itself. To do it now, run its *Update* workflow
-  (`gh workflow run update.yml -R shipwick/homebrew-tap`).
+- **Homebrew**: run the *Update* workflow of `shipwick/homebrew-tap`
+  (`gh workflow run update.yml -R shipwick/homebrew-tap`, or the Actions tab); it
+  reads the release, commits the formula and tests it.
 - **winget**: generate the manifests with `packaging/winget/update-manifests.sh`
   — one installer entry for each Windows build, x64 and arm64 —
   and open the pull request to microsoft/winget-pkgs described in
