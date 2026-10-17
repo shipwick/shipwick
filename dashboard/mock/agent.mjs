@@ -3292,7 +3292,6 @@ function validateRegistryCredential(username, password) {
   const refuse = message => new HttpError(400, 'INVALID_REQUEST', message)
   if (typeof username !== 'string' || username === '') throw refuse('the username is empty')
   if (username.length > 255) throw refuse('the username is too long (max 255 characters)')
-  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1F\x7F:]/.test(username)) throw refuse('the username must not contain a colon or control characters')
   if (typeof password !== 'string' || password === '') throw refuse('the password is empty')
   if (Buffer.byteLength(password) > 16 * 1024) throw refuse('the password is too large (max 16 KB)')
@@ -4223,7 +4222,6 @@ async function handle(req, res) {
       const text = url.searchParams.get('q') ?? ''
       const cursor = url.searchParams.get('cursor') ?? ''
       if (Buffer.byteLength(text) > 256) throw new HttpError(400, 'INVALID_REQUEST', 'q must be at most 256 bytes')
-      // eslint-disable-next-line no-control-regex
       if (/[\r\n\x00]/.test(text)) throw new HttpError(400, 'INVALID_REQUEST', 'q must be one line: a search looks inside lines')
       if (cursor.length > 64) throw new HttpError(400, 'INVALID_REQUEST', 'cursor must be the next of an earlier answer')
       const since = timeParam(url, 'since')
@@ -4544,7 +4542,6 @@ async function handle(req, res) {
         if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', `invalid domain ${JSON.stringify(subject)}: use the part after the @, e.g. example.com`)
       }
       else if (body.kind === 'group') {
-        // eslint-disable-next-line no-control-regex
         if (subject.length > 256 || subject !== subject.trim() || /[\x00-\x1F\x7F]/.test(subject)) throw new HttpError(400, 'INVALID_REQUEST', 'invalid group: use the name as the provider sends it, at most 256 characters')
       }
       else if (body.kind === 'name' && !BEFORE_07) {

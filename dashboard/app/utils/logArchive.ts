@@ -1,6 +1,5 @@
 import type { ApplicationStatus, Container, LogArchiveEntry, LogMatch, Server } from '~/types/api'
 import { formatBytes, formatRelativeTime, pluralize } from '~/utils/format'
-import type { Tone } from '~/utils/status'
 
 /**
  * The output of containers that ended, which the agent keeps from 0.7 on, and
@@ -78,10 +77,6 @@ export function endedBecause(entry: Ended): string {
   }
 }
 
-export function endedTone(entry: Ended): Tone {
-  return endedBadly(entry) ? 'danger' : 'muted'
-}
-
 type Source = Pick<LogArchiveEntry, 'kind' | 'sequence' | 'replica' | 'job' | 'run_id'>
 
 /** Whose output it is: "#3 replica 2", "run 12 of nightly-report", "run 4, a command", "run 9, the pre-deploy command". */
@@ -115,11 +110,6 @@ export function entrySubject(entry: Source & Pick<LogArchiveEntry, 'version'>): 
 /** "Replica 2 of #3 (1.4.2) · crashed (exit 1) · 5m ago · 153 lines": an entry in one line. */
 export function entryHeadline(entry: LogArchiveEntry, now: number = Date.now()): string {
   return [entrySubject(entry), endedBecause(entry), formatRelativeTime(entry.ended_at, now), linesKept(entry)].join(' · ')
-}
-
-/** "197 KB kept" with what it takes on the server's disk when that differs. */
-export function entrySize(entry: Pick<LogArchiveEntry, 'bytes' | 'lines'>): string {
-  return entry.lines === 0 ? '' : formatBytes(entry.bytes)
 }
 
 const UNHEALTHY: readonly ApplicationStatus[] = ['DEGRADED', 'DOWN', 'CRASH_LOOP', 'FAILED']

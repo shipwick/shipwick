@@ -421,6 +421,7 @@ What differs by where the upgrade starts:
 
 | From | What the upgrade does besides | What you do |
 |---|---|---|
+| 0.9, 0.10 | Nothing: 1.0 adds no migration and renames nothing. It is the release from which [Versions and compatibility](#versions-and-compatibility) holds | Nothing |
 | 0.8 | The agent adds a column to its table of secrets (migration 22): a secret can belong to one application. The secrets stored before are the server's, as they were | Nothing |
 | 0.7 | And the proxy's image gains Shipwick's own way of finding replicas, and the agent loads a configuration that uses it | Nothing |
 | 0.5, 0.6 | The same | Nothing |
@@ -486,6 +487,77 @@ since is brought back to the deployment the copy has as its last: the
 containers of the later one are removed and those of the earlier one
 started. What was stored since — secrets, tokens, history — is not in the
 copy, and the volumes are as the newer release left them.
+
+### Versions and compatibility
+
+Shipwick's version is `major.minor.patch`. From 1.0 on:
+
+**A patch fixes.** `1.2.3` to `1.2.4` changes nothing anyone has to relearn:
+no new key, flag or endpoint, and nothing that behaves differently on purpose
+except what the changelog lists as fixed.
+
+**A minor adds.** `1.2` to `1.3` may bring new keys of `deploy.yaml`, new
+commands and flags, new endpoints and fields, and a migration of the
+database. It removes or renames nothing in `deploy.yaml`, the API or the CLI.
+A key, field, flag or command that is to go is marked deprecated in the
+changelog of a minor and keeps working, with the same meaning, through that
+minor and every later 1.x.
+
+**Only a major may break.** 2.0 is the first release that may remove what a
+1.x deprecated or change what something means, and it comes with a written
+upgrade.
+
+What that covers, surface by surface:
+
+**`deploy.yaml` and `shipwick.yaml`.** Every key 1.0 accepts, every 1.x
+accepts with the same meaning, the same units and the same defaults; the
+table in [§6](#6-deployyaml) is the list. New keys are optional, so a
+document that deployed under 1.0 deploys under every 1.x without a change.
+An unknown key stays an error: a key a newer release added is refused by an
+older agent with its name and line, never dropped.
+
+**The API.** `/api/v1` stays, and so does everything [docs/api.md](api.md)
+describes: the paths, the fields and their types, the status codes, the error
+codes and the envelope. Fields and endpoints are added, never removed or
+renamed within 1.x. A list is `[]` when there is nothing in it, never absent.
+An agent answers an endpoint it does not have with `404 ENDPOINT_NOT_FOUND`,
+and a client reads a field it does not know as absent — this agent does not
+say — never as a fact.
+
+**The on-disk format.** `shipwick.db` changes only by a migration the agent
+applies when it starts, and the changelog names it under *Changed*, as the
+table under [Upgrading](#upgrading) does for the releases so far.
+`encryption.key`, `agent-token.sha256`, the export file and the backup file
+keep their formats: an export or a backup written by one 1.x is read by every
+later one. Going back across a migration is not possible: an agent refuses a
+database newer than it supports, in words, and the installer puts the release
+that ran back. *Going back to the release before*, above, says what happens
+and how to keep a copy that lets you go back anyway.
+
+**The CLI and the agent.** A 1.x CLI works against any 1.x agent. A command
+the agent does not know is refused with a sentence that says the agent is
+older than the CLI and names the command that shows both versions; an older
+CLI keeps every command it had against a newer agent, which answers its
+requests as it always did. `shipwick server status` says when the two are of
+different minors and which one to upgrade. The installer brings the server's
+own CLI to the agent's version.
+
+**Support.** Only the latest release is supported. A fix, a security fix
+included, is released as the next patch of the latest minor; nothing is
+backported to an older minor. The upgrade to the latest release is one step
+from any 1.x — the installer, as it has been from 0.1.0 — and that is what
+makes one supported release enough.
+
+**What is not promised.** The numbers in this handbook — what one server
+carries, how long a rollout or an upgrade takes — are measurements of the
+machine they name, not limits, and move with the machine. The wording of the
+CLI's output and of the agent's log lines, and the dashboard's pages, may
+change in a minor; a pipeline reads the CLI's exit code, or the API. The Go
+packages under `agent/internal` and `cli/internal` are not an API.
+
+What is frozen, surface by surface, and the reasons:
+[docs/architecture.md](architecture.md#what-10-freezes). What a change to one
+of these surfaces has to carry: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ### Installation from a package
 

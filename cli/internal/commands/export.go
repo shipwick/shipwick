@@ -528,7 +528,7 @@ func (c *cli) importStatus(ctx context.Context) error {
 func (c *cli) standbyCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "standby",
-		Short: "A second server kept ready: what it holds, and taking over",
+		Short: "Keep a second server ready, and take over with it",
 		Long: `Shipwick does not fail over. What it does is keep a second server ready:
 the first server writes an export on a schedule (SHIPWICK_EXPORT_SCHEDULE) to
 its backup bucket, the second imports the newest one on a schedule

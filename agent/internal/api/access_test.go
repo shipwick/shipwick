@@ -11,6 +11,10 @@ import (
 	"github.com/shipwick/shipwick/pkg/api"
 )
 
+// pattern is the route as the route table spells it, for the tests that walk
+// the table and name what they found.
+func (rt route) pattern() string { return rt.method + " " + rt.path }
+
 // tokenFor creates a token from a POST /tokens body and returns its
 // Authorization header.
 func (f *fixture) tokenFor(body string) string {

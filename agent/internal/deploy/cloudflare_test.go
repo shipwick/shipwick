@@ -11,6 +11,13 @@ import (
 	"github.com/shipwick/shipwick/pkg/api"
 )
 
+// joiners is how many callers have joined a running check so far.
+func (c *cloudflareCheck) joiners() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.joined
+}
+
 // fakeVerifier answers for Cloudflare: what the check finds, how often it was
 // asked, and — when block is set — a check that takes its time.
 type fakeVerifier struct {

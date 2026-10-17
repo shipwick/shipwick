@@ -37,8 +37,11 @@ for stepping back.
 ## Releases
 
 Any maintainer may cut a release, following [docs/releasing.md](docs/releasing.md).
-Version numbers follow semantic versioning; before 1.0, a minor version may
-change the API or the file formats, and the changelog says so.
+Version numbers follow semantic versioning: a patch fixes, a minor adds and
+removes nothing, and only a major may break, with a written upgrade. What that
+means for `deploy.yaml`, the API and the on-disk format is in the handbook
+under [Versions and compatibility](docs/handbook.md#versions-and-compatibility);
+the changelog says what each release changed.
 
 ## Security
 

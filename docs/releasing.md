@@ -78,6 +78,14 @@ Two versions are pinned by hand, because nothing updates them:
 
 ## Cutting a release
 
+Which number moves is decided by what *Unreleased* holds, by the policy the
+handbook states under *Versions and compatibility* (§4): only *Fixed*, and
+nothing anyone has to relearn, is a patch; anything under *Added* or
+*Changed* — a key, a flag, an endpoint, a field, a migration — is a minor; a
+removal or a rename is 2.0 and nothing less. A key, field, flag or command
+that 2.0 is to remove is marked under *Deprecated* in the changelog of a
+minor before it, and keeps working through every 1.x.
+
 1. `main` is green. When it is red at "Known vulnerabilities in dependencies"
    with fixes in the standard library, Go has published a patch release:
    the `go` line of `go.mod` and of `caddy/go.mod` and `GO_VERSION` in

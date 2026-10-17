@@ -42,8 +42,6 @@ func newRoute(pattern string, role api.Role) route {
 	return rt
 }
 
-func (rt route) pattern() string { return rt.method + " " + rt.path }
-
 // refusal is why a caller who is who they say may still not do this.
 type refusal struct {
 	code    string

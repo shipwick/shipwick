@@ -113,6 +113,38 @@ a daemon, and a cell that tested nothing must not be green.
 Keep pull requests to one concern; a refactoring and a behavior change are two
 pull requests.
 
+## Changes the 1.0 promise covers
+
+From 1.0 on, `deploy.yaml` and `shipwick.yaml`, the API and the on-disk
+format are promised to users as the handbook's
+[Versions and compatibility](docs/handbook.md#versions-and-compatibility)
+says, and [docs/architecture.md](docs/architecture.md#what-10-freezes) lists
+what each surface consists of. A change to one of them is held to this:
+
+- **Additive only, within 1.x.** A key, a field, an endpoint, a flag or a
+  command is added, never renamed, retyped or removed, and never given
+  another meaning. A new key or field is optional, with a default that keeps
+  every document and every client that worked working; a new list is `[]`
+  when empty, never absent.
+- **Deprecation before removal.** Something that is to go is marked
+  deprecated under its own heading in the changelog of a minor, keeps working
+  through every later 1.x, and is removed in 2.0 at the earliest, with the
+  upgrade written there. The pull request that marks it says what replaces it.
+- **The database changes only by a migration**, appended to the list in
+  `agent/internal/store/store.go`, never by editing one that was released;
+  a value sealed at rest is in `sealedColumns`. The other files of the data
+  directory — `encryption.key`, `agent-token.sha256`, the export and the
+  backup file — keep their formats; a new one is read beside the old, and a
+  reader refuses what it does not know in words rather than guessing.
+- **A changelog line, every time**, under *Unreleased*: *Added* for a key,
+  field, endpoint, flag or command; *Changed* for a migration, naming it, and
+  what going back means; *Deprecated* for the rule above.
+- **Both sides of a version gap are tested**: a client that reads a new field
+  reads its absence as "an older agent", never as a value, and a new endpoint
+  is answered `404 ENDPOINT_NOT_FOUND` by an older agent, which the CLI turns
+  into a sentence or a fallback. The dashboard's mock agent gets a mode for
+  what the older agent did not have, as it has for earlier releases.
+
 ## License
 
 Shipwick is licensed under the [Apache License 2.0](LICENSE). By submitting a

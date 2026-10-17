@@ -67,6 +67,17 @@ once its image is rebuilt (`docker compose up --build`).
   compare-and-swap in the store. A rollback is a new record, not an edit.
 - **Schema changes are migrations**: append one to the list in
   `agent/internal/store/store.go`; never edit one that has been released.
+- **1.x adds and removes nothing.** A key of `deploy.yaml`, a field, path or
+  code of the API, a flag or command of the CLI is added — optional, with a
+  default that keeps a document or a client that worked working — and never
+  renamed, retyped, removed or given another meaning before 2.0. What is to go
+  is marked *Deprecated* in the changelog of a minor and keeps working through
+  1.x. A migration is named in the changelog under *Changed*. The rules in
+  full: `CONTRIBUTING.md`, *Changes the 1.0 promise covers*.
+- **Neither side assumes the other's version.** A client reads a field an
+  older agent does not send as absent, never as a fact; a CLI that calls a new
+  endpoint turns the older agent's `404 ENDPOINT_NOT_FOUND` into a sentence
+  or a fallback; an agent answers an older CLI's requests as it always did.
 
 ## How the code is organized, and meant to stay
 

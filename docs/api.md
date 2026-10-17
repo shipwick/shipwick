@@ -2,6 +2,14 @@
 
 Base URL: `http://<agent>:9000/api/v1` · JSON everywhere · wire types in [`pkg/api`](../pkg/api/types.go).
 
+From 1.0 on, everything this document describes stays through 1.x: the paths,
+the fields and their types, the status codes, the error codes and the
+envelope. Fields and endpoints are added, never removed or renamed. A field
+this document says is absent from agents before some version is optional for
+a client to read, and never a fact when missing; an endpoint an agent does
+not have is `404 ENDPOINT_NOT_FOUND`. The policy in full: the handbook,
+[Versions and compatibility](handbook.md#versions-and-compatibility).
+
 ## Authentication
 
 Every endpoint except `GET /health`, `GET /auth` and `POST /auth/exchange`

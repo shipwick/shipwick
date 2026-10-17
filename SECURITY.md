@@ -28,8 +28,12 @@ Shipwick is maintained by volunteers and has no bug bounty.
 
 ## Supported versions
 
-Until 1.0, only the latest release receives security fixes. Upgrading is
-running the installer again.
+Only the latest release is supported. A security fix is released as the next
+patch of the latest minor, like any other fix; nothing is backported to an
+older minor. Upgrading to it is one step from any 1.x release — running the
+installer again — and a minor removes or renames nothing, so there is no
+reason to stay behind
+([docs/handbook.md](docs/handbook.md#versions-and-compatibility)).
 
 ## What counts
 

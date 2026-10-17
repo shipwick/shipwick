@@ -43,7 +43,6 @@ export function registryProblem(input: string): string {
 export function usernameProblem(username: string): string {
   if (username === '') return ''
   if (username.length > MAX_USERNAME_LENGTH) return `At most ${MAX_USERNAME_LENGTH} characters.`
-  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1F\x7F:]/.test(username)) return 'The username must not contain a colon or control characters.'
   return ''
 }

@@ -2,11 +2,26 @@
 
 Notable changes to Shipwick. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/). Before 1.0, a minor version may
-change the API, `deploy.yaml` or the on-disk format; when it does, the entry
-says so under **Changed** and explains how to upgrade.
+[Semantic Versioning](https://semver.org/). Before 1.0 a minor version could
+change the API, `deploy.yaml` or the on-disk format, and the entry said so
+under **Changed** with how to upgrade. From 1.0 on a patch fixes and a minor
+adds; nothing is removed or renamed before 2.0, what is to go is announced
+under **Deprecated** a minor before, and a release that adds to the database
+names the migration under **Changed**
+([docs/handbook.md](docs/handbook.md#versions-and-compatibility)).
 
 ## [Unreleased]
+
+1.0.0 is a promise, not a feature. From this release on, every key of
+`deploy.yaml` and `shipwick.yaml`, every path, field and code of the API
+under `/api/v1`, and the format of everything in the agent's data directory
+stay through 1.x; a minor adds, a patch fixes, and only 2.0 may remove what a
+1.x deprecated. A CLI of any 1.x version works against an agent of any other,
+and the upgrade to the latest release is one step from any 1.x. The policy
+is written in [docs/handbook.md](docs/handbook.md#versions-and-compatibility),
+*Versions and compatibility*; what it freezes, surface by surface, in
+[docs/architecture.md](docs/architecture.md#what-10-freezes); what a change
+has to carry from now on, in [CONTRIBUTING.md](CONTRIBUTING.md#changes-the-10-promise-covers).
 
 ### Changed
 
@@ -14,6 +29,17 @@ says so under **Changed** and explains how to upgrade.
   under a certificate that names the hostname asked for; the chain is still
   not verified, since on a development machine the issuer is Caddy's own
   authority and nothing is sent over the connection.
+
+### Fixed
+
+- The proxy image is built with `golang.org/x/net` 0.60.0, which closes five
+  HTTP/2 server vulnerabilities of 0.59.0 (GO-2026-6603, -6610, -6611, -6612,
+  -6617). Caddy 2.11.6 itself still names 0.59.0; the module Shipwick adds to
+  it is what raises the version.
+- The dashboard's lockfile takes the updates its dependency ranges already
+  allowed and drops `simple-git`, which closes the `npm audit` findings that
+  did not need another Nuxt; `node-forge` under Nuxt's dev server remains, as
+  only a Nuxt downgrade would remove it.
 
 ## [0.10.0] - 2026-10-12
 

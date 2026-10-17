@@ -238,6 +238,12 @@ on the `PATH` that records its arguments and exits as told.
 
 ## test-install.sh
 
+The test scripts below run from Git Bash on Windows as well, with
+`MSYS_NO_PATHCONV=1` so that the paths handed to Docker are not rewritten.
+Under it, every variable that carries a host path — `TMPDIR`,
+`SHIPWICK_PACKAGES`, `SHIPWICK_CLI` — must be in Windows form (`C:/Users/…`): a
+`/c/Users/…` path reaches Docker as `C:\c\Users\…` and is not found.
+
 The installer, run as a new server would run it and then again as an
 upgrade, in a container of each distribution named, against a Docker daemon
 started for it:

@@ -200,6 +200,9 @@ The server keeps its token, its applications and their data; they go on
 serving while the three Shipwick containers are replaced. What changed between
 versions, and what to do about it, is in the [changelog](CHANGELOG.md).
 `shipwick server status` and the dashboard say when a newer release exists.
+Within 1.x a release adds and removes nothing: a `deploy.yaml` that worked
+keeps working, and a CLI of one version works against an agent of another —
+[what exactly is promised](docs/handbook.md#versions-and-compatibility).
 
 ## What you get
 

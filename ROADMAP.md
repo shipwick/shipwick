@@ -1,51 +1,73 @@
 # Roadmap
 
 What the current version does is in [README.md](README.md); what changed
-between versions is in [CHANGELOG.md](CHANGELOG.md). This is what comes next,
-one theme per minor version, in the order it is likely to ship. Nothing here
-is a promise; an item moves when a real installation shows that something
-else matters more.
+between versions is in [CHANGELOG.md](CHANGELOG.md). This is what comes next.
+Nothing here is a promise except what *1.0* says; an item moves when a real
+installation shows that something else matters more.
 
-## 0.9 and 0.10 — Stability and ease, then the last look before 1.0
+## 1.0
 
-0.9 took what a real installation — a bare server to a live application, by
-hand, every mistake written down — taught, and what 0.8 left open, and built
-the answers. 0.10 followed with three security reviews of the code and their
-fixes, the agent at half the processor time it spent watching applications,
-the API's names and lists made consistent before they are frozen, and every
-document read against the code; the changelog lists both. What is below
-could not be done from where they were built: each needs a machine, a person
-or a review that was not at hand. None is a feature; 1.0 is cut when they are
-done or dropped on purpose.
+1.0 is a promise, not a feature. From it on, a `deploy.yaml` that worked
+keeps working; the API under `/api/v1` keeps every path, field and code it
+has; the data directory changes only by a migration the agent applies when
+it starts; and a CLI of any 1.x version works against an agent of any other.
+A patch fixes and a minor adds; nothing is removed or renamed before 2.0, and
+what goes then is marked deprecated in the changelog of a minor first and
+keeps working until then. Only the latest release is supported, and the
+upgrade to it is one step from any 1.x. The whole policy, with what it does
+not promise, is in the handbook under
+[Versions and compatibility](docs/handbook.md#versions-and-compatibility);
+what is frozen, surface by surface, and why, is in
+[docs/architecture.md](docs/architecture.md#what-10-freezes).
 
-### Run where it has not run
+## Not yet run
 
-**Rootless Docker on a real server.** It was run in containers. A server
-that reboots, SELinux or AppArmor enforcing, and the port driver that is said
-to keep the client's address were not tried; the handbook says so.
+1.0 ships without these. Each is a place where Shipwick was built and tested
+in a container, or checked by a tool, and has not been used on the machine or
+by the person the handbook paragraph is about; the paragraph says so and says
+what was done instead. None is a feature and none is promised: each needs a
+machine or a person that was not at hand, and what one shows goes into the
+handbook as a number or a correction. If you have the machine, the result is
+welcome as an issue.
 
-**Packages on a hardened host.** The `.deb` and the `.rpm` are built and
-installed on Debian and Rocky Linux by `scripts/test-package.sh`, with the
-API's network of its own. With SELinux enforcing they were not run: the
-handbook's paragraph on it is reasoned from the policy's types and says so,
-and wants a host that enforces. The same for a host firewall between Docker's
-networks and the bridge address.
+**Rootless Docker on a real server.** Run in containers, alone and behind
+the socket proxy, with a daemon under systemd and without one. Not run: a
+server that reboots, SELinux or AppArmor enforcing, and `slirp4netns` as the
+port driver that keeps a client's address. Needs a server or a virtual
+machine of its own with a rootless daemon, and a day of use. Handbook:
+[Rootless Docker](docs/handbook.md#rootless-docker), *Not covered*.
 
-**Windows on Arm, run.** The build exists and `shipwick upgrade` chooses it;
-it has been compiled and never started on such a machine.
+**Packages on a hardened host.** The `.deb` and the `.rpm` install and run
+on Debian and Rocky Linux in containers, where nothing enforces. With SELinux
+enforcing they were not run: the handbook's paragraph is reasoned from the
+policy's types and names the two denials it expects and how to lift them;
+`ausearch` on a host that enforces would confirm or correct it. The same for
+a host firewall between Docker's networks and the bridge address. Handbook:
+[Installation from a package](docs/handbook.md#installation-from-a-package),
+*SELinux*.
+
+**Windows on Arm.** The build exists, the Windows installer picks it and
+`shipwick upgrade` chooses it; it has been compiled and never started on
+such a machine. Needs one, and `shipwick --version`, `login` and `deploy`
+run from it. Handbook: [Installation](docs/handbook.md#4-installation), the
+CLI on Windows.
 
 **The limits on a rented server.** What one server carries was measured in a
-container held to a server's size on a developer's machine, in full at two
-processors and four gigabytes; at twice that, the requests and the restores
-only. Its disk and its network are not a server's: the same script on the
-smallest and on a mid-sized virtual server, and the numbers next to the ones
-in the handbook.
+container held to a server's size on a developer's machine: in full at two
+processors and four gigabytes, and at twice that the requests and the
+restores only. Its disk and its network are not a server's. Needs
+`scripts/measure-limits.sh` run on the smallest and on a mid-sized virtual
+server, and the numbers written next to the ones there. Handbook:
+[What one server carries](docs/handbook.md#what-one-server-carries).
 
-**The dashboard, listened to.** Every page works with the keyboard, passes an
-automated check of names, roles and contrast, and says what its tooltips say
-without a pointer. Nobody has used it with a screen reader.
+**The dashboard, listened to.** Every page works with the keyboard, passes
+an automated check of names, roles and contrast, and says what its tooltips
+say without a pointer. Nobody who works with a screen reader every day has
+used it. Needs such a person and an hour; what they find is fixed in the
+dashboard. Handbook: [Dashboard](docs/handbook.md#dashboard), *Without a
+mouse*.
 
-### Loose ends
+## Loose ends
 
 **`winget install` in the documentation.** The package is submitted to
 winget-pkgs and waits for review; once it is accepted, `winget install
@@ -59,12 +81,15 @@ GitHub token with write access to a fork of winget-pkgs stored in this
 repository, which the Homebrew tap deliberately avoids; worth it once the
 cadence makes the two commands a chore.
 
-### Looked at by someone else
+## Looked at by someone else
 
-**An independent security review.** The agent's use of the Docker Engine API,
-the proxy configuration it generates, and the handling of tokens, secrets and
-uploads, examined by an outside reviewer; the findings fixed, and a summary
-published with the release.
+**An independent security review.** Before 1.0 the code was reviewed three
+times against its own threat model — the Docker Engine API calls the agent
+makes, the proxy configuration it generates, the handling of tokens, secrets
+and uploads — and the findings were fixed; the changelog's 0.10.0 section
+says what. A reviewer from outside is still wanted: the same ground, examined
+by someone who did not write it, the findings fixed, and a summary published
+with the release.
 
 ## Documentation, as it becomes true
 
@@ -79,20 +104,19 @@ people most often arrive from: Dokku and Coolify. What each of their concepts
 becomes here and how to move a running application across, without a
 comparison of merits.
 
-## 1.0
+## 1.x
 
-1.0 is a promise, not a feature: from then on `deploy.yaml`, the API and the
-on-disk format change only with a migration and a documented upgrade, and a
-CLI of one 1.x version works against an agent of any other. It is cut when
-the 0.x series has run real installations for long enough that the last two
-minor versions changed nothing anyone had to relearn, when every item above
-has either shipped or been dropped on purpose, and when the limits of one
-server are written down with numbers that were measured.
+A minor adds and removes nothing. What it adds is decided by what
+installations ask for, in issues, against the principles in
+[CONTRIBUTING.md](CONTRIBUTING.md) and the two lists at the end of this page.
+No minor is named here yet: what is above is verification and documentation,
+not features, and goes into whichever release it is done for.
 
 ## 2.x
 
-Not before 1.0 has been out long enough to say what 2.0 is for. One item is
-already known.
+Not before 1.0 has been out long enough to say what 2.0 is for. 2.0 is the
+first release that may remove what a 1.x deprecated, and it comes with a
+written upgrade. One item is already known.
 
 **The usual services, written for you.** `shipwick init postgres` adds an
 entry to `shipwick.yaml` that is right the first time: the volume at the path
@@ -139,9 +163,12 @@ a dependency to track and a product to keep up with. Scanning runs in the
 pipeline; a secret manager supplies environment variables or the encryption
 key at start-up. Both are documented rather than built in.
 
-**Long-term support releases.** Before 1.0 there is one supported version, the
-latest. What 1.0 promises is under *1.0* above; a support policy for older
-1.x versions is decided then, with real upgrade data.
+**Long-term support releases.** Only the latest release is supported, and a
+fix — a security fix included — is the next patch of the latest minor. An
+older minor kept alive would be a second line to fix, test and release, and
+what makes it unnecessary is the promise above: the upgrade to the latest
+release is one step from any 1.x and relearns nothing. Decided again if real
+upgrade data says otherwise.
 
 ## Out of scope
 

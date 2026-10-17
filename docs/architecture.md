@@ -3083,15 +3083,33 @@ which is how the installer knows to say so.
 
 From 1.0 on, three surfaces change only with a migration and a documented
 way to upgrade, and a CLI of one 1.x version works against an agent of any
-other. What they are, so that a change can be told from a refactoring:
+other. The handbook says what that promises, under *Versions and
+compatibility* in §4; this is what the surfaces are, so that a change can be
+told from a refactoring, and why the lines lie where they do.
+
+**Why a minor only adds.** The version number is read by someone deciding
+whether to upgrade a server that works, and the answer it gives has to be
+simple: a patch is safe and changes nothing anyone has to relearn, a minor
+is safe and brings something, a major is the one release to read about
+first. For that to hold, removing and renaming are kept out of 1.x
+altogether rather than allowed with notice: a server is upgraded by one
+command, often by a pipeline, and the notice would not be read. A key, field,
+flag or command that is to go is marked deprecated in the changelog of a
+minor and keeps working through 1.x, so that a reader of the changelog has
+every release until 2.0 to move; 2.0 removes it, with a written upgrade.
+Only the latest release is supported, because the upgrade to it is one step
+from any 1.x: a fix released as the next patch reaches every installation
+that runs the installer, and an older minor kept alive would be a second
+line to fix and test for nothing the installer does not already give.
 
 **`deploy.yaml` and `shipwick.yaml`.** The keys `pkg/spec` parses — the
 table in the handbook (§6) is the list — their units (`512mb`, `30s`, a
 cron expression in UTC), their defaults and bounds, and the rule that an
 unknown key is an error. `shipwick.yaml` is `apps`, each entry a complete
-deploy.yaml plus `after`. A key is added, never renamed or given another
-meaning; a key that goes is accepted and ignored for a major version, with a
-warning that names it.
+deploy.yaml plus `after`. A key is added, optional and with a default that
+leaves a document that worked working; it is never renamed or given another
+meaning, and a key that is to go keeps working through 1.x as the paragraph
+above says.
 
 **The API.** Everything in `docs/api.md`: the paths under `/api/v1`, the
 envelope (`{"data"}` and `{"error": {code, message, details}}`, `details`
@@ -3123,12 +3141,31 @@ text format, outside the envelope.
 `export.json`, carries `format` (1), the version that wrote it and
 `requires`, the keys of the configuration a reader has to know; a reader
 refuses a format it does not have and a key it does not know, in words. An
-export written by 1.x is read by every later 1.x.
+export written by 1.x is read by every later 1.x. Going back across a
+migration is not possible: the agent refuses a database with a higher
+`user_version` than it knows, in words, and the installer, which kept the
+compose file that ran, starts that release again (handbook §4,
+*Upgrading*). Reading a schema one does not know would mean guessing at
+columns, and a wrong guess about a table of secrets or deployments is worse
+than a refusal.
+
+**The CLI and the agent** are released together and need not run together:
+a CLI meets the agent of a server that was installed a year ago, and the
+installer's CLI on the server meets a laptop's. So neither side assumes the
+other's version. The agent answers an older CLI's requests as it always
+did, because nothing is removed; the CLI, on `404 ENDPOINT_NOT_FOUND`, says
+that the agent does not know the operation and how to compare the two
+versions, and reads a field an older agent does not send as absent, never
+as a fact. `shipwick server status` compares the minors and names which side
+to bring up to date, and the installer puts a CLI of the agent's version on
+the server, so that the one pair that always meets is always of one version.
 
 What is not frozen: the CLI's human-readable output, the agent's log lines,
-the dashboard, the compose files' internals, and anything `docs/api.md`
-calls absent "from agents older than" some version, which stays optional
-for a client to read.
+the dashboard, the compose files' internals, the Go packages under
+`agent/internal` and `cli/internal`, the numbers the handbook measured —
+they describe the machine they came from, not a limit — and anything
+`docs/api.md` calls absent "from agents older than" some version, which
+stays optional for a client to read.
 
 ## Releases and packages
 

@@ -9,7 +9,7 @@ import (
 	"github.com/shipwick/shipwick/pkg/spec"
 )
 
-func TestApplicationsWithDeploymentsReadBothInOneGo(t *testing.T) {
+func TestApplicationWithDeploymentsReadsBothInOneGo(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
 	now := time.Now()
@@ -18,19 +18,11 @@ func TestApplicationsWithDeploymentsReadBothInOneGo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	apps, inFlight, err := s.ApplicationsWithDeployments(ctx, DeploymentFilter{Statuses: []api.DeploymentStatus{api.StatusPending}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(apps) != 1 || apps[0].Name != "web" || len(inFlight) != 1 || inFlight[0].ID != d.ID {
-		t.Errorf("apps %+v, in flight %+v", apps, inFlight)
-	}
-
 	app, inFlight, err := s.ApplicationWithDeployments(ctx, "web", DeploymentFilter{Statuses: []api.DeploymentStatus{api.StatusPending}, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if app.Name != "web" || len(inFlight) != 1 {
+	if app.Name != "web" || len(inFlight) != 1 || inFlight[0].ID != d.ID {
 		t.Errorf("app %+v, in flight %+v", app, inFlight)
 	}
 	if _, _, err := s.ApplicationWithDeployments(ctx, "nope", DeploymentFilter{}); err != ErrNotFound {

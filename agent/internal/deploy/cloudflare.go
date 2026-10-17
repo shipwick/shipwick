@@ -157,13 +157,6 @@ func (e *Engine) logCloudflare(status api.CloudflareStatus) {
 	e.log.Warn("Cloudflare token cannot do its job", "problems", strings.Join(status.Problems, "; "), "zones", strings.Join(zones, ", "), "address", status.Address)
 }
 
-// joiners is how many callers have joined a running check so far.
-func (c *cloudflareCheck) joiners() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.joined
-}
-
 // cloudflareStatus is the last result, for GET /server; nil without a token
 // or before the first check has finished. The result is never written
 // again once stored, so handing it out is safe.

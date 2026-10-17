@@ -29,7 +29,7 @@ func (c *cli) backupCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backup [app]",
 		Short: "Download the volumes of an application as tar archives",
-		Long: `backup downloads the volumes of an application, one tar archive each, named
+		Long: `Download the volumes of an application, one tar archive each, named
 <app>-<volume>-<UTC timestamp>.tar. Existing files are never overwritten.
 
 The copy is taken while the application runs, unless it is stopped. A
@@ -98,7 +98,7 @@ func (c *cli) restoreCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "restore [app] <archive.tar>",
 		Short: "Replace the data of a volume with a backup",
-		Long: `restore replaces everything in a volume with the contents of a tar archive, as
+		Long: `Replace everything in a volume with the contents of a tar archive, as
 written by "shipwick backup". The application must be stopped, and stays
 stopped afterwards.`,
 		Args: cobra.RangeArgs(1, 2),
@@ -251,7 +251,7 @@ func (c *cli) volumesCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volumes",
 		Short: "List the volumes on the server, including those of deleted applications",
-		Long: `volumes lists every volume Shipwick created, with the application it belongs
+		Long: `List every volume Shipwick created, with the application it belongs
 to and how much it holds. A volume outlives its application: "shipwick delete"
 leaves the data where it is, and "shipwick volumes rm" removes it when you mean
 it. A volume whose application still exists cannot be removed this way.`,
@@ -290,7 +290,7 @@ func (c *cli) volumesRemoveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rm <name>",
 		Short: "Remove a volume of a deleted application, with everything in it",
-		Long: `rm removes a volume by its name on the server, as "shipwick volumes" lists it:
+		Long: `Remove a volume by its name on the server, as "shipwick volumes" lists it:
 shipwick_<application>_<volume>. Only volumes of deleted applications can be
 removed; a running application's data is replaced with "shipwick restore".`,
 		Args: cobra.ExactArgs(1),
