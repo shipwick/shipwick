@@ -45,6 +45,24 @@ const (
 // it, and on a development machine the issuer is Caddy's own authority.
 type RedirectProbe func(ctx context.Context, addr, host, path string) (status int, location string, err error)
 
+// unverifiedChainTLS is the probe's client configuration: the certificate the
+// proxy presents must name host, and its chain is not verified. The
+// connection is to the agent's own proxy over the server's network, nothing is
+// sent over it, and on a development machine the issuer is Caddy's own
+// authority, which no root store knows.
+func unverifiedChainTLS(host string) *tls.Config {
+	return &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("the proxy presented no certificate")
+			}
+			return cs.PeerCertificates[0].VerifyHostname(host)
+		},
+	}
+}
+
 func probeRedirect(ctx context.Context, addr, host, path string) (int, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, redirectProbeTimeout)
 	defer cancel()
@@ -54,17 +72,7 @@ func probeRedirect(ctx context.Context, addr, host, path string) (int, string, e
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
-		TLSClientConfig: &tls.Config{
-			ServerName: host,
-			// The chain is not verified (see RedirectProbe); the name is.
-			InsecureSkipVerify: true,
-			VerifyConnection: func(cs tls.ConnectionState) error {
-				if len(cs.PeerCertificates) == 0 {
-					return errors.New("the proxy presented no certificate")
-				}
-				return cs.PeerCertificates[0].VerifyHostname(host)
-			},
-		},
+		TLSClientConfig: unverifiedChainTLS(host),
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
