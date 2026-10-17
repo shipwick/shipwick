@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -37,9 +38,11 @@ const (
 
 // RedirectProbe asks GET https://<host><path>/ through the proxy at addr,
 // with host as the server name and without following a redirect, and
-// reports the status and the Location header. Nothing about the proxy's
-// certificate is verified: it may be minutes away, and what is read is the
-// application's answer, not the proxy's identity.
+// reports the status and the Location header. The certificate the proxy
+// presents has to name the hostname, so that the answer read is the one the
+// proxy gives for that name; its chain is not verified: the connection is
+// to the agent's own proxy over the server's network, nothing is sent over
+// it, and on a development machine the issuer is Caddy's own authority.
 type RedirectProbe func(ctx context.Context, addr, host, path string) (status int, location string, err error)
 
 func probeRedirect(ctx context.Context, addr, host, path string) (int, string, error) {
@@ -51,7 +54,17 @@ func probeRedirect(ctx context.Context, addr, host, path string) (int, string, e
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
-		TLSClientConfig: &tls.Config{ServerName: host, InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{
+			ServerName: host,
+			// The chain is not verified (see RedirectProbe); the name is.
+			InsecureSkipVerify: true,
+			VerifyConnection: func(cs tls.ConnectionState) error {
+				if len(cs.PeerCertificates) == 0 {
+					return errors.New("the proxy presented no certificate")
+				}
+				return cs.PeerCertificates[0].VerifyHostname(host)
+			},
+		},
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

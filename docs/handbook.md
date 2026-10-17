@@ -3771,7 +3771,10 @@ deployment is complete, so nothing waits for it: `shipwick deploy` gives the
 answer a few seconds under its summary, and `shipwick status` shows a loop
 for as long as the deployment is the active one; the proxy's certificate for
 a new hostname may be minutes away, and the agent asks again every ten
-seconds for three minutes while the proxy cannot answer. `shipwick doctor`
+seconds for three minutes while the proxy cannot answer. An answer counts
+only under a certificate that names the hostname; the chain behind it is not
+checked, since on a development machine the issuer is Caddy's own authority
+and nothing is sent over the connection. `shipwick doctor`
 makes the same judgement from outside, from the answer `https://<domain>/`
 gives it. A folder, an application deployed stopped and a hostname still
 waiting for DNS are not asked.

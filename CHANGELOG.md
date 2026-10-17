@@ -8,6 +8,13 @@ says so under **Changed** and explains how to upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- The look through the proxy after a deployment accepts the proxy's answer only
+  under a certificate that names the hostname asked for; the chain is still
+  not verified, since on a development machine the issuer is Caddy's own
+  authority and nothing is sent over the connection.
+
 ## [0.10.0] - 2026-10-12
 
 ### Added

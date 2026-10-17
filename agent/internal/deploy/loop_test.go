@@ -2,7 +2,14 @@ package deploy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,7 +108,7 @@ func TestAnyOtherAnswerIsRecordedAndNotJudged(t *testing.T) {
 func TestTheProbeGoesThroughTheProxyUnderTheHostnameAndFollowsNothing(t *testing.T) {
 	var requests []string
 	var mu sync.Mutex
-	proxy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxy := tlsServerFor(t, []string{"web.example.com", "www.example.com"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		requests = append(requests, r.Host+" "+r.TLS.ServerName+" "+r.URL.Path)
 		mu.Unlock()
@@ -116,7 +123,9 @@ func TestTheProbeGoesThroughTheProxyUnderTheHostnameAndFollowsNothing(t *testing
 	defer proxy.Close()
 
 	s, _ := newRouted(t)
-	// The real probe, at the test's proxy: its certificate is nobody's.
+	// The real probe, at the test's proxy: its certificate names the two
+	// hostnames and no authority signed it, as Caddy's own does on a
+	// development machine.
 	s.engine.opts.RedirectProbe = nil
 	s.engine.opts.ProxyTLSAddr = proxy.Listener.Addr().String()
 	a := wwwRedirected("web:1.0")
@@ -234,5 +243,63 @@ func TestTheProbeRunsAfterTheDeploymentIsCompleted(t *testing.T) {
 	s.engine.Wait()
 	if got := s.probeEvents(d.ID); got != "info: https://web.example.com/ answers HTTP 200 through the proxy" {
 		t.Errorf("probe events = %q", got)
+	}
+}
+
+// tlsServerFor is an httptest server whose certificate names the given
+// hostnames and is signed by nobody: what the probe sees from a proxy whose
+// certificates come from Caddy's internal authority.
+func tlsServerFor(t *testing.T, names []string, handler http.Handler) *httptest.Server {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: names[0]},
+		DNSNames:     names,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+	srv.StartTLS()
+	return srv
+}
+
+func TestTheProbeReadsNoAnswerFromACertificateForAnotherName(t *testing.T) {
+	// A proxy that presents a certificate for some other hostname is not
+	// answering for this one, whatever it says; the probe reports the
+	// certificate, not the answer.
+	var asked int
+	var mu sync.Mutex
+	proxy := tlsServerFor(t, []string{"other.example.com"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+
+	s, _ := newRouted(t)
+	s.engine.opts.RedirectProbe = nil
+	s.engine.opts.ProxyTLSAddr = proxy.Listener.Addr().String()
+	s.engine.opts.RedirectRetry = time.Millisecond
+	d := s.deploy(web("web:1.0", 1))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if asked != 0 {
+		t.Errorf("the request reached the handler %d times; a certificate for another name must end the handshake", asked)
+	}
+	if got := s.probeEvents(d.ID); strings.Contains(got, "answers HTTP") || !strings.Contains(got, "certificate") {
+		t.Errorf("probe events = %q; want the certificate named, not an answer", got)
 	}
 }
