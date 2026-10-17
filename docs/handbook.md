@@ -1261,8 +1261,8 @@ else's page — `shipwick doctor` checks the whole path in one screen, each line
 with what to do about it, and exits non-zero when something is broken:
 
 ```text
-! shipwick v0.3.1; v0.4.0 is available. Upgrade with: shipwick upgrade
-✓ Agent https://agent.example.com runs v0.4.0, the latest release
+! shipwick v0.10.0; v1.0.0 is available. Upgrade with: shipwick upgrade
+✓ Agent https://agent.example.com runs v1.0.0, the latest release
 ✓ Token laptop (admin)
 ✓ Docker 29.8.0 on the server
 ✓ Proxy serving 2 routes

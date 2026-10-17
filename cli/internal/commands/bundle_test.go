@@ -275,7 +275,7 @@ func TestServerBundleRejectsWhatIsNotAReleaseOrAnArchitecture(t *testing.T) {
 	if _, _, err := f.run(t.TempDir(), "server", "bundle", "--arch", "riscv64"); err == nil || !strings.Contains(err.Error(), "amd64 or arm64") {
 		t.Errorf("--arch riscv64: %v", err)
 	}
-	if _, _, err := f.run(t.TempDir(), "server", "bundle", "--version", "latest"); err == nil || !strings.Contains(err.Error(), "releases look like v0.6.0") {
+	if _, _, err := f.run(t.TempDir(), "server", "bundle", "--version", "latest"); err == nil || !strings.Contains(err.Error(), "releases look like v1.0.0") {
 		t.Errorf("--version latest: %v", err)
 	}
 }

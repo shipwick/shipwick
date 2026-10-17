@@ -19,11 +19,11 @@ Everything lives in functions and nothing runs until the last line, so a
 download that is cut off half-way executes nothing at all.
 
 .PARAMETER Version
-The release to install, such as v0.8.1 (default: the latest release, never a
+The release to install, such as v1.0.0 (default: the latest release, never a
 pre-release). Piped into iex, set SHIPWICK_VERSION instead, or pass the
 parameter to the script as a block:
 
-  & ([scriptblock]::Create((irm https://get.shipwick.com/windows))) -Version v0.8.1
+  & ([scriptblock]::Create((irm https://get.shipwick.com/windows))) -Version v1.0.0
 
 .PARAMETER Destination
 The directory shipwick.exe goes to (default: %LOCALAPPDATA%\Programs\shipwick).
@@ -91,7 +91,7 @@ function Get-MachineArchitecture {
 function Resolve-Release([string]$Repo, [string]$Version) {
     if ($Version -ne 'latest') {
         if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$') {
-            throw "'$Version' is not a release version; releases look like v0.8.1 or v0.9.0-rc.1."
+            throw "'$Version' is not a release version; releases look like v1.0.0 or v1.1.0-rc.1."
         }
         if ($Version.StartsWith('v')) { return $Version } else { return "v$Version" }
     }

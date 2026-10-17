@@ -239,7 +239,7 @@ func pinnedRelease(s string) (string, error) {
 		tag = "v" + tag
 	}
 	if _, ok := version.Parse(tag); !ok || strings.ContainsAny(tag, " '\"/") {
-		return "", fmt.Errorf("--version %q is not a release version; releases look like v0.9.0 or v0.9.0-rc.1", s)
+		return "", fmt.Errorf("--version %q is not a release version; releases look like v1.0.0 or v1.1.0-rc.1", s)
 	}
 	return tag, nil
 }

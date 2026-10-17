@@ -67,8 +67,8 @@ against the digests the release published for them (0.7.0 and later). With
 
 Copy the bundle to the server by whatever means there are, and there, as root:
 
-  tar -xzf shipwick-v0.6.0-linux-arm64.tar.gz
-  sh shipwick-v0.6.0-linux-arm64/install.sh
+  tar -xzf shipwick-v1.0.0-linux-arm64.tar.gz
+  sh shipwick-v1.0.0-linux-arm64/install.sh
 
 The installer downloads nothing and pulls nothing. Upgrading is the same with
 the bundle of a newer release. Docker is not in the bundle: the server needs
@@ -78,7 +78,7 @@ Docker Engine and the Compose plugin before the installer runs.`,
 			return c.serverBundle(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.version, "version", "", "release to bundle, such as v0.6.0 (default: the latest)")
+	cmd.Flags().StringVar(&opts.version, "version", "", "release to bundle, such as v1.0.0 (default: the latest)")
 	cmd.Flags().StringVar(&opts.arch, "arch", "amd64", "the server's architecture: amd64 or arm64")
 	cmd.Flags().StringVarP(&opts.output, "output", "o", "", "file to write (default: shipwick-<version>-linux-<arch>.tar.gz here)")
 	cmd.Flags().BoolVar(&opts.noPull, "no-pull", false, "save the images this machine has under the release's names instead of pulling them")
@@ -98,7 +98,7 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 		}
 		tag = latest
 	} else if _, ok := releaseTag(tag); !ok {
-		return fmt.Errorf("--version %q is not a release version; releases look like v0.6.0", tag)
+		return fmt.Errorf("--version %q is not a release version; releases look like v1.0.0", tag)
 	}
 	name := "shipwick-" + tag + "-linux-" + opts.arch
 	output := opts.output

@@ -46,7 +46,7 @@ func (o *installOptions) validate() error {
 	}
 	if o.version != "" {
 		if _, ok := version.Parse(o.version); !ok || strings.ContainsAny(o.version, " '\"") {
-			return fmt.Errorf("--version %q is not a release version; releases look like v0.4.0", o.version)
+			return fmt.Errorf("--version %q is not a release version; releases look like v1.0.0", o.version)
 		}
 	}
 	return nil
@@ -191,7 +191,7 @@ token is unchanged then, and not printed again.`,
 	cmd.Flags().StringVar(&opts.agentDomain, "agent-domain", "", "hostname for the API, e.g. agent.example.com")
 	cmd.Flags().StringVar(&opts.dashboardDomain, "dashboard-domain", "", "hostname for the dashboard, e.g. dashboard.example.com")
 	cmd.Flags().StringVar(&opts.name, "name", "", "name to save the server under as a context (default: its hostname)")
-	cmd.Flags().StringVar(&opts.version, "version", "", "release to install, e.g. v0.4.0 (default: the latest)")
+	cmd.Flags().StringVar(&opts.version, "version", "", "release to install, such as v1.0.0 (default: the latest)")
 	return cmd
 }
 

@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://get.shipwick.com | sh                 # server: agent + Caddy + dashboard, and the CLI
 #   curl -fsSL https://get.shipwick.com | sh -s -- --cli     # the CLI only (your laptop, CI)
-#   sh install.sh --bundle shipwick-v0.6.0-linux-amd64.tar.gz  # a server with no way out: from files
+#   sh install.sh --bundle shipwick-v1.0.0-linux-amd64.tar.gz  # a server with no way out: from files
 #
 # Safe to run again: that is how you upgrade. An existing .env — and with it
 # your API token — is never touched.
@@ -123,7 +123,7 @@ resolve_latest() {
     fi
     case "$location" in
         */releases/tag/v[0-9]*.[0-9]*.[0-9]*) VERSION="${location##*/}" ;;
-        *) die "$url did not point at a release (Location: $location). Name the release instead:  SHIPWICK_VERSION=v0.9.1" ;;
+        *) die "$url did not point at a release (Location: $location). Name the release instead:  SHIPWICK_VERSION=v1.0.0" ;;
     esac
     info "The latest release is $VERSION"
 }
@@ -852,7 +852,7 @@ user who runs the installer: the URL and the token are saved as a context, so
 "shipwick ps" works there too. A context saved there by hand is not touched.
 
 Environment:
-  SHIPWICK_VERSION            release to install, such as v0.9.1 (default: latest, which is looked
+  SHIPWICK_VERSION            release to install, such as v1.0.0 (default: latest, which is looked
                               up first so that every file, and the signature, is that one release's)
   SHIPWICK_REQUIRE_SIGNATURE  set to 1: install nothing unless cosign is here and verifies the
                               release's signature (default: verified when cosign is installed,
