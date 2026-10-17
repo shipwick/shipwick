@@ -20,97 +20,43 @@ not promise, is in the handbook under
 what is frozen, surface by surface, and why, is in
 [docs/architecture.md](docs/architecture.md#what-10-freezes).
 
-## Not yet run
-
-1.0 ships without these. Each is a place where Shipwick was built and tested
-in a container, or checked by a tool, and has not been used on the machine or
-by the person the handbook paragraph is about; the paragraph says so and says
-what was done instead. None is a feature and none is promised: each needs a
-machine or a person that was not at hand, and what one shows goes into the
-handbook as a number or a correction. If you have the machine, the result is
-welcome as an issue.
-
-**Rootless Docker on a real server.** Run in containers, alone and behind
-the socket proxy, with a daemon under systemd and without one. Not run: a
-server that reboots, SELinux or AppArmor enforcing, and `slirp4netns` as the
-port driver that keeps a client's address. Needs a server or a virtual
-machine of its own with a rootless daemon, and a day of use. Handbook:
-[Rootless Docker](docs/handbook.md#rootless-docker), *Not covered*.
-
-**Packages on a hardened host.** The `.deb` and the `.rpm` install and run
-on Debian and Rocky Linux in containers, where nothing enforces. With SELinux
-enforcing they were not run: the handbook's paragraph is reasoned from the
-policy's types and names the two denials it expects and how to lift them;
-`ausearch` on a host that enforces would confirm or correct it. The same for
-a host firewall between Docker's networks and the bridge address. Handbook:
-[Installation from a package](docs/handbook.md#installation-from-a-package),
-*SELinux*.
-
-**Windows on Arm.** The build exists, the Windows installer picks it and
-`shipwick upgrade` chooses it; it has been compiled and never started on
-such a machine. Needs one, and `shipwick --version`, `login` and `deploy`
-run from it. Handbook: [Installation](docs/handbook.md#4-installation), the
-CLI on Windows.
-
-**The limits on a rented server.** What one server carries was measured in a
-container held to a server's size on a developer's machine: in full at two
-processors and four gigabytes, and at twice that the requests and the
-restores only. Its disk and its network are not a server's. Needs
-`scripts/measure-limits.sh` run on the smallest and on a mid-sized virtual
-server, and the numbers written next to the ones there. Handbook:
-[What one server carries](docs/handbook.md#what-one-server-carries).
-
-**The dashboard, listened to.** Every page works with the keyboard, passes
-an automated check of names, roles and contrast, and says what its tooltips
-say without a pointer. Nobody who works with a screen reader every day has
-used it. Needs such a person and an hour; what they find is fixed in the
-dashboard. Handbook: [Dashboard](docs/handbook.md#dashboard), *Without a
-mouse*.
-
-## Loose ends
-
-**`winget install` in the documentation.** The package is submitted to
-winget-pkgs and waits for review; once it is accepted, `winget install
-Shipwick.Shipwick` replaces "download the .exe and put it on your PATH" as the
-way to install on Windows.
-
-**The winget submission from the release workflow.** Today a release is
-followed by two commands (`packaging/winget/update-manifests.sh`, then
-`wingetcreate submit`) run by a maintainer. Doing it from the workflow needs a
-GitHub token with write access to a fork of winget-pkgs stored in this
-repository, which the Homebrew tap deliberately avoids; worth it once the
-cadence makes the two commands a chore.
-
-## Looked at by someone else
-
-**An independent security review.** Before 1.0 the code was reviewed three
-times against its own threat model — the Docker Engine API calls the agent
-makes, the proxy configuration it generates, the handling of tokens, secrets
-and uploads — and the findings were fixed; the changelog's 0.10.0 section
-says what. A reviewer from outside is still wanted: the same ground, examined
-by someone who did not write it, the findings fixed, and a summary published
-with the release.
-
-## Documentation, as it becomes true
-
-Not tied to a version; written when someone needs them.
-
-**GitLab CI and Azure Pipelines.** The GitHub Action has a page; the same
-three lines for a `.gitlab-ci.yml` and an `azure-pipelines.yml`, each run
-against a real server before it is published.
-
-**Coming from another tool.** The same guide as for Compose, for the tools
-people most often arrive from: Dokku and Coolify. What each of their concepts
-becomes here and how to move a running application across, without a
-comparison of merits.
-
 ## 1.x
 
 A minor adds and removes nothing. What it adds is decided by what
 installations ask for, in issues, against the principles in
 [CONTRIBUTING.md](CONTRIBUTING.md) and the two lists at the end of this page.
-No minor is named here yet: what is above is verification and documentation,
-not features, and goes into whichever release it is done for.
+What is already in view, in no order:
+
+**Guides for the other pipelines.** The GitHub Action has a page; the same
+three lines for a `.gitlab-ci.yml` and an `azure-pipelines.yml`, each run
+against a real server before it is published.
+
+**Coming from another tool.** The guide that exists for Docker Compose, for
+the tools people most often arrive from: Dokku and Coolify. What each of their
+concepts becomes here and how to move a running application across, without
+a comparison of merits.
+
+**`winget install Shipwick.Shipwick`.** The manifests of every release are in
+[packaging/winget](packaging/winget) and the package is submitted to
+winget-pkgs; when it is accepted, the handbook names it as the way to install
+on Windows, and the submission moves from two commands run by a maintainer
+into the release workflow.
+
+**Numbers from more machines.** What one server carries is measured on a
+developer's machine at a server's size; the same script on rented servers of
+two sizes puts a second column next to the first. The packages and rootless
+Docker, run in containers today, on hosts that enforce SELinux or AppArmor;
+the CLI started on Windows on Arm, where it is built and chosen but has not
+yet been run; the dashboard used for an hour by someone who works with a
+screen reader. Each result goes into the handbook as a number or a
+correction, and is welcome as an issue from anyone who has the machine.
+
+**A security review from outside.** Before 1.0 the code was reviewed three
+times against its own threat model — the Docker Engine API calls the agent
+makes, the proxy configuration it generates, the handling of tokens, secrets
+and uploads — and the findings were fixed; the changelog's 0.10.0 section
+says what. The next review is by someone who did not write the code, and its
+summary is published with the release that carries its findings.
 
 ## 2.x
 
