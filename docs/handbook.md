@@ -3227,6 +3227,13 @@ deployment. What that buys you:
   marked `rollback`, pointing at the deployment it re-used.
 - Only deployments that once served successfully are targets. A `FAILED`
   attempt is not a version to return to.
+- **What it does not undo is the application's own data.** A rollback brings the
+  previous version's containers back; what the version that ran wrote — a
+  database schema it migrated, files in a volume — stays as it is. Write
+  migrations the previous version tolerates (add a column before you read
+  it, drop one only a version later), or restore the backup taken before the
+  deployment ([Backups the server takes](#backups-the-server-takes),
+  `backups.before` for a consistent dump).
 
 `shipwick redeploy [--image …]` is the same idea applied to the *running*
 configuration: deploy it again, optionally with another image, without needing

@@ -206,7 +206,7 @@ keeps working, and a CLI of one version works against an agent of another —
 
 ## What you get
 
-- **Rolling deployments** with health checks, at most one extra container at a time, and automatic rollback.
+- **Rolling deployments** with health checks, at most one extra container at a time, and automatic rollback. A rollback brings the version back, not what it wrote to its database; the handbook says how to deploy so that it does not have to.
 - **HTTPS** for every domain, certificates included, plus aliases and `www` redirects; behind Cloudflare's proxy, with wildcards, or with a certificate of your own.
 - **Routing per application**: several applications on one domain by `path`, response headers, basic authentication and redirects in `proxy`.
 - **Supervision**: crashed replicas are restarted with backoff; a container that disappears is recreated.
