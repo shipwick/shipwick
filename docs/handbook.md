@@ -3930,9 +3930,10 @@ cd /opt/shipwick && docker compose up -d
   (`cloudflare`), both of which `shipwick doctor` reads.
 
 The proxy is Shipwick's own build of Caddy, `ghcr.io/shipwick/caddy`: the
-official image plus the Cloudflare DNS module and Shipwick's own way of
-finding replicas (above), and nothing else, on every installation whether or
-not the token is set ([Dockerfile.caddy](../Dockerfile.caddy)).
+official image with Alpine's package fixes applied, plus the Cloudflare DNS
+module and Shipwick's own way of finding replicas (above), and nothing else,
+on every installation whether or not the token is set
+([Dockerfile.caddy](../Dockerfile.caddy)).
 
 **A proxy image of your own** (`SHIPWICK_CADDY_IMAGE`), for another DNS
 provider for instance, is built from that Dockerfile with your module added.
@@ -5442,7 +5443,8 @@ What Shipwick does about it:
 
 ## 13. Development
 
-Requirements: Go 1.27+, Docker; Node 24 for the dashboard.
+Requirements: Go 1.27+, Docker; Node 24 with corepack for the dashboard, which
+is built with the Yarn its `package.json` pins (`corepack enable` once).
 
 ```bash
 make dev    # = docker compose up --build

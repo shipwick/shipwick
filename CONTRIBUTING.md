@@ -38,7 +38,8 @@ lists what may come.
 
 ## Getting started
 
-Go 1.27+, Docker, and Node 24 for the dashboard.
+Go 1.27+, Docker, and Node 24 with corepack for the dashboard: it is built
+with the Yarn its `package.json` pins, which corepack fetches.
 
 ```bash
 make dev    # dashboard :3000, agent :9000, Caddy :8080/:8443

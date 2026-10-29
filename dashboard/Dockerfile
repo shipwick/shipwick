@@ -12,18 +12,19 @@ FROM --platform=$BUILDPLATFORM node:24-alpine AS build
 WORKDIR /app
 
 # Dependencies first, so this layer is cached until the lockfile changes.
-# --ignore-scripts skips this package's `nuxt prepare` postinstall (the sources
-# are not copied yet, and `nuxt build` prepares anyway); `npm rebuild` then runs
-# the install scripts of the dependencies that have one.
-COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund && npm rebuild
+# Yarn is the version package.json pins, fetched by corepack. --mode=skip-build
+# skips this package's `nuxt prepare` postinstall (the sources are not copied
+# yet, and `nuxt build` prepares anyway); the dependencies' own install scripts
+# stay off, as Yarn 4 has them by default.
+COPY package.json yarn.lock .yarnrc.yml ./
+RUN corepack enable && yarn install --immutable --mode=skip-build
 
 COPY . .
-RUN npm run build
+RUN yarn build
 
 # ---- runtime -----------------------------------------------------------------
 # .output is self-contained (Nitro bundles and traces its dependencies):
-# no node_modules, no npm install, no source in the final image.
+# no node_modules, no Yarn, no source in the final image.
 FROM node:24-alpine AS runtime
 
 ENV NODE_ENV=production \

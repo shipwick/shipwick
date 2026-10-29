@@ -71,7 +71,7 @@ services:
       SHIPWICK_DNS_RESOLVERS: ${SHIPWICK_DNS_RESOLVERS:-}
       SHIPWICK_ACME_DIRECTORY: ${SHIPWICK_ACME_DIRECTORY:-}
       # Optional: people sign in to the dashboard with an OpenID Connect provider.
-      # The redirect URL is for a dashboard on this machine (npm run dev):
+      # The redirect URL is for a dashboard on this machine (yarn dev):
       # http://localhost:3000/auth/callback; with SHIPWICK_DASHBOARD_DOMAIN leave it unset.
       SHIPWICK_OIDC_ISSUER: ${SHIPWICK_OIDC_ISSUER:-}
       SHIPWICK_OIDC_CLIENT_ID: ${SHIPWICK_OIDC_CLIENT_ID:-}

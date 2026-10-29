@@ -12,6 +12,35 @@ names the migration under **Changed**
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard is built with Yarn, and its dependencies are current: Nuxt
+  4.6.3, Vitest 5.0.5, Vue Router 5.4.0.
+- The agent, the CLI and the proxy are built with Go 1.27.3, and the proxy
+  image carries Caddy 2.11.7 with the Cloudflare DNS module 0.2.4 and the
+  current versions of what both depend on: `golang.org/x/net` 0.62.0 in the
+  proxy, Docker's client library 0.6.2 and SQLite 3.54.1 (`modernc.org/sqlite`
+  1.61.0) in the agent. Caddy 2.11.7 fixes 2.11.6's cut-off streaming
+  responses: an HTTP/1.1 response to a request with a body, such as
+  server-sent events opened with `POST`, ended 60 seconds after the body was
+  read, and an HTTP/2 response that paused longer than a minute was reset.
+
+### Fixed
+
+- Building the dashboard no longer pulls the versions of `node-forge`, `undici`,
+  `seroval` and `serialize-javascript` with published advisories; none of them
+  was in the image.
+- The proxy image no longer carries CVE-2026-111943 (`crypto/x509` of Go
+  1.27.2, fixed in 1.27.3), CVE-2026-111497 (brotli 1.2.0) and CVE-2026-92392
+  (curl 8.22.0) of its Alpine base, nor CVE-2026-116587 in `go-jose/v4` 4.1.5,
+  a module Caddy 2.11.7 still names; the image now installs Alpine's package
+  fixes when it is built, since the official Caddy image is rebuilt only when
+  Caddy is released. `go-jose/v3` 3.0.5 remains, with no fixed version
+  released: Caddy's built-in certificate authority (`smallstep/certificates`)
+  uses it to read the keys of ACME clients, and Shipwick's configuration does
+  not turn that ACME server on. The agent and the CLI, built with Go 1.27.3,
+  no longer carry CVE-2026-111943 either.
+
 ## [1.0.0] - 2026-10-17
 
 1.0.0 is a promise, not a feature. From this release on, every key of

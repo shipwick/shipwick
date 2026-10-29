@@ -1,6 +1,6 @@
 // A stand-in for the Shipwick agent, for developing and testing the dashboard.
 //
-//   npm run mock            → http://127.0.0.1:9100, token mock-token-0123456789abcdef
+//   yarn mock               → http://127.0.0.1:9100, token mock-token-0123456789abcdef
 //
 // It lets the UI be developed without Docker or a real agent. It implements the
 // API described in docs/api.md, has no dependencies, keeps its state in memory,

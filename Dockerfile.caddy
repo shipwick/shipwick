@@ -13,17 +13,18 @@
 # Both versions are pinned. The agent generates this Caddy's configuration, and
 # a newer Caddy or module is a change to test, not something a rebuild brings
 # along. The second stage starts from the official image of the version the
-# first one builds, so everything but the binary is the official image's.
+# first one builds, so everything but the binary and the Alpine packages'
+# fixes is the official image's.
 
 # caddy/go.mod names the same Caddy: the module is compiled against the Caddy
 # it is built into, and CI fails when the two disagree.
-ARG CADDY_VERSION=2.11.6
+ARG CADDY_VERSION=2.11.7
 # The Go the proxy is compiled with. The builder image brings a Go of its own
 # and does not move it; this one is downloaded and used instead, so that the
 # proxy, which is what the internet talks to, gets the standard library's
 # fixes as soon as the agent does. caddy/go.mod names the same version, and
 # CI fails when the two disagree.
-ARG GO_VERSION=1.27.2
+ARG GO_VERSION=1.27.3
 
 # The build stage runs on the builder's own architecture and cross-compiles:
 # pure Go, so a multi-platform build needs no emulation.
@@ -41,4 +42,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       --output /out/caddy
 
 FROM caddy:${CADDY_VERSION}-alpine
+# The official image is rebuilt when Caddy is released, not when Alpine fixes
+# a package, so its brotli and curl can be weeks behind Alpine's fixes.
+RUN apk upgrade --no-cache
 COPY --from=build /out/caddy /usr/bin/caddy

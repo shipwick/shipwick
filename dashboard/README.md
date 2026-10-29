@@ -549,15 +549,16 @@ With `SHIPWICK_AGENTS` the dashboard shows each listed server, one at a time:
 
 ## Development
 
-Requirements: Node 22+ (24 recommended).
+Requirements: Node 22+ (24 recommended) with corepack, which fetches the Yarn
+that `package.json` pins (`corepack enable` once).
 
 ```bash
 cd dashboard
-npm install
+yarn install
 cp .env.example .env          # SHIPWICK_AGENT_URL=http://127.0.0.1:9100
 
-npm run mock                  # terminal 1: mock agent on :9100
-npm run dev                   # terminal 2: dashboard on http://localhost:3000
+yarn mock                     # terminal 1: mock agent on :9100
+yarn dev                      # terminal 2: dashboard on http://localhost:3000
 ```
 
 Sign in with the mock token: `mock-token-0123456789abcdef`.
@@ -758,26 +759,26 @@ with `MOCK_DASHBOARD_URL` set to where the dashboard is when that is not
 To try several servers, run two mocks and point the dashboard at both:
 
 ```bash
-MOCK_PORT=9100 npm run mock
-MOCK_PORT=9101 MOCK_EMPTY=1 MOCK_HOSTNAME=shipwick-hel1-02 npm run mock
-SHIPWICK_AGENTS=production=http://127.0.0.1:9100,staging=http://127.0.0.1:9101 npm run dev
+MOCK_PORT=9100 yarn mock
+MOCK_PORT=9101 MOCK_EMPTY=1 MOCK_HOSTNAME=shipwick-hel1-02 yarn mock
+SHIPWICK_AGENTS=production=http://127.0.0.1:9100,staging=http://127.0.0.1:9101 yarn dev
 ```
 
 ### Scripts
 
 | | |
 |---|---|
-| `npm run dev` | Nuxt dev server with HMR on :3000 |
-| `npm run mock` | Mock agent on :9100 |
-| `npm test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, the titles of tabs, the security block and the mock's reading of it, limits Docker does not enforce, and a silent Docker, a full disk and a refused dashboard, the scope of a secret and the characters a URL cannot carry, the probe after a deployment, the proxy's networks and the kernel's table of neighbours, the Cloudflare token's check and its refusals, a certificate's failure, what the editor masks, and how a lost log stream is taken up |
-| `npm run typecheck` | `vue-tsc` over app, server and config, strict + `noUncheckedIndexedAccess` |
-| `npm run build` | Production build into `.output/` |
-| `npm start` | `node .output/server/index.mjs` |
+| `yarn dev` | Nuxt dev server with HMR on :3000 |
+| `yarn mock` | Mock agent on :9100 |
+| `yarn test` | Unit tests (vitest): formatters, NDJSON splitter, status mapping, deployment-progress reducer (incl. the rollback path), rollback-candidate selection and deployment origins, role gating and 403 wording, spec display (argv quoting, health kinds, hostnames, published ports, logging), history bucket → chart mapping (gaps, limits, ticks), run status and outcome wording, argv editor → array, next-run formatting, error-field passthrough, redirect guard, navigation groups and moved addresses, the tabs of an application, what is wrong with an application and the overview's verdict, marks in lists, limited and expiring tokens, the token form, why a session ended, the audit trail's wording, `SHIPWICK_AGENTS` and which server an address is about, the browser's address for the audit trail, the sign-in's PKCE values, cookie and failure texts, a promotion's progress, the network row, a pasted deploy.yaml, the mock's YAML reader, roving focus and the focus trap, what is announced of a deployment, a promotion and the backups, the titles of tabs, the security block and the mock's reading of it, limits Docker does not enforce, and a silent Docker, a full disk and a refused dashboard, the scope of a secret and the characters a URL cannot carry, the probe after a deployment, the proxy's networks and the kernel's table of neighbours, the Cloudflare token's check and its refusals, a certificate's failure, what the editor masks, and how a lost log stream is taken up |
+| `yarn typecheck` | `vue-tsc` over app, server and config, strict + `noUncheckedIndexedAccess` |
+| `yarn build` | Production build into `.output/` |
+| `yarn start` | `node .output/server/index.mjs` |
 
 ## Production
 
 ```bash
-npm ci && npm run build
+yarn install --immutable && yarn build
 SHIPWICK_AGENT_URL=http://127.0.0.1:9000 node .output/server/index.mjs
 ```
 

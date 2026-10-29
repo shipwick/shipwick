@@ -31,13 +31,13 @@ make test               # Go unit tests; no Docker, a few seconds
 make test-race-docker   # the same under the race detector, in a container
 make test-integration   # needs a Docker daemon
 make test-full-disk     # what a disk without room does, on a small filesystem in a container
-make test-dashboard     # npm ci, typecheck, vitest, production build
+make test-dashboard     # yarn install, typecheck, vitest, production build
 make dev                # the whole stack: dashboard :3000, agent :9000, Caddy :8080/:8443
 ```
 
 Without `make` (Windows), run the one-liners from the [Makefile](Makefile).
-Dashboard alone, without Docker: `cd dashboard && npm run mock` in one terminal,
-`npm run dev` in another.
+Dashboard alone, without Docker: `cd dashboard && yarn mock` in one terminal,
+`yarn dev` in another.
 
 Run `make lint test` before you call a Go change done, `make test-dashboard` for
 a dashboard change, and the race detector for anything that touches

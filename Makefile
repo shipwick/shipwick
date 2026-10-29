@@ -45,7 +45,7 @@ test-full-disk:
 
 ## test-dashboard: typecheck, unit tests and production build of the dashboard
 test-dashboard:
-	cd dashboard && npm ci && npm run typecheck && npm test && npm run build
+	cd dashboard && yarn install --immutable && yarn typecheck && yarn test && yarn build
 
 ## lint: formatting and static checks
 lint:

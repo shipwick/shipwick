@@ -1,8 +1,9 @@
 # Weekly, grouped: one pull request per ecosystem instead of one per package.
 #
-# Major versions are left out for npm and for the Node base image: moving to a
-# new TypeScript, Nuxt or Node major is a decision, made by hand and tested by
-# hand — and the dashboard stays on Node's LTS line, which odd majors are not.
+# Major versions are left out for the dashboard and for the Node base image:
+# moving to a new TypeScript, Nuxt or Node major is a decision, made by hand and
+# tested by hand — and the dashboard stays on Node's LTS line, which odd majors
+# are not.
 # Security updates are not affected by `ignore`; Dependabot opens those anyway.
 version: 2
 updates:
@@ -12,6 +13,8 @@ updates:
     groups:
       go: { patterns: ["*"] }
 
+  # The dashboard is installed with Yarn; `npm` is the ecosystem Dependabot
+  # reads yarn.lock under.
   - package-ecosystem: npm
     directory: /dashboard
     schedule: { interval: weekly }
