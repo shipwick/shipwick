@@ -12,6 +12,8 @@ names the migration under **Changed**
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-30
+
 ### Changed
 
 - **The agent no longer holds the Docker socket.** Every installation now
@@ -1862,7 +1864,8 @@ Kubernetes.
 - When a replica crashes, one in-flight request may receive a 502.
 - No volumes, and no custom Caddy directives.
 
-[Unreleased]: https://github.com/shipwick/shipwick/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/shipwick/shipwick/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/shipwick/shipwick/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/shipwick/shipwick/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/shipwick/shipwick/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/shipwick/shipwick/compare/v0.9.0...v0.9.1
