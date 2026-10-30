@@ -145,7 +145,7 @@ func TestAnApplicationAndTheServerEachHaveASecretOfTheSameName(t *testing.T) {
 func TestSecretsAreEncryptedAtRestAndBoundToTheirName(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
-	s.SetSecret(ctx, "", "A", "one", time.Now())
+	s.SetSecret(ctx, "", "A", "value-of-A-written-in-plain-text", time.Now())
 	s.SetSecret(ctx, "", "B", "two", time.Now())
 
 	var rawA, rawB []byte
@@ -153,7 +153,8 @@ func TestSecretsAreEncryptedAtRestAndBoundToTheirName(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.db.QueryRowContext(ctx, `SELECT value FROM secrets WHERE name = 'B'`).Scan(&rawB)
-	if strings.Contains(string(rawA), "one") || !isSealed(string(rawA)) {
+	// The plain value is long enough that a ciphertext cannot hold it by chance.
+	if strings.Contains(string(rawA), "value-of-A-written-in-plain-text") || !isSealed(string(rawA)) {
 		t.Errorf("the row holds %q: want ciphertext with the enc1 prefix", rawA)
 	}
 
