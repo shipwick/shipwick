@@ -4,8 +4,9 @@
 # configs/docker-authz.rego — and puts it through everything an installation
 # does (test-cycle.sh). It passes when
 #
-#   - every operation works, which is to say the agent never made a request
-#     the policy refuses,
+#   - every operation works, which is to say the agent — behind the socket
+#     proxy of compose.production.yml, as on every server — never made a
+#     request the policy refuses,
 #   - the policy refuses what the socket proxy lets through: a privileged
 #     container, a directory of the server mounted, a namespace of the server,
 #     a capability beyond Docker's default set, a device, a container without
@@ -14,7 +15,7 @@
 #     container's mount), Swarm, and a request whose body the plugin cannot
 #     read.
 #
-# See docs/handbook.md, "Less than the whole socket".
+# See docs/handbook.md, "The Docker socket".
 #
 #   sh scripts/test-docker-authz.sh
 #
@@ -104,6 +105,7 @@ code=$(in_daemon curl -s -o /dev/null -w '%{http_code}' --unix-socket /var/run/d
 echo "refused: 403"
 
 say "what it does not refuse"
+# The last is the socket proxy's own mount: the one bind the policy allows.
 for flags in "--cap-add CHOWN" "-v named:/data" "--mount type=volume,src=named,dst=/data" "-v /var/run/docker.sock:/var/run/docker.sock"; do
     # shellcheck disable=SC2086 # several flags in one entry
     id=$(in_daemon docker create $flags alpine:3.22) || die "docker create $flags was refused: the policy allows it"

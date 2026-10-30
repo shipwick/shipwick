@@ -104,9 +104,11 @@ once its image is rebuilt (`docker compose up --build`).
   the CLI client, and the dashboard (`app/types/api.ts` **and**
   `mock/agent.mjs`, which must keep answering like the real agent).
 - A Docker Engine API call the agent did not make before is three changes:
-  the call, its line in the allow-list of `configs/compose.socket-proxy.yml`,
-  and its row in the handbook's table. `scripts/test-socket-proxy.sh` fails
-  when the proxy refused the agent anything.
+  the call, its line in the allow-list of the `socket-proxy` service in
+  `configs/compose.production.yml` (copied into `docker-compose.yml`, which a
+  unit test holds identical), and its row in the handbook's table. Every
+  installation runs the agent behind that proxy; `scripts/test-socket-proxy.sh`
+  fails when it refused the agent anything.
 
 ## Style
 

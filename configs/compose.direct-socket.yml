@@ -1,0 +1,35 @@
+# The agent on the Docker socket itself, without the socket proxy that
+# compose.production.yml puts between the two. The exception, not the rule:
+# the proxy refuses the agent nothing it needs, and whoever takes over an
+# agent that holds the socket has the whole Engine API instead of the calls
+# on the proxy's list. Reasons to want it anyway, and what it costs, are in
+# docs/handbook.md, "The Docker socket".
+#
+# An overlay on compose.production.yml. On a server set up by the installer,
+# save it as /opt/shipwick/compose.override.yml (or merge it into yours) and
+# run `docker compose up -d --remove-orphans` there, which also removes the
+# proxy's container; by hand:
+#
+#   docker compose -f compose.production.yml -f compose.direct-socket.yml up -d --remove-orphans
+#
+# Needs Docker Compose 2.24.4 or newer, for `!override` and `!reset`.
+#
+# The agent then says so: `socket: "direct"` in GET /server, a hint in
+# `shipwick doctor`, and the Docker line of `shipwick server status`.
+
+services:
+  agent:
+    environment:
+      DOCKER_HOST: unix:///var/run/docker.sock
+    # The list replaces the one in compose.production.yml instead of adding to
+    # it: that is what takes the filtered socket out and puts the daemon's in.
+    # Mounts of your own — a Docker config.json, a CA file — go here as well.
+    volumes: !override
+      - agent-data:/var/lib/shipwick
+      - caddy-admin:/run/caddy
+      # SHIPWICK_DOCKER_SOCKET in .env for a daemon whose socket is elsewhere.
+      - ${SHIPWICK_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    depends_on: !reset []
+
+  # Not started, and removed by --remove-orphans where it ran.
+  socket-proxy: !reset null

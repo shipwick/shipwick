@@ -1,18 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import type { ApplicationDetail } from '../app/types/api'
 import { diagnose } from '../app/utils/diagnosis'
-import { describeDocker, isUnenforced, limitsNotice, unenforcedLimits, unenforcedOf, unenforcedSentence, usageIsTheDaemons, withoutUnenforced } from '../app/utils/limits'
+import { describeDocker, describeSocket, isUnenforced, limitsNotice, unenforcedLimits, unenforcedOf, unenforcedSentence, usageIsTheDaemons, withoutUnenforced } from '../app/utils/limits'
 import { historyLimit } from '../app/utils/metricsHistory'
 
 const BOTH = ['memory', 'cpu']
 
 describe('the Docker row of the server\'s page', () => {
   it('is the version alone for a daemon that enforces both limits', () => {
-    expect(describeDocker({ docker_version: '29.8.2', docker: { rootless: false, unenforced_limits: [] } })).toEqual({ version: '29.8.2', warning: '', advice: '' })
+    expect(describeDocker({ docker_version: '29.8.2', docker: { rootless: false, unenforced_limits: [] } })).toEqual({ version: '29.8.2', socket: '', warning: '', advice: '' })
   })
 
   it('says rootless next to the version', () => {
-    expect(describeDocker({ docker_version: '29.8.2', docker: { rootless: true, unenforced_limits: [] } })).toEqual({ version: '29.8.2, rootless', warning: '', advice: '' })
+    expect(describeDocker({ docker_version: '29.8.2', docker: { rootless: true, unenforced_limits: [] } })).toEqual({ version: '29.8.2, rootless', socket: '', warning: '', advice: '' })
+  })
+
+  it('says how the agent reaches Docker, in the CLI\'s words, and nothing for an agent that does not say', () => {
+    expect(describeDocker({ docker_version: '29.9.2', docker: { rootless: false, unenforced_limits: [], socket: 'proxy' } }).socket).toBe('behind the socket proxy')
+    expect(describeDocker({ docker_version: '29.9.2', docker: { rootless: false, unenforced_limits: [], socket: 'direct' } }).socket).toBe('holding the Docker socket')
+    expect(describeSocket({ socket: 'something-newer' })).toBe('')
+    expect(describeSocket(undefined)).toBe('')
+    expect(describeSocket({})).toBe('')
   })
 
   it('says which limits are not enforced, in the CLI\'s words, and what to do on a rootless daemon', () => {
@@ -30,7 +38,7 @@ describe('the Docker row of the server\'s page', () => {
   })
 
   it('claims nothing for an agent before 0.8, which does not say', () => {
-    expect(describeDocker({ docker_version: '27.4.1' })).toEqual({ version: '27.4.1', warning: '', advice: '' })
+    expect(describeDocker({ docker_version: '27.4.1' })).toEqual({ version: '27.4.1', socket: '', warning: '', advice: '' })
     expect(describeDocker({ docker_version: '' }).version).toBe('—')
   })
 })

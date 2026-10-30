@@ -1,45 +1,16 @@
 # Roadmap
 
-What the current version does is in [README.md](README.md); what changed
-between versions is in [CHANGELOG.md](CHANGELOG.md). This is what comes next.
-Nothing here is a promise except what *1.0* says; an item moves when a real
+What Shipwick does is in [README.md](README.md) and, in full, in
+[docs/handbook.md](docs/handbook.md); what changed between versions is in
+[CHANGELOG.md](CHANGELOG.md); what a release may and may not change is the
+compatibility promise in the handbook under
+[Versions and compatibility](docs/handbook.md#versions-and-compatibility).
+This page is what comes next. Minors are cut from what installations ask for,
+in issues, against the principles in [CONTRIBUTING.md](CONTRIBUTING.md) and
+the two lists at the end of this page; an item here moves when a real
 installation shows that something else matters more.
 
-## 1.0
-
-1.0 is a promise, not a feature. From it on, a `deploy.yaml` that worked
-keeps working; the API under `/api/v1` keeps every path, field and code it
-has; the data directory changes only by a migration the agent applies when
-it starts; and a CLI of any 1.x version works against an agent of any other.
-A patch fixes and a minor adds; nothing is removed or renamed before 2.0, and
-what goes then is marked deprecated in the changelog of a minor first and
-keeps working until then. Only the latest release is supported, and the
-upgrade to it is one step from any 1.x. The whole policy, with what it does
-not promise, is in the handbook under
-[Versions and compatibility](docs/handbook.md#versions-and-compatibility);
-what is frozen, surface by surface, and why, is in
-[docs/architecture.md](docs/architecture.md#what-10-freezes).
-
-## 1.x
-
-A minor adds and removes nothing. What it adds is decided by what
-installations ask for, in issues, against the principles in
-[CONTRIBUTING.md](CONTRIBUTING.md) and the two lists at the end of this page.
-No minor is named yet. One measurement is still to be made:
-
-**Numbers from rented servers.** What one server carries is measured on a
-developer's machine at a server's size ([What one server
-carries](docs/handbook.md#what-one-server-carries)); the same script on rented
-servers of two sizes puts a second column next to the first, and the packages
-and rootless Docker run on a host that enforces SELinux confirm or correct the
-handbook's paragraphs on them. The results go into the handbook as numbers
-and corrections.
-
-## 2.x
-
-Not before 1.0 has been out long enough to say what 2.0 is for. 2.0 is the
-first release that may remove what a 1.x deprecated, and it comes with a
-written upgrade. One item is already known.
+## Next
 
 **The usual services, written for you.** `shipwick init postgres` adds an
 entry to `shipwick.yaml` that is right the first time: the volume at the path
@@ -50,6 +21,18 @@ Redis, MySQL and MariaDB, and no further: a handful of services every
 application needs, each started in a container by the tests, not a catalogue
 to keep up with. What is written is plain `deploy.yaml`; the agent learns
 nothing new, and a database remains an application like any other.
+
+**Capacity on rented servers.** The handbook's numbers for what one server
+carries were measured on a developer's machine held to a server's size
+([What one server carries](docs/handbook.md#what-one-server-carries)). The
+same script on two sizes of cloud server adds a second column: the smallest
+offer most people start on, and the one they move to.
+
+## Later
+
+A major version is the only release that may remove what a minor deprecated,
+and it comes with a written upgrade. Nothing is planned for one; the
+compatibility promise says why a 1.x release cannot be the place for it.
 
 ## Not planned
 
@@ -89,8 +72,8 @@ key at start-up. Both are documented rather than built in.
 **Long-term support releases.** Only the latest release is supported, and a
 fix — a security fix included — is the next patch of the latest minor. An
 older minor kept alive would be a second line to fix, test and release, and
-what makes it unnecessary is the promise above: the upgrade to the latest
-release is one step from any 1.x and relearns nothing. Decided again if real
+what makes it unnecessary is the compatibility promise: the upgrade to the
+latest release is one step from any 1.x and relearns nothing. Decided again if real
 upgrade data says otherwise.
 
 ## Out of scope
@@ -104,7 +87,8 @@ moving them when one fails, balancing replicas between machines. That is what
 an orchestrator is for, and it costs cluster membership, discovery across
 hosts, distributed state and split brains — the moment they arrive, "one
 process and one SQLite file" is over. Managing several independent servers
-from one CLI or one dashboard is a different thing and is on the list.
+from one CLI or one dashboard is a different thing, and it exists: contexts in
+the CLI, `SHIPWICK_AGENTS` in the dashboard.
 
 **Building images.** Turning a Dockerfile into an image is Docker's job; the
 agent runs images that exist. A build on the production server takes the CPU

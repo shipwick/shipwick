@@ -14,6 +14,36 @@ names the migration under **Changed**
 
 ### Changed
 
+- **The agent no longer holds the Docker socket.** Every installation now
+  runs a fourth container, `socket-proxy` (`wollomatic/socket-proxy`, pinned
+  in `compose.production.yml`), which holds `/var/run/docker.sock` and
+  answers the agent the calls it makes — the list the handbook's *The Docker
+  socket* has carried since 0.8 — with `403` for every other; the agent
+  reaches Docker through a socket the two share and has no other way to it.
+  A server gains the proxy on its next upgrade with nothing to do: the
+  installer replaces `compose.yml`, as it always has. A server that had put
+  the proxy in by hand, with `compose.socket-proxy.yml` as its
+  `compose.override.yml`, keeps running, and the installer says to take the
+  service out of the override, whose older list would hold a newer agent.
+  That overlay is gone from `configs/`; its opposite,
+  `configs/compose.direct-socket.yml`, gives the agent the socket itself for
+  the few servers that want it. `compose.rootless.yml` now hands the proxy
+  the rootless daemon's socket; `test-rootless.sh --socket-proxy` is the
+  only arrangement and lost its flag. The agent says how it reaches Docker:
+  `docker.socket` in `GET /server` is `"proxy"` or `"direct"` (absent from
+  older agents), `shipwick server status` ends its Docker line with "behind
+  the socket proxy" or "holding the Docker socket", `shipwick doctor` has a
+  hint for the second, and the dashboard's server page says the same next to
+  Docker's version. `SHIPWICK_SOCKET_PROXY_IMAGE` is a setting the installer
+  keeps and `shipwick server configure` writes; the proxy's image is held
+  against the release's `image-digests.txt` like Shipwick's own, and
+  `shipwick server bundle` carries it. The packages keep the agent on the
+  socket itself, as a process of the host, and say so. What it does not
+  protect against: the proxy reads a request's path and its bind mounts, not
+  the rest of its body, so whoever holds an admin token can still create a
+  privileged container and is still root on the server; Docker's
+  authorization plugin (`configs/docker-authz.rego`) is what refuses that,
+  and it composes with the proxy.
 - The CLI is no longer submitted to winget; the submission waited for review
   since September. On Windows the installer
   (`irm https://get.shipwick.com/windows | iex`) installs the CLI and

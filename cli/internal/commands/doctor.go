@@ -225,6 +225,7 @@ func (c *cli) doctor(ctx context.Context) error {
 	} else {
 		r.hint("The agent did not report a Docker version; see: shipwick server status")
 	}
+	r.socket(info)
 	r.network(info.Network)
 	switch p := info.Proxy; {
 	case !p.Enabled:

@@ -5,6 +5,9 @@
 #
 #   sh scripts/test-upgrade.sh v0.7.0          # from v0.7.0 to the checkout
 #   sh scripts/test-upgrade.sh --back v0.7.0   # and back to v0.7.0 with the installer
+#   sh scripts/test-upgrade.sh --old-proxy-overlay v1.0.0
+#       # a server that had put the socket proxy in by hand, with the release's
+#       # compose.socket-proxy.yml (0.8.0 to 1.0.0) as its compose.override.yml
 #
 # The server is a container with a Docker daemon of its own (docker:dind),
 # made here and removed at the end; nothing on this machine's daemon is
@@ -44,15 +47,17 @@ DB_KEY="dXBncmFkZQ=="
 DB_VALUE="d2Fsa2Vk"
 
 BACK=""
+OLD_PROXY_OVERLAY=""
 RELEASE=""
 for arg in "$@"; do
     case "$arg" in
         --back) BACK=1 ;;
+        --old-proxy-overlay) OLD_PROXY_OVERLAY=1 ;;
         v[0-9]*) RELEASE="$arg" ;;
-        *) echo "usage: sh scripts/test-upgrade.sh [--back] <release, such as v0.7.0>" >&2; exit 2 ;;
+        *) echo "usage: sh scripts/test-upgrade.sh [--back] [--old-proxy-overlay] <release, such as v0.7.0>" >&2; exit 2 ;;
     esac
 done
-[ -n "$RELEASE" ] || { echo "usage: sh scripts/test-upgrade.sh [--back] <release, such as v0.7.0>" >&2; exit 2; }
+[ -n "$RELEASE" ] || { echo "usage: sh scripts/test-upgrade.sh [--back] [--old-proxy-overlay] <release, such as v0.7.0>" >&2; exit 2; }
 
 cd "$(dirname "$0")/.."
 # Git Bash would rewrite the server's paths into Windows ones — the //p of a
@@ -155,6 +160,17 @@ proxy_has_plain_source() {
 stored_value() {
     on_server curl -sk -m 10 https://db.localhost/v3/kv/range -d "{\"key\":\"$DB_KEY\"}" | grep -q "\"value\":\"$DB_VALUE\""
 }
+# The agent reaches Docker through the socket proxy and says so: it mounts no
+# Docker socket, the proxy's container runs, and the status line names it.
+agent_behind_proxy() {
+    case "$(on_server docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' shipwick-agent-1)" in
+        *docker.sock*) return 1 ;;
+    esac
+    proxy_container_runs && new server status | grep -q 'behind the socket proxy'
+}
+proxy_container_runs() {
+    on_server docker ps -q --filter label=com.docker.compose.project=shipwick --filter label=com.docker.compose.service=socket-proxy | grep -q .
+}
 secret_in_replica() {
     on_server docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$(replica_of web)" | grep -qx "GREETING=$1"
 }
@@ -195,12 +211,24 @@ start_server() {
     # 0.3.0 alone, whose agent asks its own resolver whether a hostname has a
     # record before it serves it; the releases after it ask public resolvers,
     # which answer for *.localhost.
-    put /opt/shipwick/compose.override.yml <<'EOF'
+    if [ -n "$OLD_PROXY_OVERLAY" ]; then
+        # The release's own overlay, as the handbook of 0.8 to 1.0 said to save
+        # it, with the two lines above put into its agent service.
+        on_server curl -fsSL -o /root/compose.socket-proxy.yml "https://raw.githubusercontent.com/$REPO/$RELEASE/configs/compose.socket-proxy.yml" \
+            || die "$RELEASE has no configs/compose.socket-proxy.yml: the overlay came with 0.8.0 and went into compose.production.yml after 1.0.0."
+        on_server sed '/^  agent:$/a\
+    ports: ["127.0.0.1:9000:9000"]\
+    extra_hosts: ["web.localhost:127.0.0.1", "db.localhost:127.0.0.1"]' /root/compose.socket-proxy.yml | put /opt/shipwick/compose.override.yml
+        on_server grep -q 'extra_hosts' /opt/shipwick/compose.override.yml || die "Could not put the test's lines into the overlay."
+        step "compose.override.yml is the socket-proxy overlay of $RELEASE, with the test's two lines"
+    else
+        put /opt/shipwick/compose.override.yml <<'EOF'
 services:
   agent:
     ports: ["127.0.0.1:9000:9000"]
     extra_hosts: ["web.localhost:127.0.0.1", "db.localhost:127.0.0.1"]
 EOF
+    fi
     step "Docker $(on_server docker version --format '{{.Server.Version}}') in the container $SERVER"
 }
 
@@ -217,6 +245,10 @@ install_release() {
     eventually on_server curl -fsS -o /dev/null "$AGENT_URL/api/v1/health" || die "The agent of $RELEASE does not answer on $AGENT_URL."
     agent_is "$RELEASE" || die "The agent says it is $(agent_version), not $RELEASE."
     step "The agent and the CLI are $RELEASE: $(on_server sh -c 'cd /opt/shipwick && docker compose config --images' | tr '\n' ' ')"
+    if [ -n "$OLD_PROXY_OVERLAY" ]; then
+        proxy_container_runs || die "The overlay of $RELEASE did not start the socket proxy."
+        step "The socket proxy of the overlay runs next to the agent of $RELEASE"
+    fi
 }
 
 web_yaml() { # web_yaml TAG
@@ -387,6 +419,12 @@ check_upgraded() {
     check "https://web.localhost answers 200" eventually answers https://web.localhost/
     check "The history of web is intact ($WEB_DEPLOYMENTS_BEFORE deployments)" test "$(deployments_of web)" = "$WEB_DEPLOYMENTS_BEFORE"
     check "The proxy runs the configuration of this version (\"source\":\"shipwick\")" eventually proxy_has_kept_source
+    check "The agent gave up the Docker socket: the socket proxy holds it, and shipwick server status says so" agent_behind_proxy
+    if [ -n "$OLD_PROXY_OVERLAY" ]; then
+        check "The installer said that the override's socket-proxy service is now the compose file's" grep -q "defines the socket-proxy service as well" "$WORK/upgrade.out"
+    else
+        check "The installer said nothing about the override" not grep -q "defines the socket-proxy service" "$WORK/upgrade.out"
+    fi
     if since v0.2.0; then
         check "https://db.localhost answers 200" eventually answers https://db.localhost/health
         check "The key written before the upgrade is in the volume" stored_value
@@ -458,6 +496,14 @@ go_back() {
         check "The installer left the saved configuration, which the proxy of $RELEASE reads" not grep -q "saved configuration was written by a newer release" "$WORK/back.out"
         check "The agent is $RELEASE again" eventually agent_is "$RELEASE"
         check "The proxy of $RELEASE runs, with the configuration both versions share" eventually proxy_has_kept_source
+        # The compose file of a release before the socket proxy was part of
+        # every installation has no service for it: --remove-orphans takes the
+        # container away, unless an overlay of the user's keeps it.
+        if since v1.1.0 || [ -n "$OLD_PROXY_OVERLAY" ]; then
+            check "The socket proxy's container still runs" proxy_container_runs
+        else
+            check "The socket proxy's container went with the compose file of $RELEASE" not proxy_container_runs
+        fi
     else
         check "The installer removed the saved configuration the older proxy cannot read" grep -q "saved configuration was written by a newer release" "$WORK/back.out"
         check "The agent is $RELEASE again" eventually agent_is "$RELEASE"

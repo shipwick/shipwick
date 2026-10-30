@@ -56,11 +56,17 @@ everything about the application that the next platform will ask.
                           │
           ┌───────────────┼───────────────┐
           ▼               ▼               ▼
-        Docker          Caddy           SQLite
+    socket proxy        Caddy           SQLite
+          │
+          ▼
+        Docker
           │
           ▼
       Containers
 ```
+
+The agent never holds the Docker socket: the socket proxy does, and answers
+the agent the calls it makes and no other ([§12](#the-docker-socket)).
 
 The agent owns the deployment lifecycle. Every deployment is an immutable record
 moving through a state machine:
@@ -85,8 +91,9 @@ curl -fsSL https://get.shipwick.com | sh
 ```
 
 It asks for two optional hostnames — one for the API, one for the dashboard —
-and then sets up three containers in `/opt/shipwick`: the **agent**, **Caddy**,
-and the **dashboard**. When it is done it prints the API token, once.
+and then sets up four containers in `/opt/shipwick`: the **agent**, the
+**socket proxy** it reaches Docker through, **Caddy**, and the **dashboard**.
+When it is done it prints the API token, once.
 
 ```text
 ✓ Docker 29.8.0 with Compose 5.5.1
@@ -398,7 +405,7 @@ applications with its own CLI, and upgraded
 ([scripts/test-upgrade.sh](../scripts/test-upgrade.sh) does it; CI repeats it
 for the last two releases). What happened on every one of them:
 
-- **Shipwick's three containers are replaced; the applications' are not.**
+- **Shipwick's own containers are replaced; the applications' are not.**
   The replicas after the upgrade are the containers the old release started,
   and they are served without a deployment.
 - **Requests go unanswered while the proxy's container is replaced.**
@@ -423,7 +430,8 @@ What differs by where the upgrade starts:
 
 | From | What the upgrade does besides | What you do |
 |---|---|---|
-| 0.9, 0.10 | Nothing: 1.0 adds no migration and renames nothing. It is the release from which [Versions and compatibility](#versions-and-compatibility) holds | Nothing |
+| 1.0 | The agent gives up the Docker socket. A fourth container, the socket proxy, holds it and answers the agent the calls on its list; the agent reaches Docker through a socket the two share ([The Docker socket](#the-docker-socket)). No migration | Nothing. A server that had `compose.socket-proxy.yml` as its `compose.override.yml` keeps running, and the installer says to take the service out of the override: its list would hold a newer agent to an older one |
+| 0.9, 0.10 | The same. 1.0 added no migration and renamed nothing; it is the release from which [Versions and compatibility](#versions-and-compatibility) holds | Nothing |
 | 0.8 | The agent adds a column to its table of secrets (migration 22): a secret can belong to one application. The secrets stored before are the server's, as they were | Nothing |
 | 0.7 | And the proxy's image gains Shipwick's own way of finding replicas, and the agent loads a configuration that uses it | Nothing |
 | 0.5, 0.6 | The same | Nothing |
@@ -629,14 +637,22 @@ networks (`ufw`, `firewalld`) must let port 9000 through from the
 `shipwick-control` network. The API is plain HTTP: never give it a public
 address.
 
-**The agent runs as root.** It drives Docker through Docker's socket, and
-whoever may do that can start a container that owns the host: a user of its
-own in the `docker` group would be root in everything but name, and the proxy's
-admin socket and root's `docker login` credentials would need opening up for
-it. The unit takes away what the agent does not need instead: it cannot gain
-privileges, `/usr`, `/boot` and `/etc` are read-only to it, home directories
-are read-only, and it has a `/tmp` of its own. A `SHIPWICK_BACKUP_DIR` must
-therefore lie outside those, under `/var` or `/srv`.
+**The agent runs as root, and holds the Docker socket itself.** It drives
+Docker through Docker's socket, and whoever may do that can start a container
+that owns the host: a user of its own in the `docker` group would be root in
+everything but name, and the proxy's admin socket and root's `docker login`
+credentials would need opening up for it. The unit takes away what the agent
+does not need instead: it cannot gain privileges, `/usr`, `/boot` and `/etc`
+are read-only to it, home directories are read-only, and it has a `/tmp` of
+its own. A `SHIPWICK_BACKUP_DIR` must therefore lie outside those, under
+`/var` or `/srv`. The socket proxy that stands between the agent and Docker
+on a server the installer set up ([The Docker socket](#the-docker-socket))
+is a container of that installation's compose file; the package has no
+container for the agent to depend on and keeps the arrangement a process of
+the host has always had. The agent says so: `socket: "direct"` in
+`GET /server`, "holding the Docker socket" in `shipwick server status`, and
+a hint in `shipwick doctor` that names the package as one of the two places
+this is expected.
 
 **Upgrading** is installing the newer package: the agent is restarted when
 it was running, `agent.env` stays as it is, and the compose command above,
@@ -732,7 +748,10 @@ row from `/etc/shipwick/agent.env`.
 | `SHIPWICK_LOG_FORMAT` | `text` | `text` `json`. The installer's compose file sets `json` |
 | `SHIPWICK_HTTP_PORT`, `SHIPWICK_HTTPS_PORT` | `80`, `443` | Read by Compose, not the agent: the server ports Caddy is published on (443 over UDP as well). Only when something else owns 80 and 443; certificates need the real ones reachable from the internet |
 | `SHIPWICK_AGENT_IMAGE`, `SHIPWICK_DASHBOARD_IMAGE`, `SHIPWICK_CADDY_IMAGE` | the release's | Read by Compose: images of your own in place of the release's. The installer keeps them across upgrades; with a bundle, `docker load` them first |
-| `DOCKER_HOST`, `DOCKER_CONFIG` | Docker defaults | Standard Docker variables are honored |
+| `SHIPWICK_SOCKET_PROXY_IMAGE` | `wollomatic/socket-proxy:1.13.1` | Read by Compose: another image of the [socket proxy](#the-docker-socket) than the one the release pins. The installer keeps it across upgrades |
+| `SHIPWICK_DOCKER_SOCKET` | `/var/run/docker.sock` | Read by Compose: the daemon's socket on the server, which the socket proxy mounts. A rootless daemon's is `/run/user/<uid>/docker.sock`, which `compose.rootless.yml` sets |
+| `SHIPWICK_SOCKET_PROXY_LOG_LEVEL` | `INFO` | Read by Compose: `DEBUG` makes the socket proxy log every request it lets through, next to the ones it refuses |
+| `DOCKER_HOST`, `DOCKER_CONFIG` | Docker defaults | Standard Docker variables are honored. The compose files set `DOCKER_HOST` to the socket proxy's socket, `unix:///run/docker-proxy/docker.sock`; the agent reads how it reaches Docker off that address |
 
 ### Behind a corporate proxy
 
@@ -878,7 +897,7 @@ shipwick server bundle --arch amd64
 ```text
 ✓ Release v0.7.0: compose.production.yml, install.sh and shipwick_linux_amd64 match its checksums
 Release v0.7.0 has no signature: releases before 0.8.0 were not signed.
-✓ The three images are the ones release v0.7.0 published for linux/amd64
+✓ The 3 images are the ones release v0.7.0 published for linux/amd64
 ✓ Wrote shipwick-v0.7.0-linux-amd64.tar.gz (113 MB)
 
 Copy it to the server, and there, as root:
@@ -889,7 +908,8 @@ checksums.txt of the release: sha256 646205a7…
 ```
 
 The bundle holds the release's compose file, installer and checksums, the
-`shipwick` binary for the server, and the three images in one archive, pulled
+`shipwick` binary for the server, and the images the compose file names in
+one archive — Shipwick's three and, from 1.1, the socket proxy's — pulled
 for the server's architecture (`--arch amd64` or `arm64`). `--version v0.6.0`
 picks a release other than the latest; a bundle can be made of 0.6.0 and
 later. The release's files are verified against its checksums when the bundle
@@ -3101,7 +3121,7 @@ Error: Docker does not answer on the server. Applications that are running keep 
 | When | What you see | What Shipwick does |
 |---|---|---|
 | While it lasts | Every command that needs Docker is answered like the one above (`503 RUNTIME_UNAVAILABLE`), after 15 seconds at most. `shipwick server status` too; the agent itself reports healthy, because it is. The agent's log says `Docker does not answer; applications are not supervised until it does`, once. After 30 seconds the `docker` alert goes to the webhook and to `shipwick_alerts{kind="docker"}`: `Docker does not answer. Applications that are running keep running, but nothing is restarted, deployed or routed until it does. On the server: systemctl status docker` | Asks the daemon one question a second, 15 seconds each when it is stuck, and does nothing else: no restarts, no changes of routes, no application held. It never concludes that a container is gone from a daemon that did not answer |
-| A deployment that is under way | It fails with the daemon's words, for instance `replica 2: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?`, and where old replicas had been replaced: `…; the rollback to 1.0 then failed too: …` | Leaves every replica that serves where it is. When Docker answers, the supervisor removes what is left of the failed version and completes the old one: `Removed leftover container shipwick_web_2_1`, `Recreated replica 1` |
+| A deployment that is under way | It fails with the daemon's words, for instance `replica 2: Cannot connect to the Docker daemon at unix:///run/docker-proxy/docker.sock. Is the docker daemon running?`, and where old replicas had been replaced: `…; the rollback to 1.0 then failed too: …` | Leaves every replica that serves where it is. When Docker answers, the supervisor removes what is left of the failed version and completes the old one: `Removed leftover container shipwick_web_2_1`, `Recreated replica 1` |
 | When it answers again | `Docker answers again after 38s; applications are supervised again`, in the log and as `alert.cleared` | The next pass sees what happened meanwhile — replicas that exited are restarted, missing ones recreated |
 | The agent starts and Docker is not there | The agent's container exits and is started again by Docker's restart policy, until the daemon answers: `docker daemon unreachable: … Is Docker running, and may this user access its socket?` | A deployment that was interrupted is left as it is, and resumed by the start that finds Docker answering |
 
@@ -4302,9 +4322,12 @@ not pass through Cloudflare: `ssh -L 9000:127.0.0.1:9000 user@server`, then
 
 ## 12. Security
 
-**The Docker socket is root.** The agent needs `/var/run/docker.sock`, and
-anyone who controls the Docker daemon controls the host: they can start a
-container that mounts `/`. Consequently:
+**Driving Docker is root.** Whoever can ask the daemon for a container can
+ask for one that mounts `/`, and the agent's work is asking the daemon for
+containers. In the default installation it does so through a socket proxy
+that passes the calls it makes and refuses every other, never through the
+socket itself — [The Docker socket](#the-docker-socket) says what that
+stops and what it does not. A request to create a container passes, so:
 
 - **An admin token is equivalent to root SSH access to the server.** Treat it so.
 - Whoever can write a `deploy.yaml` to your agent can run arbitrary images on
@@ -4381,8 +4404,8 @@ process of the host, and the addresses of a host are reachable from every
 container on it. It refuses every address of the two application networks,
 and on the address it has on the control network every address that is not
 of that network; nothing is open.
-Two arrangements give the agent less than that socket, a socket proxy and
-rootless Docker: see [Less than the whole socket](#less-than-the-whole-socket).
+What stands between the agent and the Docker daemon, and what more can:
+[The Docker socket](#the-docker-socket).
 
 **Tokens and roles.** The token the installer prints is the *root* token:
 `admin`, and the one to keep for yourself. Create more, each with the role it
@@ -4883,44 +4906,56 @@ Protect the data directory regardless; it is created `0700`.
 
 Found a vulnerability? Please report it privately: [SECURITY.md](../SECURITY.md).
 
-### Less than the whole socket
+### The Docker socket
 
-The standard installation gives the agent `/var/run/docker.sock` of a daemon
-that runs as root, which is why everything above starts with "the Docker
-socket is root". Three arrangements give it less. They are independent; none
-is what the installer sets up, and each costs something. Each is run by a
-script in the repository, in a Docker daemon of its own:
+The Docker daemon of a server runs as root, and its socket is root to whoever
+holds it. In every installation the installer sets up, the agent does not:
+a socket proxy holds the socket and answers the agent the calls on its list,
+and the agent has no other way to the daemon. That is the default, and the
+rest of this section is what stands around it: the overlay that gives the
+agent the socket itself, for the few servers that want it; Docker's
+authorization plugin, which reads what the proxy cannot and is what refuses a
+compromised agent root; and rootless Docker, where root is nobody's. Each is
+run by a script in the repository, in a Docker daemon of its own:
 `sh scripts/test-socket-proxy.sh`, `sh scripts/test-docker-authz.sh`,
 `sh scripts/test-rootless.sh`.
 
-#### Behind a socket proxy
+The agent says how it reaches Docker, read off the address it was given:
+`docker.socket` in `GET /server` is `"proxy"` or `"direct"`, `shipwick
+server status` ends its Docker line with "behind the socket proxy" or
+"holding the Docker socket", and `shipwick doctor` has a hint for the second
+and nothing for the first. An agent before 1.1 says nothing, which is not a
+claim either way.
 
-[configs/compose.socket-proxy.yml](../configs/compose.socket-proxy.yml)
-puts [wollomatic/socket-proxy](https://github.com/wollomatic/socket-proxy)
-between the agent and Docker. The proxy holds the socket; the agent gets a
-second, filtered socket in a volume the two share, and no other way to
-Docker. The proxy has no network, no capabilities and a read-only
-filesystem, and answers only the requests on its list — a method and a path
-each — with `403` for every other.
+#### The socket proxy
 
-```bash
-cd /opt/shipwick
-curl -fsSL -o compose.override.yml \
-  https://raw.githubusercontent.com/shipwick/shipwick/v<version>/configs/compose.socket-proxy.yml    # or merge it into yours
-docker compose up -d
-```
+[configs/compose.production.yml](../configs/compose.production.yml) runs
+[wollomatic/socket-proxy](https://github.com/wollomatic/socket-proxy) as a
+fourth container, `socket-proxy`, between the agent and Docker. The proxy
+holds `/var/run/docker.sock`; the agent gets a second, filtered socket in a
+volume the two share (`DOCKER_HOST=unix:///run/docker-proxy/docker.sock`),
+and no other way to Docker. The proxy has no network, no capabilities and a
+read-only filesystem, and answers only the requests on its list — a method
+and a path each — with `403` for every other.
 
-By hand it is `docker compose -f compose.production.yml -f
-compose.socket-proxy.yml up -d`. The file replaces the agent's list of
-mounts (`!override`, Docker Compose 2.24.4 or newer), which is what takes the
-socket away from it: mounts of your own, such as a Docker `config.json`, go
-into the same list. Take the file of the version the agent is. The list is
-the calls that version makes; a newer agent that needs one more is
-refused it, which shows as `Forbidden` in a failed operation and as a
-`blocked request` line in `docker logs shipwick-socket-proxy-1`. With
-`SHIPWICK_SOCKET_PROXY_LOG_LEVEL=DEBUG` in `.env` the proxy logs every
-request it lets through as well; `SHIPWICK_SOCKET_PROXY_IMAGE` names another
-image of it than the version the file pins.
+Nothing is to be done for it: a new server has it from the installer, and a
+server that ran without it gains it on its next upgrade, since the installer
+replaces `compose.yml`. A server that had put the proxy in by hand, with the
+`compose.socket-proxy.yml` of 0.8 to 1.0 as its `compose.override.yml`,
+keeps running — Compose merges the two definitions — and the installer says
+to take the `socket-proxy` service and the `docker-proxy` volume out of the
+override: the override's list of calls replaces the release's, and an agent
+that makes one call more is refused it by the older list, which shows as
+`Forbidden` in a failed operation and as a `blocked request` line in
+`docker logs shipwick-socket-proxy-1`. Mounts of your own, such as a Docker
+`config.json` or a CA file, go into the agent's `volumes` in the override as
+before. With `SHIPWICK_SOCKET_PROXY_LOG_LEVEL=DEBUG` in `.env` the proxy
+logs every request it lets through as well; `SHIPWICK_SOCKET_PROXY_IMAGE`
+names another image of it than the version the file pins, and the installer
+keeps the setting across upgrades. The image is pulled from Docker Hub, and
+held against the digests the release published like Shipwick's own three
+([§4](#4-installation), *Upgrading*); a bundle for a server with no way out
+carries it.
 
 The list, which is all the agent ever asks of Docker:
 
@@ -4947,7 +4982,9 @@ It was found by reading the agent and confirmed by recording: every
 operation of `scripts/test-cycle.sh` — deploy, rollout, rollback, stop and
 start, a hook, a job, a one-off command, a backup with its verification, a
 restore, a static folder, a built image, an export and an import, deletion —
-runs through the proxy with nothing refused.
+runs through the proxy with nothing refused, and the development stack runs
+the same service, so a call the list lacks is refused on the developer's
+machine first.
 
 **What it takes away.** Everything in the Engine API that is not on the
 list: Swarm, plugins, builds, `commit`, `kill`, `restart`, `rename`,
@@ -4983,9 +5020,45 @@ proxy used here checks bind mounts and stops there; the other maintained
 one, [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy),
 filters by section of the API and would allow every call on containers
 once any is allowed, by its documentation. Docker's own authorization
-plugins see the whole request: that is the next arrangement. For a server
-where a compromised agent must not become root, it or rootless Docker
-below is what holds.
+plugins see the whole request: that is the further step below. For a server
+where a compromised agent must not become root, it or rootless Docker is
+what holds.
+
+#### The socket itself
+
+[configs/compose.direct-socket.yml](../configs/compose.direct-socket.yml)
+takes the proxy out and gives the agent `/var/run/docker.sock`, the way
+every installation before 1.1 had it. The agent needs nothing the proxy
+refuses, so the reasons are few: a daemon reached at an address of your own
+rather than a socket (`DOCKER_HOST` in a `compose.override.yml`, which the
+proxy cannot forward to), or a server where one container fewer weighs more
+than the list. The cost is the list: whoever takes over the agent has the
+whole Engine API instead of the calls above.
+
+```bash
+cd /opt/shipwick
+curl -fsSL -o compose.override.yml \
+  https://raw.githubusercontent.com/shipwick/shipwick/v<version>/configs/compose.direct-socket.yml    # or merge it into yours
+docker compose up -d --remove-orphans    # removes the proxy's container as well
+```
+
+The overlay replaces the agent's list of mounts (`!override`) and removes the
+proxy's service (`!reset`), both of which take Docker Compose 2.24.4 or
+newer; mounts of your own go into the same list. The installer leaves the
+override alone on an upgrade, so the choice holds. The agent says what it
+has: `shipwick server status` ends its Docker line with "holding the Docker
+socket", `GET /server` carries `docker.socket: "direct"`, and `shipwick
+doctor` prints a hint that names this overlay and the package as the two
+places this is expected:
+
+```text
+! The agent holds the Docker socket itself, and whoever takes it over has the whole Engine API. The default installation puts a filtered socket between the agent and Docker: on a server the installer set up, take compose.direct-socket.yml out of compose.override.yml and run docker compose up -d there; an agent installed from a package holds the socket by design (handbook: The Docker socket)
+```
+
+An agent installed [from a package](#installation-from-a-package) holds the
+socket the same way, and for a reason of its own: it is a process of the
+host, with no compose file of the installer's to put a container between it
+and the daemon.
 
 #### Behind an authorization plugin
 
@@ -5006,8 +5079,8 @@ command run in one, root on the server:
   the server becomes a volume: `-o o=bind` — or the same options on a
   container's `--mount type=volume,volume-opt=…`, which the daemon creates on
   the way), with one path allowed, the daemon's own socket under either of
-  its names (`/var/run/docker.sock`, `/run/docker.sock`), which the agent's
-  container is given and which leads back to the policy;
+  its names (`/var/run/docker.sock`, `/run/docker.sock`), which the socket
+  proxy's container is given and which leads back to the policy;
 - a namespace of the server: `--pid`, `--net`, `--ipc`, `--userns`, `--uts`
   or `--cgroupns` set to `host`;
 - a capability beyond Docker's default set (`--cap-add SYS_ADMIN`, `ALL`), a
@@ -5018,8 +5091,9 @@ command run in one, root on the server:
 - a privileged command in a container (`docker exec --privileged`);
 - Swarm, and plugins.
 
-Nothing in Shipwick changes for it: the compose file stays as it is, with or
-without the socket proxy. On the server, as root:
+Nothing in Shipwick changes for it: the compose file stays as it is, the
+socket proxy in front of the agent included — the plugin sits at the daemon
+and judges the proxy's requests like everyone's. On the server, as root:
 
 ```bash
 mkdir -p /etc/docker/policies
@@ -5067,8 +5141,7 @@ policy, and so is a volume of your own created with `-o`. `docker plugin` comman
 plugin, take it out of `daemon.json` and send the daemon `HUP` first. A
 policy file that is missing or unreadable makes the plugin allow every
 request; it refuses nothing by accident, and protects nothing by accident
-either. With the socket proxy or with rootless Docker in the same
-installation it was not run.
+either. With rootless Docker in the same installation it was not run.
 
 #### Rootless Docker
 
@@ -5090,12 +5163,10 @@ who runs Docker, and start it as that user:
 docker compose -f compose.production.yml -f compose.rootless.yml up -d
 ```
 
-The overlay mounts `$XDG_RUNTIME_DIR/docker.sock`, where a rootless daemon
-listens, in place of `/var/run/docker.sock`; `SHIPWICK_DOCKER_SOCKET` in
-`.env` names another path. With the socket proxy as well, set
-`SHIPWICK_DOCKER_SOCKET=/run/user/<uid>/docker.sock` in `.env` and use
-`compose.socket-proxy.yml` instead of `compose.rootless.yml`: the proxy then
-holds that socket.
+The overlay hands the socket proxy `$XDG_RUNTIME_DIR/docker.sock`, where a
+rootless daemon listens, in place of `/var/run/docker.sock`; the agent is
+behind the proxy as on any server. `SHIPWICK_DOCKER_SOCKET` in `.env` names
+the path instead, and makes the overlay unnecessary.
 
 What the server needs first, as root:
 
@@ -5150,7 +5221,7 @@ $ shipwick status
 Limits     0.5 CPU, 64 MB  (Docker on this server does not enforce the memory and CPU limits; see shipwick doctor)
 
 $ shipwick server status
-Docker          29.8.2, rootless; memory and CPU limits are not enforced
+Docker          29.8.2, rootless, behind the socket proxy; memory and CPU limits are not enforced
 
 $ shipwick doctor
 ! Docker on the server is rootless and does not enforce memory and CPU limits: no replica is held to resources.memory and resources.cpu of its deploy.yaml, and the usage shown for a replica is not its own. Delegate the cpu and memory cgroup controllers to the user who runs Docker, on a server with systemd (handbook: Rootless Docker)
@@ -5198,7 +5269,7 @@ enforcing mode.
 `docker:dind-rootless` image, which has no systemd and therefore no
 controllers, and Debian 12 with systemd 252 and the delegation above. Not
 on a server or a virtual machine of its own. `scripts/test-rootless.sh`
-runs the first of the two, alone and with `--socket-proxy`.
+runs the first of the two.
 
 ### Signing in with the company's accounts
 

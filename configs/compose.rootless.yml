@@ -6,16 +6,16 @@
 #
 #   docker compose -f compose.production.yml -f compose.rootless.yml up -d
 #
-# With the socket proxy as well, this file is not needed: set
-# SHIPWICK_DOCKER_SOCKET in .env and use compose.socket-proxy.yml, which reads
-# the same variable.
+# All it does is hand the socket proxy the rootless daemon's socket, which
+# compose.production.yml reads from SHIPWICK_DOCKER_SOCKET: with that
+# variable in .env, this file is not needed.
 #
 # What the server needs first — ports 80 and 443 for an ordinary user, cgroup
 # delegation for resource limits, lingering — and what does not work is in
-# docs/handbook.md, "Less than the whole socket".
+# docs/handbook.md, "The Docker socket".
 
 services:
-  agent:
+  socket-proxy:
     volumes:
       # The rootless daemon's socket; there is none at /var/run/docker.sock.
       # The place inside the container is the same, so this entry replaces

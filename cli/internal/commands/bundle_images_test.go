@@ -127,7 +127,7 @@ func TestServerBundleProvesItsImagesAgainstTheReleasesDigests(t *testing.T) {
 			if err != nil {
 				t.Fatalf("server bundle: %v\n%s", err, out)
 			}
-			if !strings.Contains(out, "The three images are the ones release v0.6.0 published for linux/arm64") || errOut != "" {
+			if !strings.Contains(out, "The 3 images are the ones release v0.6.0 published for linux/arm64") || errOut != "" {
 				t.Errorf("the images were not said to be proven:\n%s%s", out, errOut)
 			}
 			sums := sha256.Sum256([]byte(readBundleFile(t, dir, "checksums.txt")))

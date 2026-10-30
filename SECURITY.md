@@ -1,7 +1,10 @@
 # Security policy
 
-Shipwick's agent holds the Docker socket, which makes it root on the server it
-runs on. We treat security reports accordingly.
+Shipwick's agent drives Docker, and whoever drives Docker is root on the
+server. The agent reaches the daemon through a filtered socket that refuses
+what the agent never asks for, but a request to create a container passes, so
+an admin token is root on the server all the same. We treat security reports
+accordingly.
 
 ## Reporting a vulnerability
 
@@ -69,8 +72,11 @@ Expected behavior — not vulnerabilities:
 
 - a holder of a valid token running arbitrary images, reading env values of
   containers through Docker, or otherwise controlling the server;
-- anyone with access to the Docker socket, the agent's data directory or
-  Caddy's admin socket doing the same;
+- anyone with access to the Docker socket — the filtered one the agent holds
+  included, since a request to create a container passes it — the agent's
+  data directory or Caddy's admin socket doing the same; what refuses that
+  request is Docker's authorization plugin, which the handbook describes and
+  the installer does not set up;
 - an application container reaching the agent's API in one of the three
   arrangements the handbook's Security section names as leaving it open — a
   compose file of your own without the `shipwick-control` network,

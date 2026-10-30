@@ -3,9 +3,10 @@
 # The daemon asks it about every request — the agent's, docker compose's,
 # the docker command's — and the ones a rule below names are answered
 # "request rejected by administrative policy". Everything else is allowed.
-# docs/handbook.md, "Less than the whole socket", says how to install it,
-# what it adds to the socket proxy and what it costs; scripts/test-docker-authz.sh
-# runs Shipwick through it and then tries each refusal.
+# docs/handbook.md, "The Docker socket", says how to install it, what it adds
+# to the socket proxy every installation runs and what it costs;
+# scripts/test-docker-authz.sh runs Shipwick through it and then tries each
+# refusal.
 #
 # The agent never asks for any of this: what is refused here was not the
 # agent's request, or is a fault in it.
@@ -76,7 +77,8 @@ deny contains "a directory of the server mounted" if {
 }
 
 # The paths of the server a container may be given: the daemon's own socket,
-# which the agent's container holds and which leads back to this policy. A
+# which the socket proxy's container holds and which leads back to this
+# policy (a rootless daemon's socket, under /run/user, is not among them). A
 # file of your own in compose.override.yml — a CA file, a Docker config.json —
 # goes here too, or its mount is refused.
 allowed_binds := {"/var/run/docker.sock", "/run/docker.sock"}

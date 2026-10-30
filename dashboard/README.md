@@ -348,6 +348,11 @@ internet access and makes no request to any third party.
   capabilities, refusing root. `capabilities` absent says nothing; `[]` reads
   "Capabilities: none". An agent before 0.8 refuses the key as unknown, and
   the editor says that the agent is older than the key.
+- **How the agent reaches Docker.** `docker.socket` of `GET /server`, from
+  1.1 on: the server's page says "behind the socket proxy" or "holding the
+  Docker socket" next to the daemon's version, in the words of `shipwick
+  server status` (`describeSocket` in `utils/limits.ts`), and nothing for an
+  agent that does not send it.
 - **Limits Docker does not apply.** `docker.unenforced_limits` of
   `GET /server` and `unenforced_limits` of a metrics sample (`utils/limits.ts`):
   the server's page says "rootless" and which limits are not enforced; an
@@ -706,6 +711,7 @@ the real agent, so the log viewer's reconnect can be seen.
 | `MOCK_NEIGHBOURS=1024` | `kernel_limits.neighbour_table` on `GET /server`; absent by default, as for an agent in a container. `40` makes the warning show for the mock's ten containers. |
 | `MOCK_CLOUDFLARE=ok\|problems` | `cloudflare` on `GET /server`: a token that works, or one that cannot edit the DNS records of `example.net`. `POST /server/cloudflare/verify` checks again, `429 CLOUDFLARE_CHECKED_RECENTLY` with `Retry-After` within a minute of the last; without the switch `409 CLOUDFLARE_NOT_CONFIGURED`. |
 | `MOCK_RENEWAL_FAILING=1` | `api.example.com`'s certificate is `ok` and carries a `failure`: it serves, and its renewal fails on the Cloudflare token. |
+| `MOCK_DIRECT_SOCKET=1` | `docker.socket` on `GET /server` is `direct`: the agent holds the Docker socket itself, as with `compose.direct-socket.yml` or the package. Without it `proxy`, the installation's socket proxy. The field came with 1.1; the modes of older agents (`MOCK_AGENT=0.8` and before) send none. |
 | `MOCK_PORT`, `MOCK_HOST`, `MOCK_TOKEN` | `9100`, `127.0.0.1`, `mock-token-0123456789abcdef` |
 
 What 0.5 added is served with the agent's shapes and refusals: `path`, `proxy`

@@ -9,8 +9,8 @@
 # container of the distribution that shares the daemon's network and has the
 # docker and compose programs: a server with Docker installed and nothing
 # else. In it the installer does everything it does on a server: downloads
-# the release from GitHub, verifies it, pulls the images, starts the three
-# services, waits for the agent, installs the CLI and signs it in.
+# the release from GitHub, verifies it, pulls the images, starts the services
+# of its compose file, waits for the agent, installs the CLI and signs it in.
 #
 # What this proves: that scripts/install.sh, as it is here, installs a
 # published release (the latest, or --version) with each distribution's sh,
@@ -195,7 +195,7 @@ for image in "$@"; do
         test "$(stat -c %a /opt/shipwick/.env)" = 600
         grep -Eq "^SHIPWICK_AGENT_TOKEN=[0-9a-f]{64}$" /opt/shipwick/.env
         grep -qx "SHIPWICK_AGENT_DOMAIN=agent.localhost" /opt/shipwick/.env
-        test "$(docker ps -q --filter label=com.docker.compose.project=shipwick | wc -l)" -eq 3
+        test "$(docker ps -q --filter label=com.docker.compose.project=shipwick | wc -l)" -eq "$(cd /opt/shipwick && docker compose config --services | wc -l)"
         installed="$(shipwick --version)"
         test "$VERSION" = latest || test "$installed" = "shipwick version $VERSION"
         shipwick context ls | grep -q "https://agent.localhost"
@@ -209,7 +209,7 @@ for image in "$@"; do
     expect "Your API token is unchanged"
     [ "$token" = "$(on_server 'grep ^SHIPWICK_AGENT_TOKEN= /opt/shipwick/.env')" ] || fail "the token changed on an upgrade"
     # shellcheck disable=SC2016  # expanded by the shell of the server
-    on_server 'test "$(docker ps -q --filter label=com.docker.compose.project=shipwick | wc -l)" -eq 3' \
+    on_server 'test "$(docker ps -q --filter label=com.docker.compose.project=shipwick | wc -l)" -eq "$(cd /opt/shipwick && docker compose config --services | wc -l)"' \
         || fail "the services are not all running after the upgrade"
 
     echo "ok: $image"

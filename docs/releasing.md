@@ -8,11 +8,11 @@ which — only after the whole CI suite passed on that commit — publishes:
 | `shipwick_<os>_<arch>` for Linux, macOS and Windows (amd64, arm64) | the GitHub release |
 | `shipwick-agent_<arch>.deb` and `shipwick-agent_<arch>.rpm` (amd64, arm64): the agent as a plain binary with a systemd unit | the GitHub release |
 | `<binary>.spdx.json` for each of those CLI binaries, and `shipwick-agent_<arch>.spdx.json` for the agent in the packages: what each was built from | the GitHub release |
-| `compose.production.yml`, **all three images pinned to this version** | the GitHub release |
+| `compose.production.yml`, **the three Shipwick images pinned to this version**; the socket proxy's image is pinned to a version of its own in the file itself | the GitHub release |
 | `install.sh`, the installer as it is at the tag, for `shipwick server bundle` | the GitHub release |
 | `install.ps1`, the Windows installer of the CLI as it is at the tag | the GitHub release |
 | `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard`, `ghcr.io/shipwick/caddy` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
-| `image-digests.txt`: the digests of those images, read back from the registry | the GitHub release |
+| `image-digests.txt`: the digests of those images, read back from the registry, and of the socket proxy's image the compose file pins, read from Docker Hub | the GitHub release |
 | `checksums.txt` (SHA-256 of every file above) | the GitHub release |
 | `checksums.txt.sigstore.json`: the signature of `checksums.txt`, made by the workflow run | the GitHub release |
 | A signature of each image, by digest, and a provenance attestation for each image and for every file `checksums.txt` lists | next to the image in the registry; GitHub's attestation store |

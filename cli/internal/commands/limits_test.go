@@ -46,6 +46,33 @@ func TestDoctorSaysWhenDockerEnforcesNoLimits(t *testing.T) {
 	}
 }
 
+func TestDoctorSaysWhenTheAgentHoldsTheDockerSocketItself(t *testing.T) {
+	f := doctorAgent(t,
+		func(string) ([]string, error) { return []string{"203.0.113.10"}, nil },
+		func(*http.Request) (*http.Response, error) { return answer(200), nil })
+	f.server.Docker = &api.DockerStatus{UnenforcedLimits: []string{}, Socket: api.SocketDirect}
+	out, _, err := f.run(t.TempDir(), "doctor")
+	if err != nil {
+		t.Fatalf("a hint, not a problem: %v\n%s", err, out)
+	}
+	assertInOrder(t, out, []string{
+		"✓ Docker 29.8.0 on the server",
+		"! The agent holds the Docker socket itself, and whoever takes it over has the whole Engine API.",
+		"take compose.direct-socket.yml out of compose.override.yml",
+		"(handbook: The Docker socket)",
+	})
+
+	// Behind the proxy, which is the default, there is nothing to say; nor
+	// for an agent too old to say how it reaches Docker.
+	for _, status := range []*api.DockerStatus{{UnenforcedLimits: []string{}, Socket: api.SocketProxy}, {UnenforcedLimits: []string{}}, nil} {
+		f.server.Docker = status
+		out, _, _ = f.run(t.TempDir(), "doctor")
+		if strings.Contains(out, "Docker socket") {
+			t.Errorf("docker %+v: nothing to say about the socket:\n%s", status, out)
+		}
+	}
+}
+
 func TestServerStatusSaysHowDockerRuns(t *testing.T) {
 	f := newFakeAgent(t)
 	f.server = api.Server{AgentVersion: "1.2.3", Hostname: "vps-1", DockerVersion: "29.8.2"}
@@ -58,6 +85,11 @@ func TestServerStatusSaysHowDockerRuns(t *testing.T) {
 		{&api.DockerStatus{Rootless: true, UnenforcedLimits: []string{}}, "29.8.2, rootless\n"},
 		{&api.DockerStatus{Rootless: true, UnenforcedLimits: []string{api.LimitMemory, api.LimitCPU}}, "29.8.2, rootless; memory and CPU limits are not enforced\n"},
 		{&api.DockerStatus{UnenforcedLimits: []string{api.LimitCPU}}, "29.8.2; CPU limits are not enforced\n"},
+		// How the agent reaches the daemon, from 1.1 on: the default
+		// installation's filtered socket, or the daemon's own.
+		{&api.DockerStatus{UnenforcedLimits: []string{}, Socket: api.SocketProxy}, "29.8.2, behind the socket proxy\n"},
+		{&api.DockerStatus{UnenforcedLimits: []string{}, Socket: api.SocketDirect}, "29.8.2, holding the Docker socket\n"},
+		{&api.DockerStatus{Rootless: true, UnenforcedLimits: []string{api.LimitMemory, api.LimitCPU}, Socket: api.SocketProxy}, "29.8.2, rootless, behind the socket proxy; memory and CPU limits are not enforced\n"},
 	} {
 		f.server.Docker = tc.docker
 		out, _, err := f.run(t.TempDir(), "server", "status")

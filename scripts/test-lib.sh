@@ -46,7 +46,8 @@ cleanup() {
 
 # prepare <name> <overlays>: the images and the CLI of this checkout, for a
 # daemon in a container of that name and the compose overlays to start on
-# top of compose.production.yml.
+# top of compose.production.yml ("" for none: the file as the installer puts
+# it on a server, socket proxy included).
 prepare() {
     name="${SHIPWICK_TEST_NAME:-$1}"
     overlays="$2"

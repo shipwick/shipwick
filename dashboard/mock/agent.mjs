@@ -210,6 +210,10 @@
 //                    works, or one that cannot edit one of its zones
 //   MOCK_RENEWAL_FAILING=1   api.example.com's certificate is ok and its
 //                    renewal is failing (a `failure` on a certificate that serves)
+//   MOCK_DIRECT_SOCKET=1   docker.socket on GET /server is "direct": the agent
+//                    holds the Docker socket itself, as with the overlay
+//                    compose.direct-socket.yml or the package (default: "proxy",
+//                    the installation's socket proxy)
 
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
@@ -253,6 +257,8 @@ const OPEN_API = !BEFORE_08 && process.env.MOCK_OPEN_API === '1'
 const REFUSES_DASHBOARD = !BEFORE_08 && process.env.MOCK_REFUSES_DASHBOARD === '1'
 /** The Docker daemon under the agent: as usual, rootless, without cgroup controllers, without the memory one, or not answering. */
 const DOCKER = ['rootless', 'nocgroups', 'nomemory', 'silent'].includes(process.env.MOCK_DOCKER) ? process.env.MOCK_DOCKER : ''
+/** How the agent reaches the daemon, from 1.1 on: the installation's socket proxy unless the server chose the socket itself. */
+const DOCKER_SOCKET = process.env.MOCK_DIRECT_SOCKET === '1' ? 'direct' : 'proxy'
 const UNENFORCED = BEFORE_08 ? [] : unenforcedLimits(DOCKER)
 const DISK_FULL = process.env.MOCK_DISK === 'full'
 const UPDATE = ['available', 'current', 'unknown', 'off'].includes(process.env.MOCK_UPDATE) ? process.env.MOCK_UPDATE : 'available'
@@ -4173,7 +4179,8 @@ async function handle(req, res) {
         ...(BEFORE_07 ? {} : { log_archive: logArchiveStatus(), update: updateStatus() }),
         // Present only when true, like proxy.plain_lookups; `docker` always, from 0.8.
         ...(OPEN_API ? { open_to_applications: true } : {}),
-        ...(BEFORE_08 ? {} : { docker: { rootless: DOCKER === 'rootless' || DOCKER === 'nocgroups', unenforced_limits: UNENFORCED } }),
+        // `socket` came with 1.1: the modes of older agents leave it out.
+        ...(BEFORE_08 ? {} : { docker: { rootless: DOCKER === 'rootless' || DOCKER === 'nocgroups', unenforced_limits: UNENFORCED, ...(BEFORE_09 ? {} : { socket: DOCKER_SOCKET }) } }),
         // From 0.9, and only where there is something to say: the kernel's table where the agent can read it, the token's check once it has finished.
         ...(NEIGHBOURS > 0 ? { kernel_limits: { neighbour_table: NEIGHBOURS } } : {}),
         ...(cloudflareStatus ? { cloudflare: cloudflareStatus } : {}),

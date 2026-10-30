@@ -215,12 +215,21 @@ jobs:
           merge-multiple: true
       # The one file of a release that cannot exist before its images do. It
       # is listed in checksums.txt like the rest, so that what vouches for the
-      # installer vouches for the images too.
+      # installer vouches for the images too. The socket proxy's image is not
+      # built here, but the compose file names it and a server pulls it: its
+      # digests are read from Docker Hub, so that the installer and a bundle
+      # hold what they were given to what this release was cut against.
       - name: The digests of the images join the release's files
         run: |
           cat digests/image-digests-agent.txt digests/image-digests-caddy.txt digests/image-digests-dashboard.txt > dist/image-digests.txt
-          test "$(grep -c ' index sha256:' dist/image-digests.txt)" -eq 3
-          test "$(grep -c ' config sha256:' dist/image-digests.txt)" -eq 6
+          test "$(grep -c '^ghcr.io/shipwick/[a-z]* index sha256:' dist/image-digests.txt)" -eq 3
+          test "$(grep -c '^ghcr.io/shipwick/[a-z]* config sha256:' dist/image-digests.txt)" -eq 6
+          proxy="$(sed -n 's/.*{SHIPWICK_SOCKET_PROXY_IMAGE:-\([^}]*\)}.*/\1/p' dist/compose.production.yml)"
+          test -n "$proxy"
+          sh scripts/image-digests.sh "$proxy" >> dist/image-digests.txt
+          for platform in linux/amd64 linux/arm64; do
+            grep -q "^$proxy config sha256:[0-9a-f]* $platform\$" dist/image-digests.txt
+          done
           cd dist
           sha256sum image-digests.txt >> checksums.txt
           sha256sum -c checksums.txt

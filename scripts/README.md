@@ -5,7 +5,7 @@
 The installer behind `curl -fsSL https://get.shipwick.com | sh`.
 
 ```bash
-sh install.sh          # server: agent + Caddy + dashboard (as root), and the CLI
+sh install.sh          # server: agent + socket proxy + Caddy + dashboard (as root), and the CLI
 sh install.sh --cli    # the CLI only
 ```
 
@@ -16,8 +16,10 @@ What it does on a server:
    Then, before it writes anything, that the HTTP and HTTPS ports are free —
    unless its own Caddy holds them, which is an upgrade.
 2. Writes `/opt/shipwick/compose.yml`: the release's `compose.production.yml`,
-   in which the three images — agent, dashboard and the proxy, Shipwick's
-   build of Caddy — are pinned to the release's version. Verified against
+   in which the three Shipwick images — agent, dashboard and the proxy,
+   Shipwick's build of Caddy — are pinned to the release's version, and the
+   socket proxy's image, which the agent reaches Docker through, to a version
+   of its own. Verified against
    the release's `checksums.txt` before it replaces anything — and
    `checksums.txt` against the release's signature first, when cosign is
    installed (`verify_signature`). Compose is asked to read the new file
@@ -63,7 +65,11 @@ Properties worth keeping if you change it:
 - **`compose.yml` belongs to the installer, `compose.override.yml` to the
   user.** The first is replaced on every run; the second is never touched, and
   Compose merges the two because the installer runs `docker compose` without
-  `-f`. Do not add `-f` back.
+  `-f`. Do not add `-f` back. The one thing the installer says about the
+  override (`warn_stale_proxy_override`): when it defines the `socket-proxy`
+  service with an allow-list of its own — the overlay of 0.8 to 1.0, saved
+  there by hand — that list replaces the release's, and the user is told to
+  take it out. `test-upgrade.sh --old-proxy-overlay` walks that server.
 - **A release that cannot run here is undone.** The compose file in use is
   copied before it is replaced. An older agent refuses a database a newer
   release has added to; `start_previous_release` reads that in its output
@@ -259,7 +265,8 @@ The server is a container of the distribution on the network of a
 from that image and `curl` installed where the image has no downloader
 (Alpine keeps its BusyBox `wget`). The installer downloads the release from
 GitHub and pulls its images, as on a real server; the script then checks the
-modes of `/opt/shipwick` and `.env`, the token, that three services run,
+modes of `/opt/shipwick` and `.env`, the token, that every service of the
+compose file runs,
 that the installed `shipwick` is the release's and is signed in, and that a
 second run keeps `.env` and the token.
 
@@ -282,6 +289,7 @@ installed by its own installer and put to use with its own CLI.
 ```bash
 sh scripts/test-upgrade.sh v0.6.0          # from v0.6.0 to the checkout
 sh scripts/test-upgrade.sh --back v0.7.0   # and back to v0.7.0 with the installer
+sh scripts/test-upgrade.sh --old-proxy-overlay v1.0.0   # a server that had the release's compose.socket-proxy.yml as compose.override.yml
 ```
 
 It needs Docker and Go here, and a way to github.com, ghcr.io and quay.io;
@@ -299,7 +307,8 @@ are the containers the release started, that both hostnames answer, the key is
 in the volume, the history is whole, the secret resolves on a redeploy, the
 release's CLI redeploys and the checkout's deploys and rolls back, the token works,
 the job runs, the backup verifies, the proxy runs this version's
-configuration, and that `shipwick doctor` finds no problem. Requests go to the
+configuration, the agent gave up the Docker socket to the socket proxy and
+says so, and that `shipwick doctor` finds no problem. Requests go to the
 application about ten times a second while the installer runs; how many were
 not answered is printed, not judged.
 
@@ -315,22 +324,22 @@ built here, for two runs at once. CI runs it for the last two releases on
 handbook, §4, *Upgrading*.
 ## test-socket-proxy.sh, test-docker-authz.sh, test-rootless.sh
 
-The three arrangements of the handbook's *Less than the whole socket*, each
-started in a Docker daemon of its own and put through everything an
-installation does:
+The arrangements of the handbook's *The Docker socket* — the socket proxy
+every installation runs, the authorization plugin at the daemon, rootless
+Docker — each started in a Docker daemon of its own and put through
+everything an installation does:
 
 ```bash
-sh scripts/test-socket-proxy.sh              # the agent behind configs/compose.socket-proxy.yml
+sh scripts/test-socket-proxy.sh              # compose.production.yml as it is: the agent behind the socket proxy, then compose.direct-socket.yml
 sh scripts/test-docker-authz.sh              # a daemon that asks opa-docker-authz, with configs/docker-authz.rego
 sh scripts/test-rootless.sh                  # on docker:dind-rootless, with configs/compose.rootless.yml
-sh scripts/test-rootless.sh --socket-proxy   # behind the socket proxy as well: compose.socket-proxy.yml alone, which reads SHIPWICK_DOCKER_SOCKET
 ```
 
 Each builds the three images and the CLI from the checkout (Docker, and Go
 for the CLI), starts `docker:dind` or `docker:dind-rootless` as one
 privileged container, loads the images into it, starts the production
-compose file with the overlay there, and runs `test-cycle.sh` inside that
-container: deploy, rollout, rollback, stop and start, a hook, a job, a
+compose file — with its overlay, where the arrangement has one — there, and
+runs `test-cycle.sh` inside that container: deploy, rollout, rollback, stop and start, a hook, a job, a
 one-off command, a backup with its verification, a restore, a static
 folder, a built image, an export and an import, deletion, with the fixtures
 of `scripts/testdata`. Nothing else of the Docker they are started from is
@@ -340,22 +349,29 @@ container is removed at the end unless `SHIPWICK_TEST_KEEP=1`.
 few minutes each, most of it pulling inside the new daemon, and are not part
 of CI.
 
-- `test-socket-proxy.sh` fails when the proxy refused the agent anything:
-  **a new Engine API call in `agent/internal/docker` needs its line in the
-  allow-list of `configs/compose.socket-proxy.yml` and in the handbook's
-  table**, and this is the test that notices. It then tries what the proxy
-  must refuse, and what it is documented not to.
+- `test-socket-proxy.sh` holds the agent to having no Docker socket and
+  saying so, and fails when the proxy refused the agent anything: **a new
+  Engine API call in `agent/internal/docker` needs its line in the
+  allow-list of the `socket-proxy` service of `configs/compose.production.yml`
+  (and its copy in `docker-compose.yml`) and in the handbook's table**, and
+  this is the test that notices. It then tries what the proxy must refuse,
+  and what it is documented not to, and ends by starting the stack with
+  `compose.direct-socket.yml`: the proxy's container goes, the agent has the
+  socket, `shipwick server status` and `shipwick doctor` say so, and a
+  deployment works.
 - `test-docker-authz.sh` installs the plugin in the daemon, points the daemon
-  at it through `daemon.json` and `SIGHUP`, and runs the cycle: the policy
-  refuses nothing the agent asks for, so an operation that fails is a
-  request the agent did not make before. It then tries each refusal the
-  handbook lists, and a request whose body the plugin cannot read.
-  `SHIPWICK_AUTHZ_PLUGIN` names another build of the plugin.
+  at it through `daemon.json` and `SIGHUP`, and runs the cycle, the agent
+  behind the socket proxy as on every server: the policy refuses nothing
+  the agent asks for, so an operation that fails is a request the agent did
+  not make before. It then tries each refusal the handbook lists, and a
+  request whose body the plugin cannot read. `SHIPWICK_AUTHZ_PLUGIN` names
+  another build of the plugin.
 - `test-rootless.sh` first starts the stack with ports below 1024 closed to
   ordinary users, which must fail with Docker's message, and after that
   recreates it: the refused start leaves the proxy's container on one of its
-  two networks. Its daemon has no cgroups, so it also holds the agent to
-  saying that limits are not enforced.
+  two networks. It holds the socket proxy to mounting the rootless daemon's
+  socket and the agent to mounting none. Its daemon has no cgroups, so it
+  also holds the agent to saying that limits are not enforced.
 
 ## test-package.sh
 

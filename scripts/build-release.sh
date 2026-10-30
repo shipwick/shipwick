@@ -6,7 +6,8 @@
 #   shipwick-agent_<arch>.rpm     for amd64 and arm64 (scripts/build-packages.sh)
 #   <binary>.spdx.json            the bill of materials of each CLI binary and of
 #                                 the agent in the packages (scripts/build-sbom.sh)
-#   compose.production.yml        with the three images pinned to this version
+#   compose.production.yml        with the three Shipwick images pinned to this version
+#                                 (the socket proxy's image is pinned in the file itself)
 #   install.sh                    the installer as it was when the release was cut
 #   install.ps1                   the Windows installer of the CLI, likewise
 #   checksums.txt                 SHA-256 of all of the above

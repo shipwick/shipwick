@@ -73,6 +73,20 @@ func TestTheServerSaysHowItsDockerRuns(t *testing.T) {
 		t.Errorf("docker = %+v", info.Docker)
 	}
 
+	// How the agent reaches the daemon travels with it, as the runtime read
+	// it off the address: the socket proxy's, or the daemon's own.
+	for _, socket := range []string{docker.SocketProxy, docker.SocketDirect} {
+		h.rt.Socket = socket
+		info, err = h.engine.Server(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Docker == nil || info.Docker.Socket != socket {
+			t.Errorf("docker = %+v, want socket %q", info.Docker, socket)
+		}
+	}
+	h.rt.Socket = ""
+
 	// An application's own numbers carry it too, next to the limits it names.
 	h.deploy(app("my-api", "my-api:1.0", 1))
 	m, err := h.engine.Metrics(context.Background(), "my-api")

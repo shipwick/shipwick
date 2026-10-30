@@ -31,19 +31,30 @@ export function unenforcedSentence(limits: readonly string[] | null | undefined)
 export interface DockerDescription {
   /** "29.8.2", "29.8.2, rootless": the version and how the daemon runs. */
   version: string
+  /** How the agent reaches the daemon, as `shipwick server status` puts it: "behind the socket proxy", "holding the Docker socket"; "" when the agent did not say. */
+  socket: string
   /** "Memory and CPU limits are not enforced"; "" when the daemon applies both, or did not say. */
   warning: string
   /** What that means for a deploy.yaml and what to do on the server; "" without a warning. */
   advice: string
 }
 
+/** The agent's word on how it reaches Docker, in the CLI's words; "" for an agent that does not say, which is not read as either. */
+export function describeSocket(docker: Pick<DockerStatus, 'socket'> | null | undefined): string {
+  switch (docker?.socket) {
+    case 'proxy': return 'behind the socket proxy'
+    case 'direct': return 'holding the Docker socket'
+    default: return ''
+  }
+}
+
 /** The Docker row of the server's page, in the words of `shipwick server status` and `shipwick doctor`. */
 export function describeDocker(server: Pick<Server, 'docker_version' | 'docker'>): DockerDescription {
   const version = server.docker_version || '—'
   const docker = server.docker
-  if (!docker) return { version, warning: '', advice: '' }
+  if (!docker) return { version, socket: '', warning: '', advice: '' }
   const names = known(docker.unenforced_limits)
-  const described = { version: docker.rootless ? `${version}, rootless` : version, warning: '', advice: '' }
+  const described = { version: docker.rootless ? `${version}, rootless` : version, socket: describeSocket(docker), warning: '', advice: '' }
   if (names.length === 0) return described
   const sentence = unenforcedSentence(names)
   const keys = names.map(name => `resources.${name}`).join(' and ')

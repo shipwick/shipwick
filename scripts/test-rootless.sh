@@ -4,34 +4,28 @@
 #
 #   - the proxy cannot take port 80 until the server lets ordinary users have
 #     it, and Docker says which setting that is,
+#   - the socket proxy holds the rootless daemon's socket, and the agent holds
+#     none,
 #   - every operation works: deployments, the two networks and the names on
 #     them, a published port, volumes, backups, an export,
 #   - the agent says that the daemon is rootless, and — on a daemon without
 #     cgroups, which is what this script starts — that limits are not
 #     enforced: on the deployment, in the server's status and in doctor.
 #
-#   sh scripts/test-rootless.sh                  # the agent holds the daemon's socket
-#   sh scripts/test-rootless.sh --socket-proxy   # behind the socket proxy as well
+#   sh scripts/test-rootless.sh
 #
 # The daemon is docker:dind-rootless: rootless Docker without systemd, and so
 # without cgroups. Limits that are enforced need a server with systemd and
 # delegated controllers, which a container of this kind is not; see
-# docs/handbook.md, "Less than the whole socket", for how that was tested.
+# docs/handbook.md, "The Docker socket", for how that was tested.
 #
 # Needs Docker, and Go to build the CLI. Variables: scripts/test-lib.sh.
 set -eu
 
-overlays="compose.rootless.yml"
-case "${1:-}" in
-    "") ;;
-    --socket-proxy) overlays="compose.socket-proxy.yml" ;;
-    *) echo "usage: test-rootless.sh [--socket-proxy]" >&2; exit 2 ;;
-esac
-
 # shellcheck source=scripts/test-lib.sh
 . "$(dirname "$0")/test-lib.sh"
 
-prepare shipwick-test-rootless "$overlays"
+prepare shipwick-test-rootless compose.rootless.yml
 # The image's user is 1000, and its daemon listens in that user's runtime directory.
 start_daemon docker:dind-rootless /run/user/1000/docker.sock
 install
@@ -58,12 +52,25 @@ as_root sysctl -q -w net.ipv4.ip_unprivileged_port_start=80
 compose up -d --quiet-pull --force-recreate
 await_agent
 
+say "who holds the daemon's socket"
+mounts=$(in_daemon docker inspect shipwick-agent-1 --format '{{range .Mounts}}{{.Source}} {{end}}')
+case "$mounts" in
+    *docker.sock*) die "the agent mounts the Docker socket: $mounts" ;;
+esac
+echo "the agent's mounts: $mounts"
+mounts=$(in_daemon docker inspect shipwick-socket-proxy-1 --format '{{range .Mounts}}{{.Source}} {{end}}')
+case "$mounts" in
+    */run/user/1000/docker.sock*) echo "the proxy's mounts: $mounts" ;;
+    *) die "the proxy does not mount the rootless daemon's socket: $mounts" ;;
+esac
+
 cycle
 
 say "what the agent says about the daemon"
 status=$(shipwick server status)
 echo "$status" | grep '^Docker'
 echo "$status" | grep -q '^Docker .*rootless' || die "shipwick server status does not say that Docker is rootless"
+echo "$status" | grep -q '^Docker .*behind the socket proxy' || die "shipwick server status does not say that the agent is behind the socket proxy"
 
 if [ "$(in_daemon docker info --format '{{.MemoryLimit}}')" = true ]; then
     echo "$status" | grep -q 'not enforced' && die "the daemon enforces limits and the agent says it does not"

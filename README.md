@@ -197,7 +197,7 @@ shipwick server install root@203.0.113.10   # the server: the same command upgra
 ```
 
 The server keeps its token, its applications and their data; they go on
-serving while the three Shipwick containers are replaced. What changed between
+serving while the four Shipwick containers are replaced. What changed between
 versions, and what to do about it, is in the [changelog](CHANGELOG.md).
 `shipwick server status` and the dashboard say when a newer release exists.
 Within 1.x a release adds and removes nothing: a `deploy.yaml` that worked
@@ -244,8 +244,11 @@ outgrown Shipwick.
 
 **Security in one sentence:** an admin token is equivalent to root on the
 server, so keep the API behind HTTPS or an SSH tunnel and give CI a `deploy`
-token. Details in the [handbook](docs/handbook.md#12-security); report
-vulnerabilities privately per [SECURITY.md](SECURITY.md).
+token. The agent never holds the Docker socket itself — a socket proxy does,
+and passes it the calls it makes and no other — but a request to create a
+container is one of them, which is why the sentence stands. Details in the
+[handbook](docs/handbook.md#12-security); report vulnerabilities privately
+per [SECURITY.md](SECURITY.md).
 
 ## Contributing and license
 

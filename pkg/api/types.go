@@ -1435,8 +1435,20 @@ const (
 	LimitCPU    = "cpu"
 )
 
+// How the agent reaches the daemon, as DockerStatus.Socket names it.
+const (
+	// SocketProxy: through the filtered socket of the installation's socket
+	// proxy, which answers the calls the agent makes and refuses every other.
+	SocketProxy = "proxy"
+	// SocketDirect: the daemon's own socket. Whoever holds it has the whole
+	// Engine API; the handbook's section on the Docker socket says what that
+	// means and what the default installation does instead.
+	SocketDirect = "direct"
+)
+
 // DockerStatus is what the daemon says about itself that changes what
-// Shipwick can promise. It is absent from agents older than 0.8.
+// Shipwick can promise, and how the agent reaches it. It is absent from
+// agents older than 0.8.
 type DockerStatus struct {
 	// Rootless is true when the daemon runs as an ordinary user of the
 	// server and not as root.
@@ -1447,6 +1459,10 @@ type DockerStatus struct {
 	// that enforces neither has no cgroups at all, and what it reports as a
 	// container's memory and CPU is then not that container's either.
 	UnenforcedLimits []string `json:"unenforced_limits"`
+	// Socket is how the agent reaches the daemon, SocketProxy or
+	// SocketDirect, read off the address it was given. Absent from an agent
+	// older than 1.1, which is not a claim either way.
+	Socket string `json:"socket,omitempty"`
 }
 
 // After a deployment: what the agent found when it asked the application

@@ -651,12 +651,17 @@ export interface CloudflareZone {
 /** A limit of `resources` in deploy.yaml, as the agent names the ones Docker does not apply. */
 export type ResourceLimit = 'memory' | 'cpu'
 
+/** How the agent reaches the daemon: through the filtered socket of the installation's socket proxy, or the daemon's own socket. */
+export type DockerSocket = 'proxy' | 'direct'
+
 /** The `docker` object of GET /server. */
 export interface DockerStatus {
   /** The daemon runs as an ordinary user. */
   rootless: boolean
   /** The limits the daemon accepts and does not apply: it has no cgroup controller for them. [] where it applies both. */
   unenforced_limits: (ResourceLimit | string)[]
+  /** How the agent reaches the daemon. Absent from an agent before 1.1, which is not a claim either way. */
+  socket?: DockerSocket | string
 }
 
 export interface SignInStatus {

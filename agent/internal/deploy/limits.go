@@ -24,7 +24,7 @@ func dockerStatus(info docker.Info) *api.DockerStatus {
 	if limits == nil {
 		limits = []string{}
 	}
-	return &api.DockerStatus{Rootless: info.Rootless, UnenforcedLimits: limits}
+	return &api.DockerStatus{Rootless: info.Rootless, UnenforcedLimits: limits, Socket: info.Socket}
 }
 
 // unenforcedLimits asks the daemon which limits it does not apply. A daemon

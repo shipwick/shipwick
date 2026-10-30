@@ -114,10 +114,12 @@ type Fake struct {
 	// namelessRemovals counts RemoveImage calls for no image at all: the
 	// daemon has no route for one, and a socket proxy refuses it aloud.
 	namelessRemovals int
-	// Rootless and Unenforced are what Info says about the daemon: see
-	// docker.Info.
+	// Rootless, Unenforced and Socket are what Info says about the daemon
+	// and the way to it: see docker.Info. Socket is left empty unless a test
+	// says, as an agent from before it was reported leaves it.
 	Rootless   bool
 	Unenforced []string
+	Socket     string
 	// networks are the networks a container is on, where a test said so:
 	// see fake_networks.go.
 	networks map[string][]string
@@ -415,6 +417,7 @@ func (f *Fake) Info(context.Context) (docker.Info, error) {
 		MemoryBytes:   8 << 30,
 		Rootless:      f.Rootless,
 		Unenforced:    f.Unenforced,
+		Socket:        f.Socket,
 	}, nil
 }
 

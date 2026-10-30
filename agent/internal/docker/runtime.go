@@ -150,6 +150,9 @@ type Info struct {
 	// apply: see runtime_limits.go.
 	Rootless   bool
 	Unenforced []string
+	// Socket says how the agent reaches the daemon, SocketProxy or
+	// SocketDirect: see socket.go.
+	Socket string
 }
 
 type Runtime struct {
@@ -214,6 +217,7 @@ func (r *Runtime) Info(ctx context.Context) (Info, error) {
 		Proxy:         res.Info.HTTPProxy != "" || res.Info.HTTPSProxy != "",
 		Rootless:      rootless(res.Info),
 		Unenforced:    unenforcedLimits(res.Info),
+		Socket:        socketKind(r.cli.DaemonHost()),
 	}, nil
 }
 

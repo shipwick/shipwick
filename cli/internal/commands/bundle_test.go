@@ -254,6 +254,37 @@ func TestServerBundleWithNoPullSavesWhatTheMachineHas(t *testing.T) {
 	}
 }
 
+// From 1.1 on the compose file names a fourth image, the socket proxy's, which
+// a server with no way out needs as much as the three of Shipwick's own.
+func TestServerBundleCarriesTheSocketProxyImageOfAReleaseThatNamesOne(t *testing.T) {
+	release, docker := newFakeRelease(), &bundleDocker{}
+	release.tag = "v1.1.0"
+	release.assets["compose.production.yml"] = "services:\n  agent:\n    image: ${SHIPWICK_AGENT_IMAGE:-ghcr.io/shipwick/agent:1.1.0}\n" +
+		"    environment:\n      DOCKER_HOST: unix:///run/docker-proxy/docker.sock\n" +
+		"  socket-proxy:\n    image: ${SHIPWICK_SOCKET_PROXY_IMAGE:-wollomatic/socket-proxy:1.13.1}\n" +
+		"  caddy:\n    image: ${SHIPWICK_CADDY_IMAGE:-ghcr.io/shipwick/caddy:1.1.0}\n" +
+		"  dashboard:\n    image: ${SHIPWICK_DASHBOARD_IMAGE:-ghcr.io/shipwick/dashboard:1.1.0}\n"
+	f := newFakeAgent(t)
+	f.upgrade, f.build = release.serve(t), buildTools{run: docker.run}
+	dir := t.TempDir()
+
+	if out, _, err := f.run(dir, "server", "bundle", "--no-pull", "-o", "bundle.tar.gz"); err != nil {
+		t.Fatalf("server bundle: %v\n%s", err, out)
+	}
+	files, _ := readBundle(t, filepath.Join(dir, "bundle.tar.gz"))
+	want := "images: ghcr.io/shipwick/agent:1.1.0 ghcr.io/shipwick/caddy:1.1.0 ghcr.io/shipwick/dashboard:1.1.0 wollomatic/socket-proxy:1.13.1"
+	if got := files["shipwick-v1.1.0-linux-amd64/images.tar"]; got != want {
+		t.Errorf("images.tar = %q, want %q", got, want)
+	}
+
+	// A compose file without one of Shipwick's own is not a release's.
+	release.assets["compose.production.yml"] = "services:\n  agent:\n    image: ghcr.io/shipwick/agent:1.1.0\n  socket-proxy:\n    image: wollomatic/socket-proxy:1.13.1\n"
+	_, _, err := f.run(t.TempDir(), "server", "bundle", "--no-pull")
+	if err == nil || !strings.Contains(err.Error(), "names 1 Shipwick images, not three") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestServerBundleReportsWhatDockerSaid(t *testing.T) {
 	release, docker := newFakeRelease(), &bundleDocker{fail: "pull"}
 	f := newFakeAgent(t)

@@ -552,7 +552,7 @@ SHIPWICK_DASHBOARD_DOMAIN=$SHIPWICK_DASHBOARD_DOMAIN
 EOF
       # Settings given for this run have to outlive it: the next run, an
       # upgrade, must not quietly move the proxy back to the default ports.
-      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_DIR SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_OIDC_NAME_CLAIM SHIPWICK_OIDC_TENANTS SHIPWICK_AGENTS SHIPWICK_LOG_RETENTION_DAYS SHIPWICK_LOG_RETENTION_SIZE SHIPWICK_UPDATE_CHECK; do
+      for name in SHIPWICK_HTTP_PORT SHIPWICK_HTTPS_PORT SHIPWICK_AGENT_IMAGE SHIPWICK_DASHBOARD_IMAGE SHIPWICK_CADDY_IMAGE SHIPWICK_SOCKET_PROXY_IMAGE SHIPWICK_WEBHOOK_URL SHIPWICK_WEBHOOK_SECRET SHIPWICK_CLOUDFLARE_API_TOKEN SHIPWICK_ALERT_MEMORY_PERCENT SHIPWICK_ALERT_DISK_PERCENT SHIPWICK_BACKUP_DIR SHIPWICK_BACKUP_PASSPHRASE SHIPWICK_BACKUP_S3_ENDPOINT SHIPWICK_BACKUP_S3_BUCKET SHIPWICK_BACKUP_S3_ACCESS_KEY_ID SHIPWICK_BACKUP_S3_SECRET_ACCESS_KEY SHIPWICK_BACKUP_S3_REGION SHIPWICK_BACKUP_S3_PREFIX SHIPWICK_EXPORT_SCHEDULE SHIPWICK_EXPORT_KEEP SHIPWICK_STANDBY_SCHEDULE HTTPS_PROXY HTTP_PROXY NO_PROXY SHIPWICK_CA_FILE SHIPWICK_DNS_RESOLVERS SHIPWICK_ACME_DIRECTORY SHIPWICK_OIDC_ISSUER SHIPWICK_OIDC_CLIENT_ID SHIPWICK_OIDC_CLIENT_SECRET SHIPWICK_OIDC_SCOPES SHIPWICK_OIDC_GROUPS_CLAIM SHIPWICK_OIDC_NAME_CLAIM SHIPWICK_OIDC_TENANTS SHIPWICK_AGENTS SHIPWICK_LOG_RETENTION_DAYS SHIPWICK_LOG_RETENTION_SIZE SHIPWICK_UPDATE_CHECK; do
           eval "value=\${$name:-}"
           [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >> "$env_file"
       done
@@ -621,6 +621,7 @@ install_server() {
     fi
 
     forget_unreadable_proxy_config
+    warn_stale_proxy_override
     docker compose up -d --remove-orphans
     step "Started the Shipwick services"
 
@@ -657,6 +658,23 @@ forget_unreadable_proxy_config() {
         caddy validate --config "$SAVED" 2>&1 | grep -q "unknown module" || exit 0
         rm -f "$SAVED" && echo forgotten' 2>/dev/null | grep -q forgotten || return 0
     warn "The proxy's saved configuration was written by a newer release and was removed; the agent loads the routes again."
+}
+
+# warn_stale_proxy_override is for a server that put the socket proxy in by
+# hand before it was part of every installation: compose.socket-proxy.yml of
+# 1.0 and before, saved as compose.override.yml. Compose merges the two
+# definitions and the server runs, but the override's list of allowed calls
+# replaces the one of this release, and an agent that makes one call more is
+# refused it by the older list. Said, not changed: the override is the user's.
+# The overlay that takes the proxy out again (compose.direct-socket.yml) names
+# the service too, with no list, and is not meant here.
+warn_stale_proxy_override() {
+    override="$INSTALL_DIR/compose.override.yml"
+    [ -f "$override" ] || return 0
+    grep -q '^  socket-proxy:' "$override" && grep -q -- '-allow' "$override" || return 0
+    warn "$override defines the socket-proxy service as well. The socket proxy is part of every installation now,
+  and the override's list of allowed calls replaces this release's. Remove the service and the docker-proxy volume
+  from the override, keep any mounts of your own, and run:   cd $INSTALL_DIR && docker compose up -d"
 }
 
 # start_previous_release is for going back to a release whose agent cannot
@@ -840,7 +858,7 @@ usage() {
     cat <<EOF
 Shipwick installer
 
-  install.sh          install or upgrade the server (agent, Caddy, dashboard) and the CLI
+  install.sh          install or upgrade the server (agent, socket proxy, Caddy, dashboard) and the CLI
   install.sh --cli    install the CLI only
   install.sh --bundle <directory or .tar.gz>
                       install or upgrade from files made elsewhere with "shipwick server bundle":
@@ -850,6 +868,12 @@ Shipwick installer
 With a hostname for the API, the CLI on the server is signed in to it for the
 user who runs the installer: the URL and the token are saved as a context, so
 "shipwick ps" works there too. A context saved there by hand is not touched.
+
+The agent never holds the Docker socket: a socket proxy does, and answers the
+agent the calls it makes and no other. An upgrade brings it to a server that
+ran without one. To give the agent the socket itself, save
+configs/compose.direct-socket.yml of the release as compose.override.yml
+(docs/handbook.md, "The Docker socket").
 
 Environment:
   SHIPWICK_VERSION            release to install, such as v1.0.0 (default: latest, which is looked
@@ -908,6 +932,7 @@ Environment:
                               the proxy's ports, when something else owns 80 and 443
   SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE, SHIPWICK_CADDY_IMAGE
                               images of your own instead of the release's
+  SHIPWICK_SOCKET_PROXY_IMAGE another image of the socket proxy than the one the release pins
   SHIPWICK_INSTALL_DIR        default /opt/shipwick
   SHIPWICK_BIN_DIR            default /usr/local/bin
 EOF

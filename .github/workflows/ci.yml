@@ -110,8 +110,13 @@ jobs:
           docker compose config --quiet
           SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml config --quiet
           docker compose -f packaging/linux/compose.yml config --quiet
-          SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml -f configs/compose.socket-proxy.yml config --quiet
+          SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml -f configs/compose.direct-socket.yml config --quiet
           SHIPWICK_AGENT_TOKEN=ci XDG_RUNTIME_DIR=/run/user/1000 docker compose -f configs/compose.production.yml -f configs/compose.rootless.yml config --quiet
+          # The agent holds the Docker socket in one case only: the overlay that asks for it.
+          SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml config --format json \
+            | jq -e '([.services.agent.volumes[].source] | index("/var/run/docker.sock")) == null and .services["socket-proxy"] != null' > /dev/null
+          SHIPWICK_AGENT_TOKEN=ci docker compose -f configs/compose.production.yml -f configs/compose.direct-socket.yml config --format json \
+            | jq -e '([.services.agent.volumes[].source] | index("/var/run/docker.sock")) != null and .services["socket-proxy"] == null' > /dev/null
 
   scripts:
     name: Scripts

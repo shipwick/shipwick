@@ -39,9 +39,10 @@ const (
 	bundleImages    = "images.tar"
 )
 
-// bundleImage finds the three images in the release's compose file, where
-// they are pinned to the release's version.
-var bundleImage = regexp.MustCompile(`ghcr\.io/shipwick/(?:agent|dashboard|caddy):[A-Za-z0-9][A-Za-z0-9._-]*`)
+// bundleImage finds the images in the release's compose file: the three
+// Shipwick images, pinned to the release's version, and from 1.1 on the
+// socket proxy's, pinned to a version of its own.
+var bundleImage = regexp.MustCompile(`(?:ghcr\.io/shipwick/(?:agent|dashboard|caddy)|wollomatic/socket-proxy):[A-Za-z0-9][A-Za-z0-9._-]*`)
 
 type bundleOptions struct {
 	version, arch, output string
@@ -55,7 +56,8 @@ func (c *cli) serverBundleCommand() *cobra.Command {
 		Short: "Make the files that install or upgrade a server with no connection",
 		Long: `Make a bundle that installs or upgrades a server with no connection to the
 internet: the release's compose file, its installer and checksums, the
-shipwick binary for the server, and the three images as one archive.
+shipwick binary for the server, and the images the compose file names as
+one archive.
 
 Run it on a machine that has a connection and Docker. The release's files are
 verified against its published checksums; the images are pulled from the
@@ -164,8 +166,14 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 	images := bundleImage.FindAllString(string(compose), -1)
 	slices.Sort(images)
 	images = slices.Compact(images)
-	if len(images) != 3 {
-		return fmt.Errorf("the compose file of release %s names %d Shipwick images, not three: %s", tag, len(images), strings.Join(images, ", "))
+	shipwick := 0
+	for _, image := range images {
+		if strings.HasPrefix(image, "ghcr.io/shipwick/") {
+			shipwick++
+		}
+	}
+	if shipwick != 3 {
+		return fmt.Errorf("the compose file of release %s names %d Shipwick images, not three: %s", tag, shipwick, strings.Join(images, ", "))
 	}
 	// What the release says its images are. Images this machine already had
 	// were not served by the registry under the release's tags, and a release
@@ -196,7 +204,7 @@ func (c *cli) serverBundle(ctx context.Context, opts bundleOptions) error {
 			return err
 		}
 		files = append(files, bundleDigests)
-		c.ui.Success("The three images are the ones release %s published for linux/%s", tag, opts.arch)
+		c.ui.Success("The %d images are the ones release %s published for linux/%s", len(images), tag, opts.arch)
 	case opts.noPull:
 		c.ui.Warn("The images are the ones this machine had under the release's names (--no-pull): they were not checked against the release's digests, and the installer will say so.")
 	default:

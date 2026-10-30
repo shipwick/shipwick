@@ -1,5 +1,6 @@
-# Shipwick on a server: the agent, its reverse proxy, and the dashboard.
-# One self-contained file — scripts/install.sh sets all of this up for you.
+# Shipwick on a server: the agent, the socket proxy it reaches Docker through,
+# its reverse proxy, and the dashboard. One self-contained file —
+# scripts/install.sh sets all of this up for you.
 #
 #   1. Point DNS at this server: every application domain, plus the two below.
 #   2. Open ports 80 and 443 (443/udp too, for HTTP/3). Nothing else.
@@ -24,15 +25,25 @@
 # Installed by scripts/install.sh, this file is /opt/shipwick/compose.yml and is
 # replaced on every upgrade. Keep your own changes in a compose.override.yml
 # next to it: Compose merges the two, and the installer never touches it.
+#
+# The agent never holds /var/run/docker.sock. The socket-proxy service below
+# does, and answers the agent the calls on its list — a method and a path each
+# — with 403 for every other. What that takes away and what it leaves is in
+# docs/handbook.md, "The Docker socket"; compose.direct-socket.yml is the
+# overlay for the few servers that want the agent on the socket itself.
+#
+# Needs Docker Compose 2.23.1 or newer; the overlays that use `!override` and
+# `!reset` need 2.24.4.
 
 # Pinned so container and volume names do not depend on the checkout directory.
 name: shipwick
 
 services:
   agent:
-    # In a release, the three images are pinned to the release's version. To
-    # run images built from source instead, set SHIPWICK_AGENT_IMAGE,
-    # SHIPWICK_DASHBOARD_IMAGE and SHIPWICK_CADDY_IMAGE in .env.
+    # In a release, the three Shipwick images are pinned to the release's
+    # version. To run images built from source instead, set
+    # SHIPWICK_AGENT_IMAGE, SHIPWICK_DASHBOARD_IMAGE and SHIPWICK_CADDY_IMAGE
+    # in .env.
     image: ${SHIPWICK_AGENT_IMAGE:-ghcr.io/shipwick/agent:latest}
     environment:
       SHIPWICK_AGENT_TOKEN: ${SHIPWICK_AGENT_TOKEN:?set SHIPWICK_AGENT_TOKEN in .env}
@@ -94,22 +105,121 @@ services:
       # Optional: "off" stops the agent's daily question to github.com about a newer release
       SHIPWICK_UPDATE_CHECK: ${SHIPWICK_UPDATE_CHECK:-}
       SHIPWICK_LOG_FORMAT: json
+      # Docker, through the filtered socket of the socket-proxy service: the
+      # agent is given no other way to the daemon.
+      DOCKER_HOST: unix:///run/docker-proxy/docker.sock
     # No published port on purpose: the API is plain HTTP, and the only ways in
     # are Caddy (HTTPS) and the server itself. For an SSH tunnel instead of a
     # public domain, add in compose.override.yml:   ports: ["127.0.0.1:9000:9000"]
     volumes:
       - agent-data:/var/lib/shipwick
       - caddy-admin:/run/caddy
+      - docker-proxy:/run/docker-proxy
       # `docker login` credentials, for private images — in compose.override.yml:
       # - /root/.docker/config.json:/root/.docker/config.json:ro
       # Certificate authorities of your own (SHIPWICK_CA_FILE) — in compose.override.yml:
       # - /etc/shipwick/ca.pem:/etc/shipwick/ca.pem:ro
-      # Root-equivalent access to this server. See README → Security.
-      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: [socket-proxy]
     # The API is reached on this network and no other: no application is on
     # it. The agent joins the application network by itself, for health checks,
     # and does not listen there.
     networks: [shipwick-control]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    restart: unless-stopped
+
+  socket-proxy:
+    # https://github.com/wollomatic/socket-proxy — an allow-list of method and
+    # path, one regular expression per method; what is not listed is refused
+    # with 403 and logged. It holds the Docker socket, which is root on this
+    # server; the agent holds only the socket this service makes.
+    image: ${SHIPWICK_SOCKET_PROXY_IMAGE:-wollomatic/socket-proxy:1.13.1}
+    command:
+      # A unix socket in a volume only the agent shares, like Caddy's admin
+      # API: on a TCP port it would be one more thing to keep application
+      # containers away from.
+      - -proxysocketendpoint=/run/docker-proxy/docker.sock
+      - -proxysocketendpointfilemode=0600
+      - -loglevel=${SHIPWICK_SOCKET_PROXY_LOG_LEVEL:-INFO}
+      # The agent mounts named volumes and nothing else. This refuses every
+      # bind mount — in `Binds`, in `Mounts`, and in a volume created with
+      # `o=bind`: the one directory it allows does not exist.
+      - -allowbindmountfrom=/var/empty/shipwick
+      # The calls the agent makes, and no other. Every path may carry the API
+      # version in front. A backslash at the end of a line joins it to the
+      # next: each list is one regular expression. A call the agent did not
+      # make before needs its line here and its row in the handbook's table;
+      # scripts/test-socket-proxy.sh fails when the proxy refused the agent.
+      #
+      #   _ping                    is the daemon there, and which API version
+      - "-allowHEAD=/_ping"
+      #   info                     the server's status; the daemon's proxy, when a pull fails
+      #   system/df                the sizes of volumes
+      #   containers/json          the containers of an application; the reverse proxy's
+      #   containers/<id>/json     state, address, exit code; the agent's own container
+      #   containers/<id>/logs     logs, followed or read; Caddy's access log
+      #   containers/<id>/stats    CPU and memory
+      #   containers/<id>/archive  a volume read for a backup or an export
+      #   exec/<id>/json           the exit code of a command
+      #   images/json              tags to clean up; layers a build need not send
+      #   images/get               an image written into an export
+      #   images/<name>/json       is the image here
+      #   networks/<name>          do the two networks exist
+      #   volumes                  the volumes of applications
+      - "-allowGET=/_ping|/(v1[.][0-9]+/)?(info\
+        |system/df\
+        |containers/json\
+        |containers/[a-zA-Z0-9_.-]+/(json|logs|stats|archive)\
+        |exec/[a-f0-9]+/json\
+        |images/json\
+        |images/get\
+        |images/.+/json\
+        |networks/[a-zA-Z0-9_.-]+\
+        |volumes)"
+      #   auth                       a registry login is tried before it is stored
+      #   containers/create          replicas, jobs, the containers of backups
+      #   containers/<id>/start, stop
+      #   containers/<id>/wait       a job's end
+      #   containers/<id>/exec       health checks by command, `before` of a backup, static folders
+      #   exec/<id>/start            the same: this starts what the line above prepared
+      #   images/create              pulling an image; nothing is ever imported or built
+      #   images/load                an image the CLI built and sent; an import
+      #   images/<id>/tag            a tag a refused upload moved, pointed back at its image
+      #   networks/create            the two networks, at the first start
+      #   networks/<name>/connect, disconnect   a replica's names on the services network
+      #   volumes/create             an application's volumes
+      - "-allowPOST=/(v1[.][0-9]+/)?(auth\
+        |containers/create\
+        |containers/[a-zA-Z0-9_.-]+/(start|stop|wait|exec)\
+        |exec/[a-f0-9]+/start\
+        |images/create\
+        |images/load\
+        |images/.+/tag\
+        |networks/create\
+        |networks/[a-zA-Z0-9_.-]+/(connect|disconnect)\
+        |volumes/create)"
+      #   containers/<id>/archive  a restore; the files of a static application
+      - "-allowPUT=/(v1[.][0-9]+/)?containers/[a-zA-Z0-9_.-]+/archive"
+      #   containers/<id>          replicas replaced, jobs done
+      #   images/<name>            images no deployment can go back to
+      #   volumes/<name>           a restore, a deleted application's volumes
+      - "-allowDELETE=/(v1[.][0-9]+/)?(containers/[a-zA-Z0-9_.-]+\
+        |images/.+\
+        |volumes/[a-zA-Z0-9_.-]+)"
+    # Root inside the container, without a single capability: the socket
+    # belongs to root, or to the user of a rootless daemon, who is root in
+    # here. Running as nobody would need the number of the server's docker
+    # group, which differs from one distribution to the next.
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    # No network at all: the only ways in and out are the two sockets.
+    network_mode: none
+    volumes:
+      # SHIPWICK_DOCKER_SOCKET in .env for a daemon whose socket is elsewhere;
+      # compose.rootless.yml points it at the rootless daemon's.
+      - ${SHIPWICK_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - docker-proxy:/run/docker-proxy
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     restart: unless-stopped
 
@@ -178,6 +288,8 @@ volumes:
   caddy-config:
   caddy-admin:
   caddy-static:
+  # The filtered Docker socket, shared by the socket proxy and the agent.
+  docker-proxy:
 
 networks:
   shipwick:
