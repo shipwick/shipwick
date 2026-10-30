@@ -122,6 +122,9 @@ const removeError = shallowRef<AgentError | null>(null)
 
 const removalConsequence = computed(() => (removing.value ? secretRemovalConsequence(removing.value.name, removing.value.application ?? '', secrets.data.value ?? []) : ''))
 
+// The row goes away under the dialog: a screen reader is told what happened to it.
+const { announce } = useAnnounce()
+
 async function remove() {
   const target = removing.value
   if (!target || removePending.value) return
@@ -130,6 +133,7 @@ async function remove() {
   try {
     await agent.del(`/secrets/${encodeURIComponent(target.name)}`, { query: { application: target.application || undefined } })
     removing.value = null
+    announce(`Removed ${target.name}${target.application ? ` of ${target.application}` : ''}.`)
     void secrets.refresh()
   }
   catch (cause) {

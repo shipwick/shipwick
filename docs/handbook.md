@@ -277,8 +277,12 @@ by hand — is named, because it would go on being the one that runs. A
 release of your choice: `$env:SHIPWICK_VERSION = 'v0.8.1'` before the
 command; or save the script ([scripts/install.ps1](../scripts/install.ps1),
 a file of every release) and run it with `-Version` and `-Destination`.
-Running it again upgrades, as does `shipwick upgrade`. `winget install
-Shipwick.Shipwick` follows once the package is accepted into winget-pkgs.
+Running it again upgrades, as does `shipwick upgrade`. On every push to
+`main`, CI builds the CLI and the agent on Windows on Arm, starts them, runs
+the unit tests there and runs this installer, which has to pick the Arm64
+build of the latest release. `winget install Shipwick.Shipwick` follows once
+the package is accepted into winget-pkgs; every release submits its manifests
+there.
 
 **Upgrading.** The server is upgraded by running the installer again, on the
 server: it needs Docker there, which the CLI does not have. The CLI upgrades
@@ -1309,7 +1313,10 @@ In CI, keep `deploy.yaml` in the repository and pass the image you just built:
 shipwick deploy --image ghcr.io/company/my-api:$GIT_SHA
 ```
 
-It exits non-zero if the deployment fails, so it works as a pipeline gate.
+It exits non-zero if the deployment fails, so it works as a pipeline gate. The
+same three lines for GitHub Actions, GitLab CI and Azure Pipelines, with the
+image built in the pipeline and the approval before production, are on
+[shipwick.com](https://shipwick.com/docs/tasks/deploy-from-ci).
 
 **Several applications.** A project with more than one service — a database,
 an API, a front end — describes them all in one `shipwick.yaml`: an `apps` list
@@ -1681,8 +1688,10 @@ control is at least 44 by 44 px, and a table becomes a list of cards wherever
 the page's column is narrow: on a phone, and beside the sidebar on a tablet.
 Animations stop when the system asks for reduced motion. This was checked
 with the keyboard, the browser's accessibility tree and an automated checker,
-in both themes; it has not yet been used with a screen reader by someone who
-works with one every day.
+in both themes; every page and dialog was last read that way — the tree a
+screen reader is given, node by node, a keyboard walk and axe — on
+2026-10-30 in Chrome 156. It has not yet been used with a screen reader by
+someone who works with one every day.
 
 The browser never holds a token: the dashboard's own server keeps it in an `httpOnly`
 cookie and relays requests to the agent, so the agent needs no CORS and can

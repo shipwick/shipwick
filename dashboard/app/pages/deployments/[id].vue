@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Deployment, DeploymentDetail } from '~/types/api'
+import { progressAnnouncement } from '~/utils/announce'
 import { deriveProgress } from '~/utils/deploymentProgress'
 import { durationBetween, formatAbsoluteUtc, formatBytes, formatCores, formatDuration } from '~/utils/format'
 import { describeBackupPlan } from '~/utils/backups'
@@ -134,6 +135,18 @@ const outcome = computed(() => {
     default: return ''
   }
 })
+
+// A deployment watched here is narrated as on the application's page: each
+// new step, and how it ended. The timeline itself is not a live region: it
+// is polled, and its clocks tick. One that was over when the page opened is
+// not news.
+const { announce } = useAnnounce()
+const headline = computed(() => (status.value ? `${status.value.label}${outcome.value ? `. ${outcome.value}` : ''}` : ''))
+watch(progress, (next, previous) => {
+  if (!next) return
+  if (!previous && next.phase !== 'running') return
+  announce(progressAnnouncement(previous ?? null, next, headline.value))
+}, { immediate: true })
 
 const now = useNow()
 const duration = computed(() => {

@@ -116,6 +116,7 @@ async function revoke() {
   try {
     await agent.del(`/tokens/${encodeURIComponent(target.name)}`)
     revoking.value = null
+    announce(`Revoked ${target.name}.`)
     void tokens.refresh()
   }
   catch (cause) {

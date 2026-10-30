@@ -13,7 +13,8 @@ const props = defineProps<{ crumbs: Crumb[] }>()
 <template>
   <header class="sticky top-0 z-20 border-b border-line bg-bg">
     <div class="mx-auto flex min-h-12 max-w-[1240px] flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2 sm:px-6">
-      <nav aria-label="Breadcrumb" class="min-w-0">
+      <!-- A page at the top of the tree has no path to show: a navigation landmark around the title alone would be noise. -->
+      <component :is="props.crumbs.length > 1 ? 'nav' : 'div'" :aria-label="props.crumbs.length > 1 ? 'Breadcrumb' : undefined" class="min-w-0">
         <ol class="flex min-w-0 items-center gap-1.5 text-base">
           <li v-for="(crumb, index) in props.crumbs" :key="index" class="flex min-w-0 items-center gap-1.5">
             <UiIcon v-if="index > 0" name="chevron-right" :size="12" class="text-fg-faint" />
@@ -30,7 +31,7 @@ const props = defineProps<{ crumbs: Crumb[] }>()
             </h1>
           </li>
         </ol>
-      </nav>
+      </component>
       <div v-if="$slots.actions" class="flex flex-wrap items-center gap-2">
         <slot name="actions" />
       </div>

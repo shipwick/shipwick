@@ -25,6 +25,9 @@ const removing = ref<VolumeInfo | null>(null)
 const removePending = ref(false)
 const removeError = shallowRef<AgentError | null>(null)
 
+// The row goes away under the dialog: a screen reader is told what happened to it.
+const { announce } = useAnnounce()
+
 async function remove() {
   const target = removing.value
   if (!target || removePending.value) return
@@ -33,6 +36,7 @@ async function remove() {
   try {
     await agent.del(`/volumes/${encodeURIComponent(target.name)}`)
     removing.value = null
+    announce(`Removed ${target.name}.`)
     void volumes.refresh()
   }
   catch (cause) {

@@ -25,38 +25,15 @@ what is frozen, surface by surface, and why, is in
 A minor adds and removes nothing. What it adds is decided by what
 installations ask for, in issues, against the principles in
 [CONTRIBUTING.md](CONTRIBUTING.md) and the two lists at the end of this page.
-What is already in view, in no order:
+No minor is named yet. One measurement is still to be made:
 
-**Guides for the other pipelines.** The GitHub Action has a page; the same
-three lines for a `.gitlab-ci.yml` and an `azure-pipelines.yml`, each run
-against a real server before it is published.
-
-**Coming from another tool.** The guide that exists for Docker Compose, for
-the tools people most often arrive from: Dokku and Coolify. What each of their
-concepts becomes here and how to move a running application across, without
-a comparison of merits.
-
-**`winget install Shipwick.Shipwick`.** The manifests of every release are in
-[packaging/winget](packaging/winget) and the package is submitted to
-winget-pkgs; when it is accepted, the handbook names it as the way to install
-on Windows, and the submission moves from two commands run by a maintainer
-into the release workflow.
-
-**Numbers from more machines.** What one server carries is measured on a
-developer's machine at a server's size; the same script on rented servers of
-two sizes puts a second column next to the first. The packages and rootless
-Docker, run in containers today, on hosts that enforce SELinux or AppArmor;
-the CLI started on Windows on Arm, where it is built and chosen but has not
-yet been run; the dashboard used for an hour by someone who works with a
-screen reader. Each result goes into the handbook as a number or a
-correction, and is welcome as an issue from anyone who has the machine.
-
-**A security review from outside.** Before 1.0 the code was reviewed three
-times against its own threat model — the Docker Engine API calls the agent
-makes, the proxy configuration it generates, the handling of tokens, secrets
-and uploads — and the findings were fixed; the changelog's 0.10.0 section
-says what. The next review is by someone who did not write the code, and its
-summary is published with the release that carries its findings.
+**Numbers from rented servers.** What one server carries is measured on a
+developer's machine at a server's size ([What one server
+carries](docs/handbook.md#what-one-server-carries)); the same script on rented
+servers of two sizes puts a second column next to the first, and the packages
+and rootless Docker run on a host that enforces SELinux confirm or correct the
+handbook's paragraphs on them. The results go into the handbook as numbers
+and corrections.
 
 ## 2.x
 

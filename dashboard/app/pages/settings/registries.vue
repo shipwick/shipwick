@@ -72,6 +72,9 @@ const removing = ref<Registry | null>(null)
 const removePending = ref(false)
 const removeError = shallowRef<AgentError | null>(null)
 
+// The row goes away under the dialog: a screen reader is told what happened to it.
+const { announce } = useAnnounce()
+
 async function remove() {
   const target = removing.value
   if (!target || removePending.value) return
@@ -80,6 +83,7 @@ async function remove() {
   try {
     await agent.del(`/registries/${encodeURIComponent(target.registry)}`)
     removing.value = null
+    announce(`Logged out of ${target.registry}.`)
     void registries.refresh()
   }
   catch (cause) {

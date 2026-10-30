@@ -7,7 +7,7 @@ import { decideServer, wantedServer, withServer } from '~/utils/servers'
  * security boundary: the boundary is the server-side proxy, which answers 401
  * without a valid session cookie whatever the client does.
  */
-export default defineNuxtRouteMiddleware(async (to) => {
+export default defineNuxtRouteMiddleware(async (to, from) => {
   const session = useSession()
   const servers = await session.check()
 
@@ -38,8 +38,13 @@ export default defineNuxtRouteMiddleware(async (to) => {
 
   if (to.path === '/login') {
     if (server !== null && session.isAuthenticated(server)) {
-      const target = safeRedirect(to.query.redirect)
-      return navigateTo(multiple ? withServer(target, server) : target, { replace: true })
+      const redirect = safeRedirect(to.query.redirect)
+      const target = multiple ? withServer(redirect, server) : redirect
+      // Loaded afresh — a bookmark, a restored tab — the page would be put
+      // into the sign-in page's layout, which has none of what it needs: the
+      // browser loads the address itself instead.
+      if (useNuxtApp().isHydrating) return navigateTo(target, { replace: true, external: true })
+      return navigateTo(target, { replace: true })
     }
     return
   }

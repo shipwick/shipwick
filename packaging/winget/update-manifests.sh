@@ -70,9 +70,10 @@ esac
 dir="manifests/s/Shipwick/Shipwick/$version"
 mkdir -p "$dir"
 
-# The manifest schema microsoft/winget-pkgs asks for in its pull request
-# template. A newer one exists before the client that reads all of it does.
-schema=1.12.0
+# The manifest schema microsoft/winget-pkgs accepts. Its moderation refuses
+# the versions it has deprecated — 1.12.0 since 2026-10-30 — whatever its
+# pull request template still names; a pull request with one is not merged.
+schema=1.28.0
 
 cat > "$dir/Shipwick.Shipwick.yaml" <<YAML
 # yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.$schema.schema.json

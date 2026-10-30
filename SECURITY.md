@@ -41,6 +41,13 @@ The trust model is described in the [Security section of the handbook](docs/hand
 In short: **the API token is equivalent to root on the server, by design**, and
 Shipwick is not a multi-tenant sandbox.
 
+Before 1.0 the code was reviewed three times against that model — the Docker
+Engine API calls the agent makes, the proxy configuration it generates, the
+handling of tokens, secrets and uploads — and every finding was fixed; the
+changelog's 0.10.0 section lists them. The reviewers were the maintainers. A
+review by someone who did not write the code is welcome, and its findings are
+handled as reports below.
+
 Vulnerabilities — we want to hear about these:
 
 - reaching the API, or the dashboard's session, without a valid token;

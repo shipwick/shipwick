@@ -158,7 +158,7 @@ watch(() => props.application, () => {
       <div v-if="props.routed">
         <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 bg-subtle px-4 py-2">
           <span class="label">Recent requests</span>
-          <UiButton size="sm" variant="ghost" :aria-expanded="showRequests" @click="showRequests = !showRequests">
+          <UiButton size="sm" variant="ghost" :aria-expanded="showRequests" :aria-label="showRequests ? 'Hide recent requests' : 'Show recent requests'" @click="showRequests = !showRequests">
             {{ showRequests ? 'Hide' : 'Show' }}
           </UiButton>
         </div>

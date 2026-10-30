@@ -71,6 +71,9 @@ const removing = ref<Certificate | null>(null)
 const removePending = ref(false)
 const removeError = shallowRef<AgentError | null>(null)
 
+// The row goes away under the dialog: a screen reader is told what happened to it.
+const { announce } = useAnnounce()
+
 async function remove() {
   const victim = removing.value
   if (!victim || removePending.value) return
@@ -79,6 +82,7 @@ async function remove() {
   try {
     await agent.del(`/certificates/${encodeURIComponent(victim.hostname)}`)
     removing.value = null
+    announce(`Removed the certificate of ${victim.hostname}.`)
     void certificates.refresh()
   }
   catch (cause) {

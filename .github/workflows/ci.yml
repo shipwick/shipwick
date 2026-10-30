@@ -133,8 +133,8 @@ jobs:
           $findings | Format-List
           if ($findings) { exit 1 }
 
-  # The jobs below, packages aside, are the five wide ones. A pull request
-  # runs one cell of the installer's and none of the other four; main and a
+  # The jobs below, packages aside, are the six wide ones. A pull request
+  # runs one cell of the installer's and none of the other five; main and a
   # release run all of them. What each cell proves and what it cannot:
   # CONTRIBUTING.md, "What CI runs where".
 
@@ -253,6 +253,62 @@ jobs:
           go test -tags integration -count=1 -v -run Integration ./agent/internal/docker/ > tests.txt 2>&1 || { cat tests.txt; exit 1; }
           grep -E '^(--- |ok|FAIL)' tests.txt
           ! grep -q '^--- SKIP' tests.txt
+
+  # The CLI and the agent on Windows on Arm, which the release builds for and
+  # nothing else here runs: built there, started there, the unit tests run
+  # there — the engine is tested against in-memory fakes, so they need no
+  # Docker, which the runner has none of — and the installer of the commit
+  # installs the latest release and has to pick the arm64 build. The agent
+  # itself serves on Linux; what this proves is that the code it shares with
+  # the CLI compiles and passes its tests on this architecture too.
+  windows-arm:
+    name: Windows on Arm
+    if: github.event_name != 'pull_request'
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        shell: bash
+        run: |
+          go build -o shipwick.exe ./cli/cmd/shipwick
+          go build -o shipwick-agent.exe ./agent/cmd/shipwick-agent
+      # With a config file that does not exist and an agent that cannot
+      # answer, so that nothing of this machine is read: validate reads the
+      # file and nothing else.
+      - name: The binaries run on this machine
+        shell: bash
+        env:
+          SHIPWICK_CONFIG: ${{ runner.temp }}/shipwick.yaml
+          SHIPWICK_AGENT_URL: http://127.0.0.1:1
+          SHIPWICK_AGENT_TOKEN: x
+        run: |
+          ./shipwick.exe --version
+          ./shipwick.exe validate -f configs/deploy.example.yaml
+          ./shipwick-agent.exe version
+      - name: Unit tests
+        shell: bash
+        run: go test -count=1 ./...
+      # install.ps1 of this commit, installing the latest release the way a
+      # user does, into a directory of the workspace. The build it picks is
+      # read from the file it installed: the machine type in the PE header,
+      # 0xAA64 for Arm64.
+      - name: The installer picks the Arm64 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $destination = Join-Path $env:GITHUB_WORKSPACE installed
+          .\scripts\install.ps1 -Destination $destination
+          $exe = Join-Path $destination shipwick.exe
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $machine = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3C) + 4)
+          if ($machine -ne 0xAA64) { throw ("The installer picked the build for machine type 0x{0:X4}, not Arm64 (0xAA64)." -f $machine) }
+          $latest = gh release list --repo shipwick/shipwick --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName'
+          $printed = & $exe --version
+          if ($printed -ne "shipwick version $latest") { throw "The installed shipwick prints '$printed'; the latest release is $latest." }
+          Write-Host $printed
 
   packages:
     name: Packages

@@ -98,7 +98,7 @@ function cloudflareChecked() {
             Applications
           </dt>
           <dd class="mt-0.5">
-            <NuxtLink to="/applications" class="mono link">{{ server.applications }}</NuxtLink>
+            <NuxtLink to="/applications" class="mono link" :aria-label="pluralize(server.applications, 'application')">{{ server.applications }}</NuxtLink>
           </dd>
         </div>
         <div :class="neighbours?.warning ? 'sm:col-span-2 lg:col-span-4' : ''">

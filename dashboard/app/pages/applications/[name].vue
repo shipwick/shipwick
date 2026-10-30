@@ -172,7 +172,7 @@ provideApplication({
           variant="primary"
           size="sm"
           :disabled="busy || !hasActive || !mayDeploy"
-          :hint="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : 'Deploy another version of the image with the same configuration')"
+          :hint="deployHint ?? (!hasActive ? 'Nothing deployed yet. The first deployment needs shipwick deploy.' : busy ? 'A deployment is in progress' : isStatic ? 'Serve the current files again with the same configuration' : 'Deploy another version of the image with the same configuration')"
           @click="dialog = 'deploy'"
         >
           Deploy

@@ -102,6 +102,9 @@ const revoking = ref<AccessRule | null>(null)
 const revokePending = ref(false)
 const revokeError = shallowRef<AgentError | null>(null)
 
+// The row goes away under the dialog: a screen reader is told what happened to it.
+const { announce } = useAnnounce()
+
 async function revoke() {
   const target = revoking.value
   if (!target || revokePending.value) return
@@ -110,6 +113,7 @@ async function revoke() {
   try {
     await agent.del(`/access/rules/${target.id}`)
     revoking.value = null
+    announce(`Revoked ${ruleSubject(target)}.`)
     void rules.refresh()
     void sessions.refresh()
   }

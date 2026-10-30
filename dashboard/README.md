@@ -506,6 +506,26 @@ use.
   `prefers-reduced-motion` through one rule in `main.css`; scrolling from
   JavaScript has to ask for itself.
 
+Every page and dialog was last read on 2026-10-30, in Chrome 156, against the
+mock: through the browser's accessibility tree, which is what every screen
+reader is given (each node's role, name, description, states and heading
+level, in document order), walked with Tab, Shift+Tab, Enter, Escape and the
+arrows (focus order, the focus ring, where the focus lands when a dialog
+opens, closes, or removes its own row, and after a navigation), with the
+title and the landmarks of every page, the number of changes to the live
+regions while a deployment ran and a log followed, and axe-core 4.10.2
+(WCAG 2.0 and 2.1 A and AA, best practices), which reported nothing. What the
+reading found and what was changed: the *Logs* link of an alert now names its
+application; the count of applications on the server's page is a link named
+`9 applications`, not `9`; the button that opens the recent requests says
+*Show recent requests*; a page at the top of the tree no longer wraps its
+title in a breadcrumb landmark with nothing to navigate; a deployment
+watched on its own page is narrated step by step, as the application's page
+already did; removing a volume, a secret, a certificate, a registry login, a
+token or a sign-in rule is said once the row is gone; the *Deploy* button of
+a static application no longer speaks of an image. Nobody who works with a
+screen reader every day has used it yet.
+
 ## Configuration
 
 | Variable | Default | |

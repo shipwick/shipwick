@@ -40,7 +40,7 @@ const FRAME = { warn: 'border-warn-line bg-warn-bg text-warn', danger: 'border-d
       </div>
       <!-- An alert about an application is answered by what its replicas wrote. -->
       <NuxtLink v-if="alert.application" :to="applicationPath(alert.application, 'logs')" class="notice-action">
-        Logs
+        Logs<span class="sr-only"> of {{ alert.application }}</span>
         <UiIcon name="chevron-right" :size="12" />
       </NuxtLink>
     </li>

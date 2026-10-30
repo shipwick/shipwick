@@ -69,7 +69,7 @@ make test-dashboard     # if you touched dashboard/
 
 A pull request runs the checks above on Ubuntu 24.04 (amd64) with the Docker
 of GitHub's image, builds the images and the packages, and runs the
-installer once, on Alpine. `main` and every release also run five wider
+installer once, on Alpine. `main` and every release also run six wider
 jobs. None of them can be run on a contributor's machine as a whole; each
 cell can (`scripts/test-install.sh`, `scripts/test-upgrade.sh`, or
 `DOCKER_HOST` at a `docker:<version>-dind` container for the integration
@@ -81,6 +81,7 @@ tests).
 | Installer, older Engines | Debian 12 with Docker 20.10 and the current Compose plugin; Debian 13 with Docker 26.1 and its Compose (amd64) | The same installation against the Engine version that distribution packages | The distribution's build of that Engine: the daemon is Docker's image of the version |
 | Docker versions | Docker 20.10, 26.1, 28, 29, each on amd64 and arm64 | The integration tests — the agent's use of the Engine API — pass against a daemon of that version | Distribution patches to Docker; the kernel is the runner's, Ubuntu 24.04's |
 | Integration | Ubuntu 22.04 on amd64 and arm64, Ubuntu 24.04 on arm64 | The same tests on that image's kernel and its Docker, on real arm64 hardware | Other distributions' kernels: GitHub hosts Ubuntu only |
+| Windows on Arm | GitHub's `windows-11-arm` runner | The CLI and the agent build with the Go of `go.mod`, `shipwick --version` and `shipwick validate` run, `go test ./...` passes without Docker, and `scripts/install.ps1` of the commit installs the latest release and picks the arm64 build (the machine type in the file's PE header) | The agent in service: it runs on Linux. Windows PowerShell 5.1, which the runner does not have; the installer runs under PowerShell 7 there |
 | Upgrade | The last two releases, each installed by its own installer and put to use, then upgraded to the commit; for the latest, the way back as well (`scripts/test-upgrade.sh`) | The applications, data, secrets, tokens, jobs and backups of a release survive the upgrade, the proxy runs the commit's configuration, and the old installer can take the server back | A real server's kernel, systemd and network: the server is a `docker:dind` container |
 
 A cell of the Docker versions and Integration jobs fails when a test is skipped: the tests skip without

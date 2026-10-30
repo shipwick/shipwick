@@ -14,6 +14,22 @@ names the migration under **Changed**
 
 ### Changed
 
+- The release workflow submits the CLI to winget. The manifests are written
+  from the release's `checksums.txt`, published as `winget-manifests.zip`, a
+  file of the release listed in `checksums.txt` and signed with the rest, and
+  validated with `winget validate`; with the `WINGET_TOKEN` secret set, the
+  pull request to microsoft/winget-pkgs is opened by `wingetcreate`, from the
+  release workflow, for releases and not for pre-releases. The manifests of a
+  release are no longer committed to `packaging/winget/manifests/`; those of
+  the versions up to 1.0.0 stay. The manifests are written in schema 1.28.0:
+  winget-pkgs deprecated 1.12.0 and does not merge a pull request in it.
+  How to set the secret up and how to submit by hand:
+  `packaging/winget/README.md`.
+- CI builds the CLI and the agent on Windows on Arm (GitHub's
+  `windows-11-arm` runner) on every push to `main` and before a release,
+  starts them, runs the unit tests there, and runs `scripts/install.ps1`,
+  which has to install the latest release and pick the arm64 build. Until
+  now that build was compiled for Windows on Arm and never run on one.
 - The dashboard is built with Yarn, and its dependencies are current: Nuxt
   4.6.3, Vitest 5.0.5, Vue Router 5.4.0.
 - The agent, the CLI and the proxy are built with Go 1.27.3, and the proxy
@@ -27,6 +43,22 @@ names the migration under **Changed**
 
 ### Fixed
 
+- For a screen reader, the dashboard now names what it only showed: the
+  *Logs* link of an alert says which application's logs it opens; the count of
+  applications on the server's page is a link named `9 applications`, not
+  `9`; the button that opens the recent requests of an application says *Show
+  recent requests*; a page at the top of the tree no longer wraps its title in
+  a breadcrumb landmark with nothing to navigate.
+- A deployment watched on its own page is narrated step by step, as it already
+  was on the application's page: each new step, and how it ended.
+- Removing a volume, a secret, a certificate, a registry login, a token or a
+  sign-in rule is said to a screen reader once the row is gone; before, the
+  focus moved to the page and nothing was said.
+- The *Deploy* button of a static application no longer explains itself as
+  deploying another version of an image it does not have.
+- The dashboard's sign-in page, opened afresh while already signed in — a
+  bookmark, a restored tab — showed *Something went wrong* instead of the
+  overview, or of the page it was told to return to.
 - Building the dashboard no longer pulls the versions of `node-forge`, `undici`,
   `seroval` and `serialize-javascript` with published advisories; none of them
   was in the image.
