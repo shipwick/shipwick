@@ -3265,9 +3265,9 @@ along.
 
 **The Windows installer is a script, and resolves the tag first.** The CLI
 installs on Windows from `install.ps1`, piped into PowerShell the way
-`install.sh` is piped into `sh`, rather than from a package: winget is
-pending its review, and an installer of its own would be one more signed
-artifact to build and verify. The script does only what the Unix one does
+`install.sh` is piped into `sh`, rather than from a package: an installer of
+its own would be one more signed artifact to build and verify. The script
+does only what the Unix one does
 for `--cli` — download, checksum, signature, put in place — plus the one
 thing Windows has no convention for: putting the directory on the user's
 `PATH`, which is a registry value under `HKCU\Environment` and a broadcast

@@ -119,7 +119,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: shellcheck
-        run: shellcheck -s sh scripts/*.sh packaging/winget/*.sh packaging/linux/*.sh
+        run: shellcheck -s sh scripts/*.sh packaging/linux/*.sh
       # The module comes from the PowerShell Gallery on every run, and the
       # gallery is not always there on the first try.
       - name: PSScriptAnalyzer

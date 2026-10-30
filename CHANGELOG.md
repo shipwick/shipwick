@@ -14,17 +14,12 @@ names the migration under **Changed**
 
 ### Changed
 
-- The release workflow submits the CLI to winget. The manifests are written
-  from the release's `checksums.txt`, published as `winget-manifests.zip`, a
-  file of the release listed in `checksums.txt` and signed with the rest, and
-  validated with `winget validate`; with the `WINGET_TOKEN` secret set, the
-  pull request to microsoft/winget-pkgs is opened by `wingetcreate`, from the
-  release workflow, for releases and not for pre-releases. The manifests of a
-  release are no longer committed to `packaging/winget/manifests/`; those of
-  the versions up to 1.0.0 stay. The manifests are written in schema 1.28.0:
-  winget-pkgs deprecated 1.12.0 and does not merge a pull request in it.
-  How to set the secret up and how to submit by hand:
-  `packaging/winget/README.md`.
+- The CLI is no longer submitted to winget; the submission waited for review
+  since September. On Windows the installer
+  (`irm https://get.shipwick.com/windows | iex`) installs the CLI and
+  `shipwick upgrade` replaces the binary it installed. `packaging/winget/`,
+  with the manifests of 0.2.0 to 1.0.0, is removed, and `shipwick upgrade` no
+  longer looks for a binary under winget's directories.
 - CI builds the CLI and the agent on Windows on Arm (GitHub's
   `windows-11-arm` runner) on every push to `main` and before a release,
   starts them, runs the unit tests there, and runs `scripts/install.ps1`,

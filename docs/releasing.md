@@ -13,7 +13,6 @@ which — only after the whole CI suite passed on that commit — publishes:
 | `install.ps1`, the Windows installer of the CLI as it is at the tag | the GitHub release |
 | `ghcr.io/shipwick/agent`, `ghcr.io/shipwick/dashboard`, `ghcr.io/shipwick/caddy` for `linux/amd64` and `linux/arm64` | GitHub Container Registry |
 | `image-digests.txt`: the digests of those images, read back from the registry | the GitHub release |
-| `winget-manifests.zip`: the three winget manifests of the CLI, written from `checksums.txt` | the GitHub release, and from there a pull request to microsoft/winget-pkgs |
 | `checksums.txt` (SHA-256 of every file above) | the GitHub release |
 | `checksums.txt.sigstore.json`: the signature of `checksums.txt`, made by the workflow run | the GitHub release |
 | A signature of each image, by digest, and a provenance attestation for each image and for every file `checksums.txt` lists | next to the image in the registry; GitHub's attestation store |
@@ -216,13 +215,6 @@ Things the workflow cannot do for itself:
   always be able to install the latest *release*.
 - Repository settings: enable *Private vulnerability reporting* (SECURITY.md
   links to it), and protect `v*` tags so only maintainers can release.
-- **`WINGET_TOKEN`**, for the pull request to microsoft/winget-pkgs: a classic
-  personal access token with the `public_repo` scope, of an account that
-  owns nothing but its fork of winget-pkgs. What the token is for, why that
-  account, and what the account signs once:
-  [packaging/winget/README.md](../packaging/winget/README.md), *What the
-  maintainer sets up once*. Without it the job validates the manifests and
-  submits nothing.
 
 ## After the release
 
@@ -258,17 +250,8 @@ signature:
 sh scripts/test-install.sh --cosign --version v0.8.0 debian:13
 ```
 
-Two package managers carry the CLI, and neither reads the GitHub release on
-its own:
-
-- **Homebrew**: run the *Update* workflow of `shipwick/homebrew-tap`
-  (`gh workflow run update.yml -R shipwick/homebrew-tap`, or the Actions tab); it
-  reads the release, commits the formula and tests it.
-- **winget**: the workflow does it. Its last job validates the manifests of
-  the release — one installer entry for each Windows build, x64 and arm64 —
-  and opens the pull request to microsoft/winget-pkgs with the `WINGET_TOKEN`
-  secret; check that the pull request exists and that the repository's
-  automation is happy with it, and answer a moderator who is not. Without the
-  secret, or after a failure, the manifests are `winget-manifests.zip` of the
-  release and the pull request is opened by hand:
-  [packaging/winget/README.md](../packaging/winget/README.md).
+Homebrew carries the CLI and does not read the GitHub release on its own:
+run the *Update* workflow of `shipwick/homebrew-tap`
+(`gh workflow run update.yml -R shipwick/homebrew-tap`, or the Actions tab); it
+reads the release, commits the formula and tests it. On Windows the installer
+and `shipwick upgrade` read the release directly, and need nothing after it.

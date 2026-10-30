@@ -109,8 +109,8 @@ func (c *cli) upgradeCommand() *cobra.Command {
 		Long: `Replace this shipwick with the latest release.
 
 The release is downloaded from GitHub and verified against its published
-checksums before the binary is swapped. A shipwick installed with Homebrew or
-winget is left to the package manager; the command tells you what to run.
+checksums before the binary is swapped. A shipwick installed with Homebrew is
+left to it; the command tells you what to run.
 
 The checksums are signed by the workflow that published the release. With
 cosign installed (2.5 or later) the signature is verified first, and an
@@ -171,12 +171,8 @@ func (c *cli) upgradeBinary(ctx context.Context, opts upgradeOptions, latest str
 	if err != nil {
 		return fmt.Errorf("locate the running shipwick: %w", err)
 	}
-	switch installMethod(exe) {
-	case "brew":
+	if installMethod(exe) == "brew" {
 		c.ui.Println(fmt.Sprintf("shipwick %s was installed with Homebrew; %s is available.\n\nUpgrade with: brew upgrade shipwick", opts.version, latest))
-		return nil
-	case "winget":
-		c.ui.Println(fmt.Sprintf("shipwick %s was installed with winget; %s is available.\n\nUpgrade with: winget upgrade Shipwick.Shipwick", opts.version, latest))
 		return nil
 	}
 	if check {
@@ -201,9 +197,8 @@ func (c *cli) installRelease(ctx context.Context, opts upgradeOptions, tag strin
 	}
 	// A package manager installs its latest and nothing else; a file put in
 	// its directory by hand would confuse it.
-	if method := installMethod(exe); method != "" {
-		manager := map[string]string{"brew": "Homebrew", "winget": "winget"}[method]
-		c.ui.Println(fmt.Sprintf("shipwick %s was installed with %s and is left to it. To run %s, download it from\n%s/%s/releases/tag/%s and put it on your PATH ahead of %s's.", opts.version, manager, tag, opts.web, releaseRepo, tag, manager))
+	if installMethod(exe) == "brew" {
+		c.ui.Println(fmt.Sprintf("shipwick %s was installed with Homebrew and is left to it. To run %s, download it from\n%s/%s/releases/tag/%s and put it on your PATH ahead of Homebrew's.", opts.version, tag, opts.web, releaseRepo, tag))
 		return nil
 	}
 	if check {
@@ -491,15 +486,12 @@ func checksumFor(sums []byte, asset string) (string, bool) {
 }
 
 // installMethod tells from the binary's real location whether a package
-// manager owns it: Homebrew keeps everything under a Cellar, winget under its
-// Packages directory. Both would be confused by a file they did not put there.
+// manager owns it: Homebrew keeps everything under a Cellar, and would be
+// confused by a file it did not put there.
 func installMethod(exe string) string {
 	p := strings.ToLower(strings.ReplaceAll(exe, `\`, "/"))
-	switch {
-	case strings.Contains(p, "/cellar/shipwick/"), strings.Contains(p, "/homebrew/"), strings.Contains(p, "/linuxbrew/"):
+	if strings.Contains(p, "/cellar/shipwick/") || strings.Contains(p, "/homebrew/") || strings.Contains(p, "/linuxbrew/") {
 		return "brew"
-	case strings.Contains(p, "/winget/packages/"), strings.Contains(p, "/microsoft/winget/"):
-		return "winget"
 	}
 	return ""
 }

@@ -241,8 +241,8 @@ Everything `shipwick` reads from the environment, in one place:
   program with arguments, with the release workflow at that tag as the
   identity), and a signature that does not verify changes nothing; without
   cosign the command says that the signature was not checked. `server
-  bundle` does the same where the bundle is made. A binary under Homebrew's Cellar or winget's Packages
-  directory is recognized by its path and left to the package manager. The
+  bundle` does the same where the bundle is made. A binary under Homebrew's
+  Cellar is recognized by its path and left to Homebrew. The
   server is upgraded by the installer, on the server: it needs Docker there,
   which the CLI does not have.
 - **`server install` runs your `ssh`** as a program with arguments, never

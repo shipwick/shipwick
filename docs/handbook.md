@@ -280,19 +280,17 @@ a file of every release) and run it with `-Version` and `-Destination`.
 Running it again upgrades, as does `shipwick upgrade`. On every push to
 `main`, CI builds the CLI and the agent on Windows on Arm, starts them, runs
 the unit tests there and runs this installer, which has to pick the Arm64
-build of the latest release. `winget install Shipwick.Shipwick` follows once
-the package is accepted into winget-pkgs; every release submits its manifests
-there.
+build of the latest release.
 
 **Upgrading.** The server is upgraded by running the installer again, on the
 server: it needs Docker there, which the CLI does not have. The CLI upgrades
 itself with `shipwick upgrade`: it fetches the latest release, verifies it
 against the release's checksums — and the checksums against the release's
 signature, where cosign is installed — and swaps the binary in place; a binary that
-came from Homebrew or winget is left to them, and the command prints the
-`brew upgrade` or `winget upgrade` line instead. Upgrading the server
-restarts the agent; applications keep running, and a deployment that is under
-way at that moment [continues afterwards](#7-deployment). Either way it then compares
+came from Homebrew is left to it, and the command prints the `brew upgrade`
+line instead. Upgrading the server restarts the agent; applications keep
+running, and a deployment that is under way at that moment
+[continues afterwards](#7-deployment). Either way it then compares
 the server's version and tells you when the server is behind. `--check` only
 reports. `shipwick upgrade --version v0.9.0-rc.1` installs exactly that
 release, a pre-release included, in place of whatever runs now — the way to

@@ -256,7 +256,6 @@ func TestUpgradeLeavesPackageManagersAlone(t *testing.T) {
 	tests := []struct{ exe, want string }{
 		{"/opt/homebrew/Cellar/shipwick/0.2.0/bin/shipwick", "brew upgrade shipwick"},
 		{"/home/linuxbrew/.linuxbrew/Cellar/shipwick/0.2.0/bin/shipwick", "brew upgrade shipwick"},
-		{`C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Shipwick.Shipwick_x\shipwick.exe`, "winget upgrade Shipwick.Shipwick"},
 	}
 	for _, tt := range tests {
 		g := newFakeGitHub(t)
@@ -279,8 +278,7 @@ func TestInstallMethod(t *testing.T) {
 		{"/opt/homebrew/Cellar/shipwick/0.2.0/bin/shipwick", "brew"},
 		{"/usr/local/Cellar/shipwick/0.2.0/bin/shipwick", "brew"},
 		{"/home/linuxbrew/.linuxbrew/Cellar/shipwick/0.2.0/bin/shipwick", "brew"},
-		{`C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Shipwick.Shipwick_8wekyb3d8bbwe\shipwick.exe`, "winget"},
-		{`C:\Program Files\WinGet\Packages\Shipwick.Shipwick\shipwick.exe`, "winget"},
+		{`C:\Users\me\AppData\Local\Programs\shipwick\shipwick.exe`, ""},
 	}
 	for _, tt := range tests {
 		if got := installMethod(tt.exe); got != tt.want {
