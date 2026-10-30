@@ -222,8 +222,8 @@ jobs:
       - name: The digests of the images join the release's files
         run: |
           cat digests/image-digests-agent.txt digests/image-digests-caddy.txt digests/image-digests-dashboard.txt > dist/image-digests.txt
-          test "$(grep -c '^ghcr.io/shipwick/[a-z]* index sha256:' dist/image-digests.txt)" -eq 3
-          test "$(grep -c '^ghcr.io/shipwick/[a-z]* config sha256:' dist/image-digests.txt)" -eq 6
+          test "$(grep -c '^ghcr.io/shipwick/[a-z]*:[^ ]* index sha256:' dist/image-digests.txt)" -eq 3
+          test "$(grep -c '^ghcr.io/shipwick/[a-z]*:[^ ]* config sha256:' dist/image-digests.txt)" -eq 6
           proxy="$(sed -n 's/.*{SHIPWICK_SOCKET_PROXY_IMAGE:-\([^}]*\)}.*/\1/p' dist/compose.production.yml)"
           test -n "$proxy"
           sh scripts/image-digests.sh "$proxy" >> dist/image-digests.txt
